@@ -1,0 +1,43 @@
+[
+  {
+    "sample_id": "conv-tiny-a",
+    "conversation": {
+      "speaker_a": "Alice",
+      "speaker_b": "Bob",
+      "session_1": [
+        {"speaker": "Alice", "dia_id": "A1:1", "text": "Hi Bob! I started a new job at Acme as a junior analyst."},
+        {"speaker": "Bob", "dia_id": "A1:2", "text": "Congrats! I live in Boston now, moved for the coffee scene."}
+      ],
+      "session_1_date_time": "1:56 pm on 8 May, 2023",
+      "session_2": [
+        {"speaker": "Alice", "dia_id": "A2:1", "text": "Big news: I got promoted to senior analyst at Acme!"},
+        {"speaker": "Bob", "dia_id": "A2:2", "text": "I moved to Seattle last week for a new role."}
+      ],
+      "session_2_date_time": "10:15 am on 21 June, 2023"
+    },
+    "qa": [
+      {"question": "What role did Alice start with at Acme?", "answer": "junior analyst", "evidence": ["A1:1"], "category": 4},
+      {"question": "When did Bob move to Seattle?", "answer": "last week of June 2023", "evidence": ["A2:2"], "category": 2}
+    ]
+  },
+  {
+    "sample_id": "conv-tiny-b",
+    "conversation": {
+      "speaker_a": "Carol",
+      "speaker_b": "Dave",
+      "session_1": [
+        {"speaker": "Carol", "dia_id": "B1:1", "text": "I adopted a golden retriever named Rex this morning."},
+        {"speaker": "Dave", "dia_id": "B1:2", "text": "Nice! I just bought a road bike for my commute in Denver."}
+      ],
+      "session_1_date_time": "9:00 am on 3 March, 2024",
+      "session_2": [
+        {"speaker": "Carol", "dia_id": "B2:1", "text": "Rex already learned to sit and shake."}
+      ],
+      "session_2_date_time": "6:20 pm on 12 April, 2024"
+    },
+    "qa": [
+      {"question": "What pet did Carol adopt?", "answer": "a golden retriever named Rex", "evidence": ["B1:1"], "category": 4},
+      {"question": "What did Dave buy for his commute?", "answer": "a road bike", "evidence": ["B1:2"], "category": 4}
+    ]
+  }
+]

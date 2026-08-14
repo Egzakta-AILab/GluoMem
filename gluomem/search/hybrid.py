@@ -1,0 +1,474 @@
+"""gluomem.search.hybrid — HybridSearch.
+
+Ties the BM25 (FTS5) and vector (chunk-level KNN with whole-frame fallback)
+lanes together with:
+
+- **RRF fusion** — ``rrf[id] += 1/(rrf_k + rank)`` per lane (``rrf_k`` from
+  config, default 60).
+- **event_time range filter** — frames are filtered by ``event_time`` (DISTINCT
+  from ``created_at``) when ``since``/``until`` are supplied. The decay anchor
+  stays ``created_at``; only the range filter anchors on ``event_time``.
+- **relevance multiplier** — ``final = rrf * relevance`` where ``relevance`` is
+  the active profile's weighted sum of temporal/popularity/contextual/importance
+  (:mod:`gluomem.search.scoring`). Every constant comes from
+  ``AppConfig``; each signal is independently zeroable via a profile weight of 0.
+- **lane fetch** — ``lane_fetch = limit*lane_fetch_mult`` normally, but
+  ``limit*lane_fetch_time_mult`` when a since/until time filter is set. The
+  effective ``lane_fetch`` is EXPOSED on the result so it is observable.
+- **rerank pool** — when ``search.rerank.enabled`` and a reranker is configured,
+  the top ``rerank.pool`` hits are re-scored by the cross-encoder and each
+  pooled hit's ``final`` is REPLACED by the logit; the pool is then re-sorted by
+  logit descending.
+- **abstain gate** — when ``search.abstain.enabled`` and the top ``final`` is
+  below ``abstain.threshold`` (or there are no hits), an abstained result (empty
+  hits + ``abstained=True``) is returned instead of ranked frames.
+
+When no ``KnowledgeGraph`` is wired, the contextual distance defaults to the
+no-link value (distance beyond ``bfs_depth`` -> ``contextual == 0.0``).
+
+Every constant flows from the passed ``AppConfig`` — no literals beyond the
+documented RRF / scoring formula shape. Deterministic and offline: tests use
+the ``MockEmbedder`` and a stub reranker (no network, no model downloads).
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from gluomem.config.app_config import AppConfig, ProfileWeights
+from gluomem.embedding.base import Embedder
+from gluomem.embedding.providers import MockEmbedder
+from gluomem.embedding.reranker import Reranker
+from gluomem.frames.store import Frame, FrameStore
+from gluomem.kg.graph import KnowledgeGraph
+from gluomem.search.sanitize import sanitize
+from gluomem.search.scoring import relevance
+from gluomem.storage.db import MindDB
+from gluomem.storage.sqlite_vec import SqliteVecStore
+
+__all__ = ["HybridSearch", "SearchHit", "SearchResult"]
+
+
+# ---------------------------------------------------------------------------
+# Result types.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SearchHit:
+    """A single ranked search hit.
+
+    ``rrf`` and ``relevance`` are the pre-rerank fusion / personalization
+    scores; ``final`` is the displayed score — ``rrf * relevance`` before
+    rerank, or the cross-encoder logit after rerank for pooled hits.
+    """
+
+    frame: Frame
+    rrf: float
+    relevance: float
+    final: float
+    rank: int = 0
+
+
+@dataclass
+class SearchResult:
+    """The outcome of a :meth:`HybridSearch.search` call.
+
+    ``abstained`` is True when the abstain gate fired (insufficient top score);
+    in that case ``hits`` is empty. ``lane_fetch`` is the effective per-lane
+    fetch used (exposed for observability).
+    ``kg_lane_errors`` counts KG contextual-lane failures observed during the
+    search: a normal run leaves it at 0; a KG-lane exception increments it
+    (distinguishable from a legitimate zero-contextual result) and the lane
+    degrades to no-contextual. NEVER a silent zero.
+    """
+
+    hits: list[SearchHit] = field(default_factory=list)
+    abstained: bool = False
+    lane_fetch: int = 0
+    profile: str = "balanced"
+    kg_lane_errors: int = 0
+
+
+# ---------------------------------------------------------------------------
+# HybridSearch.
+# ---------------------------------------------------------------------------
+
+
+class HybridSearch:
+    """Config-driven hybrid BM25 + vector search with RRF, relevance, rerank,
+    and a wired abstain gate.
+
+    Parameters
+    ----------
+    db:
+        An open ``MindDB`` (WAL, FK, sqlite-vec loaded, schema applied). The
+        search reuses its connection for FTS / vec / frame reads.
+    store:
+        The ``FrameStore`` over ``db``; used to load typed frames by id.
+    cfg:
+        The ``AppConfig`` carrying every search/scoring constant (rrf_k,
+        lane_fetch multipliers, rerank pool, abstain threshold, scoring
+        profile weights, …). Nothing is hardcoded.
+    embedder:
+        The embedder used to embed the query for the vector lane. Defaults to
+        a deterministic ``MockEmbedder`` at ``db.dim`` so the search is usable
+        offline with no explicit embedder.
+    reranker:
+        Optional cross-encoder reranker. Used only when
+        ``cfg.search.rerank.enabled`` is True. When ``None`` the rerank step is
+        skipped even if enabled (no reranker to score with).
+    kg:
+        Optional ``KnowledgeGraph`` providing the contextual KG signal. When
+        wired, the search computes ``kg.contextual(query, ...)`` and feeds
+        each candidate frame's BFS distance into ``scoring.contextual``. The
+        lane is wrapped: a KG exception is RECORDED on
+        ``SearchResult.kg_lane_errors`` (never a silent zero) and the lane
+        degrades to no-contextual. When ``None`` the contextual signal is
+        simply absent (distance beyond ``bfs_depth`` -> 0.0).
+    """
+
+    def __init__(
+        self,
+        db: MindDB,
+        store: FrameStore,
+        cfg: AppConfig,
+        *,
+        embedder: Embedder | None = None,
+        reranker: Reranker | None = None,
+        kg: KnowledgeGraph | None = None,
+    ) -> None:
+        self._db: MindDB = db
+        self._conn: sqlite3.Connection = db.conn
+        self._store: FrameStore = store
+        self._cfg: AppConfig = cfg
+        self._embedder: Embedder = embedder or MockEmbedder(dim=db.dim)
+        self._reranker: Reranker | None = reranker
+        self._kg: KnowledgeGraph | None = kg
+        self._frames_vec: SqliteVecStore = SqliteVecStore(
+            db.conn, table="memory_frames_vec", dim=db.dim
+        )
+        self._chunks_vec: SqliteVecStore = SqliteVecStore(
+            db.conn, table="memory_frame_chunks_vec", dim=db.dim
+        )
+
+    # --- public API --------------------------------------------------------
+
+    def search(
+        self,
+        query: str,
+        *,
+        profile: str | None = None,
+        limit: int = 10,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> SearchResult:
+        """Run a hybrid BM25 + vector search and return a :class:`SearchResult`.
+
+        Parameters
+        ----------
+        query:
+            The user query. Sanitized for the FTS5 MATCH path (token-preserving,
+            LIKE fallback when the sanitizer signals it).
+        profile:
+            The scoring profile name (e.g. ``"balanced"``). Defaults to
+            ``cfg.search.default_profile``.
+        limit:
+            Maximum number of hits to return.
+        since, until:
+            Optional ``event_time`` range bounds (ISO ``YYYY-MM-DD`` or
+            ``YYYY-MM-DDTHH:MM:SS``). When either is set, the per-lane fetch
+            uses ``lane_fetch_time_mult`` (10×) instead of ``lane_fetch_mult``
+            (2×), and frames whose ``event_time`` falls outside the range are
+            filtered out. The decay anchor stays ``created_at``; only the range
+            filter anchors on ``event_time``.
+        """
+        cfg = self._cfg
+        prof_name = profile or cfg.search.default_profile
+        weights = cfg.scoring.profiles[prof_name].weights
+
+        # (1) Effective per-lane fetch: limit*mult, or limit*time_mult when a
+        # time filter is set. Exposed on the result so it is observable.
+        time_filter = since is not None or until is not None
+        mult = (
+            cfg.search.lane_fetch_time_mult
+            if time_filter
+            else cfg.search.lane_fetch_mult
+        )
+        lane_fetch = max(1, limit) * int(mult)
+
+        # (2) FTS / BM25 lane: sanitize then FTS5 MATCH (LIKE fallback).
+        fts_ids = self._fts_lane(query, lane_fetch)
+        # (3) Vector lane: embed the query, chunk-level KNN primary, whole-frame
+        # KNN fallback.
+        vec_ids = self._vec_lane(query, lane_fetch)
+
+        # (4) RRF fusion: rrf[id] += 1/(rrf_k + rank) per lane.
+        rrf_k = int(cfg.search.rrf_k)
+        rrf: dict[int, float] = {}
+        for rank, fid in enumerate(fts_ids):
+            rrf[fid] = rrf.get(fid, 0.0) + 1.0 / (rrf_k + rank)
+        for rank, fid in enumerate(vec_ids):
+            rrf[fid] = rrf.get(fid, 0.0) + 1.0 / (rrf_k + rank)
+
+        # (5) KG contextual signal: map each candidate frame to its minimum BFS
+        # distance from the query. The lane is WRAPPED — a KG exception is
+        # RECORDED on the observable error counter (never a silent zero) and
+        # the lane degrades to no-contextual (distance beyond bfs_depth).
+        # A clean run (KG present, contextual succeeds) leaves the counter 0;
+        # when no KG is wired the counter stays 0 and the signal is absent.
+        kg_lane_errors = 0
+        ctx_map: dict[int, int] = {}
+        if self._kg is not None:
+            try:
+                ctx_map = self._kg.contextual(
+                    query, cfg.kg, depth=cfg.scoring.bfs_depth
+                )
+            except Exception:
+                # Record the KG-lane failure on the observable counter and
+                # degrade to no-contextual — NEVER a silent zero
+                # indistinguishable from a legitimate zero-contextual result.
+                kg_lane_errors += 1
+                ctx_map = {}
+        # Frames absent from the contextual map are "beyond depth" -> contextual 0.0.
+        beyond_depth = cfg.scoring.bfs_depth + 1
+
+        # (6) Load frames and apply the event_time since/until range filter.
+        hits: list[SearchHit] = []
+        for fid, rrf_score in rrf.items():
+            try:
+                frame = self._store.get_frame(fid)
+            except KeyError:
+                # Stale id (frame deleted since indexing). Skip it.
+                continue
+            if not _event_time_in_range(frame.event_time, since, until):
+                continue
+            # (7) relevance with the active profile's weights. The contextual
+            # distance comes from the KG map; unlinked/unreached frames fall
+            # back to "beyond depth" -> contextual 0.0.
+            bfs_distance = ctx_map.get(fid, beyond_depth)
+            rel = relevance(
+                days_since_created=_days_since_created(frame.created_at),
+                access_count=frame.access_count,
+                bfs_distance=bfs_distance,
+                importance_level=frame.importance,
+                scoring=cfg.scoring,
+                weights=weights,
+            )
+            # (8) final = rrf * relevance.
+            hits.append(
+                SearchHit(
+                    frame=frame, rrf=rrf_score, relevance=rel, final=rrf_score * rel
+                )
+            )
+
+        # Sort by final descending (stable on equal finals by frame id).
+        hits.sort(key=lambda h: (h.final, -h.frame.id), reverse=True)
+
+        # (9) Rerank pool: replace the top pool's scores with cross-encoder
+        # logits and re-sort the pool by logit.
+        if cfg.search.rerank.enabled and self._reranker is not None and hits:
+            hits = self._rerank_pool(query, hits, weights)
+
+        # Assign ranks (post-sort).
+        for i, h in enumerate(hits):
+            h.rank = i
+
+        # (10) Abstain gate: if enabled and the top final is below the threshold
+        # (or there are no hits), return an abstained result with empty hits.
+        # NOTE on scale: when ``search.rerank.enabled`` is true, step (9) has
+        # REPLACED ``hits[0].final`` with the cross-encoder logit — a different
+        # scale than ``rrf * relevance``. ``abstain.threshold`` (default 0.0) is
+        # calibrated for the rrf*relevance scale, so under rerank it changes
+        # meaning; combining rerank + abstain may need a separately-calibrated
+        # threshold.
+        abstain = cfg.search.abstain
+        abstained = False
+        if abstain.enabled:
+            if not hits or hits[0].final < abstain.threshold:
+                abstained = True
+                hits = []
+
+        # Truncate to the requested limit (after abstain so an abstained result
+        # stays empty).
+        if not abstained:
+            hits = hits[: max(0, limit)]
+
+        return SearchResult(
+            hits=hits,
+            abstained=abstained,
+            lane_fetch=lane_fetch,
+            profile=prof_name,
+            kg_lane_errors=kg_lane_errors,
+        )
+
+    # --- lanes --------------------------------------------------------------
+
+    def _fts_lane(self, query: str, lane_fetch: int) -> list[int]:
+        """BM25 lane: sanitize the query, FTS5 MATCH (LIKE fallback)."""
+        sanitized = sanitize(query)
+        if not sanitized:
+            # LIKE fallback for empty / too-short / no-usable-token queries.
+            # LIKE metacharacters in the raw query are escaped so e.g. '%'
+            # matches frames containing a literal '%', not every frame.
+            escaped = (
+                query.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+            )
+            cur = self._conn.execute(
+                "SELECT id FROM memory_frames WHERE content LIKE ? ESCAPE '\\' "
+                "ORDER BY id ASC LIMIT ?",
+                (f"%{escaped}%", int(lane_fetch)),
+            )
+            return [int(r[0]) for r in cur.fetchall()]
+        cur = self._conn.execute(
+            "SELECT rowid FROM memory_frames_fts WHERE memory_frames_fts MATCH ? "
+            "ORDER BY rank LIMIT ?",
+            (sanitized, int(lane_fetch)),
+        )
+        return [int(r[0]) for r in cur.fetchall()]
+
+    def _vec_lane(self, query: str, lane_fetch: int) -> list[int]:
+        """Vector lane: chunk-level KNN primary, whole-frame KNN fallback.
+
+        Returns the deduplicated frame-id ranking (a frame appears once, at its
+        best chunk distance).
+        """
+        qvec = self._embedder.embed(query)
+        # Primary: chunk-level KNN. Map chunk rowids back to frame ids, keeping
+        # the first (nearest) occurrence of each frame.
+        chunk_hits = self._chunks_vec.search(qvec, int(lane_fetch))
+        if chunk_hits:
+            ids: list[int] = []
+            seen: set[int] = set()
+            for chunk_rowid, _dist in chunk_hits:
+                row = self._conn.execute(
+                    "SELECT frame_id FROM memory_frame_chunks WHERE id=?",
+                    (int(chunk_rowid),),
+                ).fetchone()
+                if row is None:
+                    continue
+                fid = int(row[0])
+                if fid not in seen:
+                    seen.add(fid)
+                    ids.append(fid)
+            if ids:
+                return ids
+        # Fallback: whole-frame KNN.
+        frame_hits = self._frames_vec.search(qvec, int(lane_fetch))
+        return [int(fid) for fid, _dist in frame_hits]
+
+    # --- rerank -------------------------------------------------------------
+
+    def _rerank_pool(
+        self,
+        query: str,
+        hits: list[SearchHit],
+        _weights: ProfileWeights,
+    ) -> list[SearchHit]:
+        """Rerank the top ``rerank.pool`` hits with the cross-encoder.
+
+        Each pooled hit's ``final`` is REPLACED by the cross-encoder logit; the
+        pool is then re-sorted by logit descending. Hits beyond the pool keep
+        their ``rrf * relevance`` final and order.
+        """
+        pool_size = int(self._cfg.search.rerank.pool)
+        if pool_size <= 0 or not hits:
+            return hits
+        pooled = hits[:pool_size]
+        rest = hits[pool_size:]
+
+        docs = [_indexable_text(h.frame) for h in pooled]
+        logits = self._reranker.score(query, docs) if self._reranker else []
+        for h, logit in zip(pooled, logits, strict=True):
+            h.final = float(logit)
+
+        # Re-sort the pool by logit descending (stable on equal logits).
+        pooled.sort(key=lambda h: (h.final, -h.frame.id), reverse=True)
+        return pooled + rest
+
+
+# ---------------------------------------------------------------------------
+# Helpers (pure).
+# ---------------------------------------------------------------------------
+
+
+def _indexable_text(frame: Frame) -> str:
+    """Return the human-readable text to rerank for a frame.
+
+    B-frames carry a JSON correction payload; the description is the
+    human-readable text (mirrors :meth:`FrameStore._indexable_text`).
+    """
+    if frame.frame_type == "B":
+        import json
+
+        try:
+            payload = json.loads(frame.content)
+            return str(payload.get("description", frame.content))
+        except (json.JSONDecodeError, TypeError):
+            return frame.content
+    return frame.content
+
+
+def _days_since_created(created_at: str) -> float:
+    """Days between ``created_at`` (ingest time) and now.
+
+    ``created_at`` is the SQLite ``datetime('now')`` format
+    ``"YYYY-MM-DD HH:MM:SS"``. Returns a non-negative float (clamped at 0 for
+    clock skew). Pure except for reading the wall clock.
+    """
+    dt = _parse_iso_like(created_at)
+    now = datetime.now()
+    delta = (now - dt).total_seconds() / 86400.0
+    return max(0.0, delta)
+
+
+def _event_time_in_range(
+    event_time: str | None, since: str | None, until: str | None
+) -> bool:
+    """True when ``event_time`` falls within the ``[since, until]`` range.
+
+    A frame with no ``event_time`` is excluded ONLY when a range is set (it
+    carries no world-time to test). ``since``/``until`` are inclusive bounds
+    compared as ISO-8601 strings (lexicographic order == chronological order
+    for equal-format ISO datetimes). When neither bound is set, every frame
+    passes.
+    """
+    if since is None and until is None:
+        return True
+    if event_time is None:
+        return False
+    et = _normalize_iso(event_time)
+    if since is not None and et < _normalize_iso(since):
+        return False
+    if until is not None and et > _normalize_iso(until):
+        return False
+    return True
+
+
+def _parse_iso_like(value: str) -> datetime:
+    """Parse an SQLite/ISO datetime string into a :class:`datetime`.
+
+    Accepts ``"YYYY-MM-DD HH:MM:SS"`` (SQLite ``datetime('now')``), full ISO
+    ``"YYYY-MM-DDTHH:MM:SS"``, and a bare date ``"YYYY-MM-DD"`` (midnight).
+    """
+    s = value.strip()
+    if len(s) == 10 and s[4] == "-":
+        s = s + "T00:00:00"
+    # datetime.fromisoformat (3.11+) accepts the space-separated form directly.
+    return datetime.fromisoformat(s)
+
+
+def _normalize_iso(value: str) -> str:
+    """Normalize an ISO-ish datetime/date to a fixed-width comparable string.
+
+    A bare date ``"YYYY-MM-DD"`` is padded to ``"YYYY-MM-DDT00:00:00"`` so it
+    compares lexicographically against full datetimes on equal footing.
+    """
+    s = value.strip()
+    if len(s) == 10 and s[4] == "-":
+        return s + "T00:00:00"
+    if " " in s and "T" not in s:
+        return s.replace(" ", "T")
+    return s

@@ -1,0 +1,44 @@
+# Python / venv
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets (API keys; template in .env.example)
+.env
+
+# Test / coverage caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mneme mind files (local SQLite stores)
+*.mind
+*.mind-shm
+*.mind-wal
+
+# Frozen-extraction cache transcripts + provenance sidecars (heavy, local;
+# the run manifest records the cache sha, not the payload). Named distinctly so
+# it never collides with committed run-dir *.jsonl (predictions/judgments).
+*extraction_cache*.jsonl
+extraction_cache.sha256
+
+# Benchmark dataset payloads: SHA-pinned in config, fetched on demand
+# (`mneme bench fetch`); only sample manifests are committed.
+benchmarks_data/locomo10.json
+benchmarks_data/longmemeval_oracle.json
+benchmarks_data/longmemeval_s_cleaned.json
+
+# Binary artifacts (committed artifacts keep other extensions; *.bin ignored)
+artifacts/*.bin
+
+# Build / dist
+dist/
+build/
+
+# OS noise
+.DS_Store
+
+# Per-session benchmark stores (heavy, regenerable; run seals live in
+# experiments/<timestamp>_*/ which stay committed)
+experiments/lme_s_dbs/
+experiments/lme_s_mem0/

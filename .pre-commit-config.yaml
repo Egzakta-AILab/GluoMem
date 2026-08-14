@@ -1,0 +1,37 @@
+# Gate mirrors `make check` (lint + typecheck at commit; tests at push).
+# Data dirs excluded: sealed run records and pinned artifacts must never be
+# auto-fixed by hygiene hooks.
+exclude: '^(experiments/|artifacts/|benchmarks_data/)'
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: check-added-large-files
+        exclude: '^uv\.lock$'
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check
+        entry: uv run ruff check --force-exclude --fix
+        language: system
+        types: [python]
+        require_serial: true
+      - id: pyrefly
+        name: pyrefly check
+        entry: uv run pyrefly check
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: pytest
+        name: pytest (pre-push)
+        entry: uv run pytest -q
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

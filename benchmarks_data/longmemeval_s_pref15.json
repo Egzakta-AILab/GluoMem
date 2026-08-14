@@ -1,0 +1,30 @@
+{
+ "dataset": "longmemeval_s",
+ "dataset_sha": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+ "seed": 42,
+ "per_category": 15,
+ "categories": [
+  3
+ ],
+ "counts": {
+  "3": 15
+ },
+ "ids": [
+  "0edc2aef",
+  "32260d93",
+  "afdc33df",
+  "38146c39",
+  "d24813b1",
+  "57f827a0",
+  "95228167",
+  "505af2f5",
+  "75f70248",
+  "fca70973",
+  "b6025781",
+  "b0479f84",
+  "07b6f563",
+  "1c0ddc50",
+  "0a34ad58"
+ ],
+ "note": "category-3 (single-session-preference) subset of benchmarks_data/longmemeval_s_sample_seed42.json for the answer-style A/B"
+}
