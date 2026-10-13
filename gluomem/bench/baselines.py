@@ -57,9 +57,14 @@ def _turn_docs(conv: Conversation) -> list[tuple[str, str, str]]:
 
 
 class FullContextRetriever:
-    """No memory system at all: the (truncated) transcript is the context."""
+    """No memory system at all: the (truncated) transcript is the context.
+
+    ``retrieves = False``: retrieval metrics do not apply, and the runner
+    reports its samples under ``retrieval.not_applicable``.
+    """
 
     name = "full_context"
+    retrieves = False
 
     def __init__(
         self,

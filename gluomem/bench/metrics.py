@@ -11,9 +11,18 @@ rows, so the live run and the offline reproduction cannot diverge.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
 
-from gluomem.bench.types import JudgeRecord, Prediction, ProtocolTag, Sample, Score
+from gluomem.bench.types import (
+    UNREGISTERED,
+    JudgeRecord,
+    Prediction,
+    ProtocolTag,
+    Sample,
+    Score,
+)
 
 
 class IncompatibleMetricsError(ValueError):
@@ -30,7 +39,8 @@ class MetricRegistry:
         tags = {s.tag for s in items}
         if len(tags) > 1:
             fams = sorted(
-                f"{t.metric_family}/{t.judge_family}/{t.backbone}/{t.dataset_sha[:8]}"
+                f"{t.protocol}/{t.metric_family}/{t.judge_family}/{t.backbone}/"
+                f"{t.dataset_sha[:8]}"
                 for t in tags
             )
             raise IncompatibleMetricsError(
@@ -42,18 +52,44 @@ class MetricRegistry:
         return Score(value=value, tag=items[0].tag, n=total_n)
 
 
-def _objective_tag(metric_family: str, dataset_sha: str) -> ProtocolTag:
+def objective_tag(
+    metric_family: str, dataset_sha: str, protocol: str = UNREGISTERED
+) -> ProtocolTag:
     return ProtocolTag(
         metric_family=metric_family,
         judge_family="none",
         judge_count=0,
         backbone="none",
         dataset_sha=dataset_sha,
+        protocol=protocol,
     )
 
 
+NO_EVIDENCE_GOLD = "no_evidence_gold"
+RETRIEVER_WITHOUT_RETRIEVAL = "retriever_without_retrieval"
+
+
+def retrieval_not_applicable(s: Sample, *, retrieves: bool) -> str | None:
+    """Why retrieval metrics do not apply to ``s``, or None when they do.
+
+    Only two reasons qualify: the sample has no evidence gold (e.g. an
+    abstention question), or the retriever never retrieves (full context).
+    An empty result from a retrieving system is a failure, not a reason.
+    """
+    if not retrieves:
+        return RETRIEVER_WITHOUT_RETRIEVAL
+    if not s.evidence:
+        return NO_EVIDENCE_GOLD
+    return None
+
+
 def retrieval_scores(
-    p: Prediction, s: Sample, *, ks: Sequence[int], dataset_sha: str
+    p: Prediction,
+    s: Sample,
+    *,
+    ks: Sequence[int],
+    dataset_sha: str,
+    protocol: str = UNREGISTERED,
 ) -> list[Score]:
     """Objective retrieval diagnostics against the sample's evidence dia_ids.
 
@@ -61,10 +97,12 @@ def retrieval_scores(
     evidence_recall@k = |top-k dia_ids ∩ evidence| / |evidence|
     evidence_hit@k    = 1.0 if any evidence dia_id in top-k else 0.0
 
-    Empty ``p.retrieved`` (full-context baseline, abstention) produces no
-    scores — absence is visible in the report, never a silent zero.
+    An answerable sample (non-empty evidence) always scores: empty
+    ``p.retrieved`` (no hits, abstention, answer failure) contributes zero.
+    A sample without evidence gold returns no scores; callers count it under
+    ``retrieval_not_applicable`` instead.
     """
-    if not p.retrieved or not s.evidence:
+    if not s.evidence:
         return []
     gold = set(s.evidence)
     out: list[Score] = []
@@ -75,17 +113,17 @@ def retrieval_scores(
             (
                 Score(
                     value=inter / k,
-                    tag=_objective_tag(f"precision@{k}", dataset_sha),
+                    tag=objective_tag(f"precision@{k}", dataset_sha, protocol),
                     n=1,
                 ),
                 Score(
                     value=inter / len(gold),
-                    tag=_objective_tag(f"evidence_recall@{k}", dataset_sha),
+                    tag=objective_tag(f"evidence_recall@{k}", dataset_sha, protocol),
                     n=1,
                 ),
                 Score(
                     value=1.0 if inter else 0.0,
-                    tag=_objective_tag(f"evidence_hit@{k}", dataset_sha),
+                    tag=objective_tag(f"evidence_hit@{k}", dataset_sha, protocol),
                     n=1,
                 ),
             )
@@ -94,7 +132,12 @@ def retrieval_scores(
 
 
 def qa_scores_from_records(
-    records: Sequence[JudgeRecord], *, backbones: Sequence[str], dataset_sha: str
+    records: Sequence[JudgeRecord],
+    *,
+    backbones: Sequence[str],
+    dataset_sha: str,
+    sample_ids: Iterable[str] = (),
+    protocol: str = UNREGISTERED,
 ) -> tuple[dict[str, Score], dict[str, dict[str, Score]]]:
     """(trio per-sample scores, per-backbone single per-sample scores),
     both keyed by sample_id (sorted) for category splits.
@@ -102,11 +145,13 @@ def qa_scores_from_records(
     Trio-strict: a sample is correct iff EVERY backbone's record says
     correct. A sample missing any backbone's record is scored incorrect
     (parse/API failure counts against, denominator unchanged — matches the
-    hive-mind protocol). Singles come from the same rows, giving the
+    hive-mind protocol). ``sample_ids`` names the full denominator, so a
+    sample whose every verdict failed still scores zero instead of
+    vanishing. Singles come from the same rows, giving the
     self-judge-inflation measurement for free.
     """
     expected = sorted(backbones)
-    by_sample: dict[str, dict[str, JudgeRecord]] = {}
+    by_sample: dict[str, dict[str, JudgeRecord]] = {sid: {} for sid in sample_ids}
     for rec in records:
         by_sample.setdefault(rec.sample_id, {})[rec.backbone] = rec
 
@@ -116,6 +161,7 @@ def qa_scores_from_records(
         judge_count=len(expected),
         backbone="+".join(expected),
         dataset_sha=dataset_sha,
+        protocol=protocol,
     )
     single_tags = {
         b: ProtocolTag(
@@ -124,6 +170,7 @@ def qa_scores_from_records(
             judge_count=1,
             backbone=b,
             dataset_sha=dataset_sha,
+            protocol=protocol,
         )
         for b in expected
     }
@@ -158,10 +205,79 @@ def by_category(
     return {name: registry.aggregate(group) for name, group in buckets.items()}
 
 
+def compute_denominators(
+    predictions: Mapping[str, Prediction],
+    records: Sequence[JudgeRecord],
+    samples: Mapping[str, Sample],
+    *,
+    backbones: Sequence[str],
+    retrieves: bool,
+    excluded: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
+    """Every count behind the headline numbers, so none is implicit.
+
+    ``predictions`` partitions into answered, abstained (by reason) and failed
+    (by kind); each failed or abstained sample still sits in the QA and
+    retrieval denominators. ``excluded`` counts rows the adapter removed from
+    the sampling pool before any prediction.
+    """
+    failed: Counter[str] = Counter()
+    abstained: Counter[str] = Counter()
+    answered = 0
+    for p in predictions.values():
+        if p.failure is not None:
+            failed[p.failure] += 1
+        elif p.abstained:
+            reason = (p.abstention or {}).get("reason", "unspecified")
+            abstained[str(reason)] += 1
+        else:
+            answered += 1
+
+    have = Counter(rec.backbone for rec in records)
+    n = len(predictions)
+    missing = {b: n - have.get(b, 0) for b in sorted(backbones)}
+
+    not_applicable: Counter[str] = Counter()
+    scored = zero_retrieved = 0
+    for sid, p in predictions.items():
+        reason = retrieval_not_applicable(samples[sid], retrieves=retrieves)
+        if reason is not None:
+            not_applicable[reason] += 1
+            continue
+        scored += 1
+        if not p.retrieved:
+            zero_retrieved += 1
+
+    return {
+        "samples": n,
+        "excluded_from_pool": dict(sorted((excluded or {}).items())),
+        "predictions": {
+            "answered": answered,
+            "abstained": dict(sorted(abstained.items())),
+            "failed": dict(sorted(failed.items())),
+        },
+        "judge": {
+            "expected_records": n * len(backbones),
+            "records": len(records),
+            "missing_by_backbone": missing,
+        },
+        "retrieval": {
+            "scored": scored,
+            "scored_with_empty_retrieval": zero_retrieved,
+            "not_applicable": dict(sorted(not_applicable.items())),
+        },
+    }
+
+
 __all__ = [
+    "NO_EVIDENCE_GOLD",
+    "RETRIEVER_WITHOUT_RETRIEVAL",
     "IncompatibleMetricsError",
     "MetricRegistry",
     "by_category",
+    "compute_denominators",
+    "objective_tag",
     "qa_scores_from_records",
+    "retrieval_not_applicable",
     "retrieval_scores",
 ]

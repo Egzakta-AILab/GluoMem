@@ -238,6 +238,7 @@ def test_single_family_run_has_no_trio_entry(
             "judge_count": 1,
             "backbone": "haiku",
             "dataset_sha": e["tag"]["dataset_sha"],
+            "protocol": "adapted:locomo@v1",
         }
         for e in entries
     )
@@ -269,6 +270,68 @@ def test_answer_failure_degrades_not_aborts(
     manifest = json.loads(paths.manifest.read_text())
     assert manifest["failures"]["answer"] == [failed[0]["sample_id"]]
     assert "answer failed" in capsys.readouterr().err
+    assert failed[0]["failure"] == "error"
+    # The failed sample stays in the retrieval denominator as a zero.
+    denominators = json.loads(paths.denominators.read_text())
+    assert denominators["predictions"]["failed"] == {"error": 1}
+    assert denominators["retrieval"]["scored"] == 4
+    assert denominators["retrieval"]["scored_with_empty_retrieval"] >= 1
+    entries = json.loads(paths.scores.read_text())
+    hit = next(
+        e for e in entries
+        if e["scope"] == "overall" and e["tag"]["metric_family"] == "evidence_hit@5"
+    )
+    assert hit["n"] == 4
+
+
+def test_timeout_is_recorded_as_its_own_failure_kind(
+    run_cfg: AppConfig, tmp_path: Path
+) -> None:
+    from gluomem.llm.outputs import AnswerResult
+
+    def slow(question: str, context: str) -> AnswerResult:
+        if "career" in question:
+            raise TimeoutError("reader timed out")
+        return AnswerResult(text=context)
+
+    paths = _run(run_cfg, tmp_path, answer_fn=slow)
+    denominators = json.loads(paths.denominators.read_text())
+    assert denominators["predictions"]["failed"] == {"timeout": 1}
+    assert denominators["samples"] == 4
+    assert "timeout=1" in paths.report.read_text()
+
+
+def test_denominators_artifact_and_report_section(run_cfg: AppConfig, tmp_path: Path) -> None:
+    paths = _run(run_cfg, tmp_path)
+    d = json.loads(paths.denominators.read_text())
+    assert d["samples"] == 4
+    p = d["predictions"]
+    assert p["answered"] + sum(p["abstained"].values()) + sum(p["failed"].values()) == 4
+    assert d["judge"] == {
+        "expected_records": 12,
+        "records": 12,
+        "missing_by_backbone": {"gpt5-mini": 0, "haiku": 0, "qwen3": 0},
+    }
+    # LoCoMo category 5 and gold-less rows are counted, not silently dropped.
+    assert set(d["excluded_from_pool"]) == {"adversarial_category", "missing_gold"}
+    manifest = json.loads(paths.manifest.read_text())
+    assert manifest["excluded_from_pool"] == d["excluded_from_pool"]
+    assert "## Denominators" in paths.report.read_text()
+
+
+def test_full_context_reports_retrieval_as_not_applicable(
+    run_cfg: AppConfig, tmp_path: Path
+) -> None:
+    paths = _run(run_cfg, tmp_path, retriever="full_context")
+    d = json.loads(paths.denominators.read_text())
+    assert d["retrieval"] == {
+        "scored": 0,
+        "scored_with_empty_retrieval": 0,
+        "not_applicable": {"retriever_without_retrieval": 4},
+    }
+    entries = json.loads(paths.scores.read_text())
+    assert not any(e["tag"]["judge_family"] == "none" for e in entries)
+    assert json.loads(paths.manifest.read_text())["retrieves"] is False
 
 
 def test_judge_failure_scores_incorrect_not_abort(

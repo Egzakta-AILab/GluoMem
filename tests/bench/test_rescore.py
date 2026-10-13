@@ -56,6 +56,20 @@ def test_rescore_check_catches_tampered_scores(run_paths) -> None:
         rescore_run(run_paths.root, check=True)
 
 
+def test_rescore_regenerates_and_checks_denominators(run_paths) -> None:
+    committed = run_paths.denominators.read_bytes()
+    run_paths.denominators.unlink()
+    with pytest.raises(RescoreMismatchError, match="denominators"):
+        rescore_run(run_paths.root, check=True)
+    rescore_run(run_paths.root)
+    assert run_paths.denominators.read_bytes() == committed
+    d = json.loads(committed)
+    d["samples"] = 999
+    run_paths.denominators.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+    with pytest.raises(RescoreMismatchError, match="denominators"):
+        rescore_run(run_paths.root, check=True)
+
+
 def test_rescore_needs_no_dataset_file(run_paths, tmp_path: Path) -> None:
     """Run dirs are self-contained: rescore works with the dataset gone."""
     import shutil

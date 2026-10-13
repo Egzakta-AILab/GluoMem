@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from gluomem.bench.types import UNREGISTERED
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -33,19 +35,73 @@ context, not columns:
 """
 
 
-def _group_key(entry: dict[str, Any]) -> tuple[str, str, str]:
+def _group_key(entry: dict[str, Any]) -> tuple[str, str, str, str]:
     tag = entry["tag"]
-    return (tag["metric_family"], tag["judge_family"], tag["backbone"])
+    return (
+        tag.get("protocol", UNREGISTERED),
+        tag["metric_family"],
+        tag["judge_family"],
+        tag["backbone"],
+    )
+
+
+def _provenance_lines(manifest: dict[str, Any]) -> list[str]:
+    """Protocol, scorer and model hashes; absent on pre-registry manifests."""
+    lines: list[str] = []
+    bench = manifest.get("benchmark")
+    if bench:
+        lines.append(
+            f"- protocol: `{bench['protocol']}` (registry v{bench['registry_version']}, "
+            f"entry digest `{bench['digest'][:16]}`, official={bench['official']})"
+        )
+        lines.append(f"- split: {bench['generalization']}")
+        lines.append(f"- source ancestry: {', '.join(bench['source_ancestry'])}")
+    judge = manifest["judge"]
+    slugs = judge.get("model_slugs")
+    if slugs:
+        lines.append(
+            "- judge models: " + ", ".join(f"{b}=`{s}`" for b, s in sorted(slugs.items()))
+        )
+    if "prompt_sha" in judge:
+        lines.append(f"- judge prompt sha: `{judge['prompt_sha']}`")
+    return lines
+
+
+def _denominator_lines(denominators: dict[str, Any]) -> list[str]:
+    preds = denominators["predictions"]
+    judge = denominators["judge"]
+    retrieval = denominators["retrieval"]
+
+    def fmt(counts: dict[str, int]) -> str:
+        return ", ".join(f"{k}={v}" for k, v in counts.items()) or "none"
+
+    return [
+        "## Denominators",
+        "",
+        f"- samples: {denominators['samples']} "
+        f"(excluded from pool before sampling: {fmt(denominators['excluded_from_pool'])})",
+        f"- answered: {preds['answered']}; abstained: {fmt(preds['abstained'])}; "
+        f"failed: {fmt(preds['failed'])}",
+        f"- judge records: {judge['records']}/{judge['expected_records']} "
+        f"(missing: {fmt(judge['missing_by_backbone'])})",
+        f"- retrieval scored: {retrieval['scored']} "
+        f"(of which empty retrieval, scored zero: {retrieval['scored_with_empty_retrieval']}); "
+        f"not applicable: {fmt(retrieval['not_applicable'])}",
+        "",
+    ]
 
 
 def render_report(
-    entries: Sequence[dict[str, Any]], manifest: dict[str, Any]
+    entries: Sequence[dict[str, Any]],
+    manifest: dict[str, Any],
+    denominators: dict[str, Any] | None = None,
 ) -> str:
     """Markdown report: one table per protocol group, citations as prose."""
     lines: list[str] = [
         f"# bench report — {manifest['run_id']}",
         "",
         f"- dataset: {manifest['dataset']} (sha `{manifest['dataset_sha']}`)",
+        *_provenance_lines(manifest),
         f"- retriever: **{manifest['retriever']}**",
         (
             f"- answer: {manifest['answer']['model']} "
@@ -62,23 +118,26 @@ def render_report(
         f"- created: {manifest['created_at']} @ git {manifest['git_sha']}",
         "",
     ]
+    if denominators is not None:
+        lines.extend(_denominator_lines(denominators))
 
-    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     for entry in entries:
         groups.setdefault(_group_key(entry), []).append(entry)
 
-    for (metric_family, judge_family, backbone), group in sorted(groups.items()):
+    for key, group in sorted(groups.items()):
+        protocol, metric_family, judge_family, backbone = key
         # The acceptance invariant as code: a table renders exactly one
         # protocol group; anything else is a bug, not a formatting choice.
         mixed = {_group_key(e) for e in group}
-        if mixed != {(metric_family, judge_family, backbone)}:
+        if mixed != {key}:
             raise AssertionError(f"mixed protocol groups in one table: {mixed}")
         judge_desc = (
             "objective (no LLM judge)"
             if judge_family == "none"
             else f"{judge_family} ({backbone})"
         )
-        lines.append(f"## {metric_family} — {judge_desc}")
+        lines.append(f"## {metric_family} — {judge_desc} — `{protocol}`")
         lines.append("")
         lines.append("| scope | value | n |")
         lines.append("|---|---|---|")

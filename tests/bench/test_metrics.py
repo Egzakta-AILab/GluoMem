@@ -5,10 +5,14 @@ from __future__ import annotations
 import pytest
 
 from gluomem.bench.metrics import (
+    NO_EVIDENCE_GOLD,
+    RETRIEVER_WITHOUT_RETRIEVAL,
     IncompatibleMetricsError,
     MetricRegistry,
     by_category,
+    compute_denominators,
     qa_scores_from_records,
+    retrieval_not_applicable,
     retrieval_scores,
 )
 from gluomem.bench.types import (
@@ -155,16 +159,87 @@ def test_retrieval_scores_multiple_ks() -> None:
     assert by_family["evidence_hit@10"] == 1.0
 
 
-def test_retrieval_scores_empty_retrieved_or_evidence() -> None:
+def test_answerable_sample_with_empty_retrieval_scores_zero() -> None:
+    """No hits, abstention or a crashed answer: the sample stays in the
+    retrieval denominator and contributes zero to every family."""
     s = _sample(0)
-    assert retrieval_scores(
-        Prediction(sample_id=s.id, answer="a"), s, ks=[5], dataset_sha=SHA
-    ) == []
+    scores = retrieval_scores(
+        Prediction(sample_id=s.id, answer="a"), s, ks=[5, 10], dataset_sha=SHA
+    )
+    assert {sc.tag.metric_family for sc in scores} == {
+        "precision@5", "evidence_recall@5", "evidence_hit@5",
+        "precision@10", "evidence_recall@10", "evidence_hit@10",
+    }
+    assert all(sc.value == 0.0 and sc.n == 1 for sc in scores)
+
+
+def test_sample_without_evidence_gold_is_not_applicable() -> None:
     no_gold = _sample(1, evidence=())
     assert (
         retrieval_scores(_prediction(["D1:1"]), no_gold, ks=[5], dataset_sha=SHA)
         == []
     )
+    assert retrieval_not_applicable(no_gold, retrieves=True) == NO_EVIDENCE_GOLD
+    assert retrieval_not_applicable(_sample(0), retrieves=True) is None
+    assert (
+        retrieval_not_applicable(_sample(0), retrieves=False)
+        == RETRIEVER_WITHOUT_RETRIEVAL
+    )
+
+
+def test_native_and_adapted_protocols_never_aggregate() -> None:
+    native = _score(1.0, _tag(protocol="native:x@v1"))
+    adapted = _score(1.0, _tag(protocol="adapted:x@v1"))
+    with pytest.raises(IncompatibleMetricsError, match="adapted:x@v1"):
+        MetricRegistry().aggregate([native, adapted])
+
+
+def test_sample_with_no_verdicts_stays_in_trio_denominator() -> None:
+    """Every judge call for a sample failed: it scores zero, not absent."""
+    records = [_record("c1:qa:0", b, True) for b in BACKBONES]
+    trio, singles = qa_scores_from_records(
+        records,
+        backbones=BACKBONES,
+        dataset_sha=SHA,
+        sample_ids=["c1:qa:0", "c1:qa:1"],
+    )
+    assert MetricRegistry().aggregate(trio.values()).n == 2
+    assert trio["c1:qa:1"].value == 0.0
+    assert all(per["c1:qa:1"].value == 0.0 for per in singles.values())
+
+
+def test_denominators_partition_every_sample() -> None:
+    samples = {s.id: s for s in (_sample(0), _sample(1), _sample(2), _sample(3, evidence=()))}
+    predictions = {
+        "c1:qa:0": _prediction(["D1:1"]),
+        "c1:qa:1": Prediction(
+            sample_id="c1:qa:1", answer="x", abstained=True,
+            abstention={"reason": "no_hits"},
+        ),
+        "c1:qa:2": Prediction(sample_id="c1:qa:2", answer="", failure="timeout"),
+        "c1:qa:3": _prediction(["D1:1"]),
+    }
+    records = [_record("c1:qa:0", b, True) for b in BACKBONES]
+    d = compute_denominators(
+        predictions, records, samples, backbones=BACKBONES, retrieves=True,
+        excluded={"adversarial_category": 7},
+    )
+    assert d["samples"] == 4
+    assert d["excluded_from_pool"] == {"adversarial_category": 7}
+    assert d["predictions"] == {
+        "answered": 2, "abstained": {"no_hits": 1}, "failed": {"timeout": 1},
+    }
+    assert d["judge"]["expected_records"] == 12
+    assert d["judge"]["missing_by_backbone"] == {b: 3 for b in sorted(BACKBONES)}
+    assert d["retrieval"] == {
+        "scored": 3,
+        "scored_with_empty_retrieval": 2,
+        "not_applicable": {NO_EVIDENCE_GOLD: 1},
+    }
+    full_context = compute_denominators(
+        predictions, records, samples, backbones=BACKBONES, retrieves=False
+    )
+    assert full_context["retrieval"]["not_applicable"] == {RETRIEVER_WITHOUT_RETRIEVAL: 4}
 
 
 def test_retrieval_tags_are_objective() -> None:

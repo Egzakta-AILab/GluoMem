@@ -9,6 +9,9 @@ A run directory is self-contained for offline rescore: ``predictions.jsonl``
 embeds every sample field the metrics need (category, evidence, retrieved
 dia_ids) and ``judgments.jsonl`` holds the per-backbone JudgeRecords, so
 ``bench rescore`` needs neither the dataset file nor any model.
+``denominators.json`` records every count behind the scores (failures,
+abstentions, missing verdicts, retrieval not applicable, pool exclusions), and
+the manifest carries the registry entry the run was scored under.
 
 Artifact determinism: prediction and judgment rows are written in sample
 order regardless of ``benchmark.parallelism`` (thunks return their rows;
@@ -27,7 +30,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from gluomem.bench.adapters import make_adapter
 from gluomem.bench.adapters.locomo import (
@@ -43,12 +46,21 @@ from gluomem.bench.judge import SingleJudge, fake_judge_fn
 from gluomem.bench.metrics import (
     MetricRegistry,
     by_category,
+    compute_denominators,
     qa_scores_from_records,
+    retrieval_not_applicable,
     retrieval_scores,
+)
+from gluomem.bench.registry import (
+    get_entry,
+    manifest_record,
+    protocol_id,
+    require_runnable,
 )
 from gluomem.bench.report import render_report
 from gluomem.bench.retriever import GluoMemRetriever
 from gluomem.bench.types import (
+    UNREGISTERED,
     JudgeRecord,
     Prediction,
     RunPaths,
@@ -298,14 +310,25 @@ def compute_score_entries(
     judge_family: str,
     ks: list[int],
     dataset_sha: str,
+    protocol: str = UNREGISTERED,
+    retrieves: bool = True,
 ) -> list[dict[str, Any]]:
     """All scores.json entries — the SINGLE scoring path shared by runner and
-    rescore (identical inputs -> byte-identical output)."""
+    rescore (identical inputs -> byte-identical output).
+
+    Every prediction is in the QA denominator. Retrieval families cover every
+    sample where retrieval applies (``retrieval_not_applicable``), so an
+    answerable sample with nothing retrieved contributes zero.
+    """
     registry = MetricRegistry()
     entries: list[dict[str, Any]] = []
 
     trio, singles = qa_scores_from_records(
-        records, backbones=backbones, dataset_sha=dataset_sha
+        records,
+        backbones=backbones,
+        dataset_sha=dataset_sha,
+        sample_ids=predictions.keys(),
+        protocol=protocol,
     )
     if trio and judge_family == "trio_strict":
         entries.append(_score_entry("overall", registry.aggregate(trio.values())))
@@ -320,8 +343,11 @@ def compute_score_entries(
     # Retrieval diagnostics: group per-sample scores by metric family.
     families: dict[str, dict[str, Score]] = {}
     for sample_id, p in predictions.items():
+        s = samples[sample_id]
+        if retrieval_not_applicable(s, retrieves=retrieves) is not None:
+            continue
         for score in retrieval_scores(
-            p, samples[sample_id], ks=ks, dataset_sha=dataset_sha
+            p, s, ks=ks, dataset_sha=dataset_sha, protocol=protocol
         ):
             families.setdefault(score.tag.metric_family, {})[sample_id] = score
     for per_sample in families.values():
@@ -358,6 +384,7 @@ def _prediction_row(s: Sample, p: Prediction) -> dict[str, Any]:
         "completion_tokens": p.completion_tokens,
         "latency_ms": p.latency_ms,
         "abstention": p.abstention,
+        "failure": p.failure,
     }
 
 
@@ -382,9 +409,14 @@ def run_benchmark(
     # with ``abstention.reason == "no_hits"``.
     if retriever == "gluomem":
         cfg = cfg.with_overrides({"search.abstain.enabled": False})
+    entry = get_entry(dataset)
+    require_runnable(entry)
+    protocol = protocol_id(entry)
     adapter = make_adapter(dataset, cfg)
     adapter.verify()
     dataset_sha = adapter.sha
+    excluded_fn = getattr(adapter, "excluded_counts", None)
+    excluded = cast("dict[str, int]", excluded_fn()) if callable(excluded_fn) else {}
     samples, sample_source = _load_samples(cfg, adapter, limit)
 
     answer_fn = answer_fn if answer_fn is not None else _make_answer_fn(cfg)
@@ -411,7 +443,9 @@ def run_benchmark(
         judgments=run_dir / "judgments.jsonl",
         scores=run_dir / "scores.json",
         report=run_dir / "report.md",
+        denominators=run_dir / "denominators.json",
     )
+    retrieves = bool(getattr(impl, "retrieves", True))
 
     # --- predict phase (parallel across samples, rows written in order) -----
     # A single sample's LLM/parse failure is DATA, not a run abort: the
@@ -425,7 +459,8 @@ def run_benchmark(
         except Exception as exc:  # noqa: BLE001 - recorded, run continues
             answer_failures.append(s.id)
             print(f"answer failed for {s.id}: {exc}", file=sys.stderr)
-            return Prediction(sample_id=s.id, answer="")
+            kind = "timeout" if isinstance(exc, TimeoutError) else "error"
+            return Prediction(sample_id=s.id, answer="", failure=kind)
 
     parallelism = cfg.benchmark.parallelism
     predict_started = time.perf_counter()
@@ -503,9 +538,22 @@ def run_benchmark(
         judge_family=judge_family,
         ks=list(cfg.benchmark.retrieval.ks),
         dataset_sha=dataset_sha,
+        protocol=protocol,
+        retrieves=retrieves,
     )
     paths.scores.write_text(
         json.dumps(entries, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    denominators = compute_denominators(
+        predictions,
+        records,
+        samples_by_id,
+        backbones=backbones,
+        retrieves=retrieves,
+        excluded=excluded,
+    )
+    paths.denominators.write_text(
+        json.dumps(denominators, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
     # --- manifest ---------------------------------------------------------------
@@ -535,6 +583,10 @@ def run_benchmark(
         "git_sha": _git_sha(),
         "dataset": dataset,
         "dataset_sha": dataset_sha,
+        "benchmark": manifest_record(entry),
+        "protocol": protocol,
+        "excluded_from_pool": excluded,
+        "retrieves": retrieves,
         "sample_source": sample_source,
         "sample_ids": [s.id for s in samples],
         "sample_seed": cfg.benchmark.sample.seed,
@@ -579,7 +631,9 @@ def run_benchmark(
     paths.manifest.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    paths.report.write_text(render_report(entries, manifest), encoding="utf-8")
+    paths.report.write_text(
+        render_report(entries, manifest, denominators), encoding="utf-8"
+    )
 
     headline = _headline(entries)
     if headline is not None:
