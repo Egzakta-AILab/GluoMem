@@ -2,7 +2,9 @@
 
 > This document is the governing specification: it describes the full intended system, its requirements, and its acceptance criteria.
 
-> Companions: `DESIGN.md` (architecture), `PAPER.md` (experimental design).
+> Companions: `DESIGN.md` (architecture), [`docs/research/PAPER.md`](./docs/research/PAPER.md) (experimental design).
+
+> **Implementation status (2026-10-13, version 0.0.1).** This is the original research specification, not a statement of what ships. Not implemented: the tuning engine (G5, §7 tuning, FR-14 `tune`/`ablate`, acceptance criterion 4) and the committed reproducible run artifacts (Q-4, acceptance criteria 2 and 6; see [the evidence inventory](./docs/research/EVIDENCE_INVENTORY.md)). MemBench has no adapter. The `source` enum (§9 schema constant) labels provenance; it is not tenant, workspace or access control. The README lists the current scope and known limitations.
 
 ---
 
@@ -75,7 +77,7 @@ Out of scope: a production system. No production hardening, no SLAs, no multi-te
 
 ---
 
-## 5. Quality / evaluation requirements (see `PAPER.md`)
+## 5. Quality / evaluation requirements (see `docs/research/PAPER.md`)
 
 - **Q-1** Pluggable harness: `DatasetAdapter · Retriever · Judge · MetricRegistry`.
 - **Q-2** Metric discipline is a runtime invariant. Every score carries a `ProtocolTag`; the aggregator refuses to mix metric/judge families. F1, Recall@k, MCQ-acc, LLM-judge-acc, and nDCG never share a column.

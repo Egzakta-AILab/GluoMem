@@ -38,7 +38,8 @@ build/
 # OS noise
 .DS_Store
 
-# Per-session benchmark stores (heavy, regenerable; run seals live in
-# experiments/<timestamp>_*/ which stay committed)
+# Per-session benchmark stores (heavy, regenerable). Run directories under
+# experiments/<timestamp>_*/ are meant to be committed; none are published yet
+# (docs/research/EVIDENCE_INVENTORY.md).
 experiments/lme_s_dbs/
 experiments/lme_s_mem0/

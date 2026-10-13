@@ -1,5 +1,13 @@
 # gluomem — LoCoMo results
 
+> **Evidence status (2026-10-13): historical report, not currently reproducible.**
+> The `experiments/` run directories cited below were never part of the published
+> repository and are not recoverable from this checkout, so `bench rescore --check`
+> cannot be run against them. Treat every number here as a reported historical
+> result until the run artifacts are restored or a new baseline is published. See
+> [EVIDENCE_INVENTORY.md](./EVIDENCE_INVENTORY.md). The text below is unchanged from
+> commit `ab3ecdd`.
+
 Every system runs in the **same harness**
 under one fixed protocol; every headline is reproducible offline with
 `gluomem bench rescore <run_dir> --check` (zero model calls).

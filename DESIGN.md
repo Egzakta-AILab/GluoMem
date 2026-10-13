@@ -1,6 +1,8 @@
 # gluomem — Technical Design
 
-> Companion to `SPEC.md` and `PAPER.md`. Scope is the memory package plus evaluation; production surfaces are out of scope (§11).
+> Companion to `SPEC.md` and [`docs/research/PAPER.md`](./docs/research/PAPER.md). Scope is the memory package plus evaluation; production surfaces are out of scope (§11).
+
+> **Implementation status (2026-10-13, version 0.0.1).** The tuning engine (§9, `tune/` in the layout below, the `tune` and `ablate` commands) is designed but not implemented. `storage/vector_store.py` and `search/abstain.py` do not exist as separate modules; the only vector store is `SqliteVecStore` in `storage/sqlite_vec.py`, and abstention lives in `search/hybrid.py`. The `experiments/` run directories were never published. The README lists current scope and known limitations.
 
 ---
 
@@ -242,6 +244,8 @@ class LMRouter:
 ---
 
 ## 9. Tuning subsystem
+
+> **Not implemented.** This section is the design only; `gluomem/tune/__init__.py` is a placeholder.
 
 `final = rrf × relevance` factors into an expensive retrieve and a cheap rescore. Retrieve each eval query's pool once; cache the raw per-feature inputs plus per-retriever ranks; then re-rank thousands of parameter vectors with zero model calls, scored by nDCG/Recall@k against benchmark-derived gold labels (reusing answer spans / MCQ keys, requiring no additional labeling).
 

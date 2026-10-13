@@ -1,5 +1,13 @@
 # gluomem — LongMemEval results (sealed 2026-07-25)
 
+> **Evidence status (2026-10-13): historical report, not currently reproducible.**
+> The `experiments/` run directories cited below were never part of the published
+> repository and are not recoverable from this checkout, so `bench rescore --check`
+> cannot be run against them. Treat every number here as a reported historical
+> result until the run artifacts are restored or a new baseline is published. See
+> [EVIDENCE_INVENTORY.md](./EVIDENCE_INVENTORY.md). The text below is unchanged from
+> commit `ab3ecdd`.
+
 Standalone record of the LongMemEval campaign, mirroring `LOCOMO_RESULTS.md`.
 Every number is offline-reproducible: `gluomem bench rescore <run_dir> --check`
 re-derives it from the committed run dir with zero model calls.

@@ -1,8 +1,11 @@
 [project]
 name = "gluomem"
 version = "0.0.1"
-description = "GluoMem — the binding layer: deterministic frame-codec memory for AI agents"
+description = "GluoMem — research-stage frame-codec memory library and benchmark harness for AI agents"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Egzakta" }]
 requires-python = ">=3.11"
 dependencies = [
     "pydantic",
@@ -39,7 +42,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]

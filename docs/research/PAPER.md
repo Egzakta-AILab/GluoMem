@@ -1,5 +1,12 @@
 # gluomem — Experimental Design & Paper Plan
 
+> **Status (2026-10-13): archived research plan.** The offline tuning engine (§ RQ5,
+> C4, "Tier-1/Tier-2" tuning) and `make reproduce` were never implemented;
+> `gluomem/tune` is a placeholder and `gluomem tune`/`gluomem ablate` print "not
+> implemented". The committed run directories this plan relies on are absent; see
+> [EVIDENCE_INVENTORY.md](./EVIDENCE_INVENTORY.md). The text below is unchanged from
+> commit `ab3ecdd`.
+
 > The deterministic core — configuration, SQLite storage with typed I/P/B frames, hybrid search + scoring, and the bitemporal KG — is implemented and tested; the DSPy ingest pipeline, benchmark harness, offline tuning, and experiment matrix described below build on that core. This document is the governing experimental plan.
 
 This document defines what is measured and claimed; every number must be answerable from committed, offline-reproducible artifacts.

@@ -1,0 +1,22 @@
+GluoMem
+Copyright 2026 Egzakta
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+GluoMem source code was written for this project; it does not bundle or vendor
+third-party source code. Python dependencies are installed separately by the
+package manager under their own licenses and are not redistributed here.
+
+Benchmark datasets are not included. `gluomem bench fetch` downloads them on
+request from their publishers, and they remain under their own terms:
+
+  - LoCoMo (snap-research/locomo): Creative Commons Attribution-NonCommercial 4.0
+    International. Commercial use of the dataset is not permitted by that license.
+  - LongMemEval (xiaowu0162/LongMemEval): MIT License.
+
+The files in benchmarks_data/ are sampling manifests that hold only dataset
+hashes, seeds and question identifiers. The files in tests/fixtures/ are authored
+synthetic conversations shaped like those formats.
+
+The optional `mem0` extra installs mem0ai (Apache License 2.0) for comparison
+runs; it is not required by the core package.
