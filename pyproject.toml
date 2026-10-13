@@ -77,6 +77,12 @@ project-excludes = [
     "**/__pycache__/**",
     "**/.pytest_cache/**",
 ]
-# mem0 is an optional extra absent from the gate env; its lazy imports type
-# as Any so `make check` never needs `--extra mem0` installed.
-replace-imports-with-any = ["mem0", "mem0.*"]
+# mem0 and sentence-transformers are optional extras absent from the offline
+# gate env; their lazy imports type as Any so `make check` passes after
+# `make install-offline` without torch.
+replace-imports-with-any = [
+    "mem0",
+    "mem0.*",
+    "sentence_transformers",
+    "sentence_transformers.*",
+]
