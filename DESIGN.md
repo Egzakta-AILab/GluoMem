@@ -32,14 +32,14 @@ gluomem/
   config/    app_config.py  registry.py  variants.py
   storage/   schema.sql  db.py  vector_store.py  sqlite_vec.py
   frames/    store.py  sessions.py  content_hash.py  compaction.py        # I/P/B
-  embedding/ base.py  providers.py  chunker.py  reranker.py  fingerprint.py
+  embedding/ base.py  providers.py  chunker.py  reranker.py  fingerprint.py  compat.py
   search/    hybrid.py  scoring.py  abstain.py  sanitize.py
   kg/        graph.py  normalizer.py  temporal.py
   write/     gate.py  ingest.py  lanes.py  cognify.py                      # benchmark ingest only
   llm/       signatures.py  modules.py  router.py  judge.py  bootstrap.py  optimize.py
   bench/     adapters/  retriever.py  judge.py  metrics.py  rescore.py  report.py  baselines.py
   tune/      candidate_cache.py  rescore.py  objective.py  two_tier.py  ltr.py
-  cli.py
+  cli.py  components.py  extras.py  timeutil.py
 conf/  artifacts/  benchmarks_data/  experiments/  tests/
 ```
 Out of scope: MCP server, lifecycle hooks, wiki compiler, enrichment/synth queue, identity/awareness layers, harvest adapters.
@@ -148,7 +148,7 @@ Importance multipliers, compaction trigger/keep-window, and the merge separator 
 
 ## 3. Embedding / chunking / reranker
 
-Protocols with these defaults: in-process `sentence-transformers/all-MiniLM-L6-v2` (384 dims, native — no zero-pad) for embeddings; optional `cross-encoder/ms-marco-MiniLM-L-6-v2` reranker. The chunker is a pure function with all sizes in config (default chunk size 2000, overlap 200, whole-frame threshold 1500). The fingerprint guard blocks dim mismatch and emits a loud banner on mock fallback.
+Protocols with these defaults: in-process `sentence-transformers/all-MiniLM-L6-v2` (384 dims, native — no zero-pad) for embeddings; optional `cross-encoder/ms-marco-MiniLM-L-6-v2` reranker. The chunker is a pure function with all sizes in config (default chunk size 2000, overlap 200, whole-frame threshold 1500). Factories (`make_embedder`, `make_reranker`, `make_extractors`, the bench answer/judge builders) build the implementation the registry entry's `provider` names (`inprocess` = sentence-transformers; `fake` = the hash mock) or raise `ProviderUnavailableError` / `MissingExtraError`; there is no mock fallback. Test doubles also need `components.allow_fake: true` (`FakeComponentError` otherwise). Every vector write is length-checked (`assert_dim`), and each `.mind` file records an `EmbedderFingerprint` (implementation, model, revision, dim, preprocessing, index schema) in `meta.embedding_fingerprint` on first bind (`gluomem/embedding/compat.py`). `FrameStore` and `HybridSearch` reject a different fingerprint, or a file holding vectors with none recorded, before touching a vector. `FrameStore.rebuild_index` re-embeds everything first and then swaps vectors and fingerprint in one transaction; `adopt_embedder` records a fingerprint for a pre-fingerprint file without re-embedding. `gluomem.components.component_report` (CLI `gluomem components`) lists effective implementations, fingerprints, API-key variable names and whether they are set, never their values.
 
 ---
 

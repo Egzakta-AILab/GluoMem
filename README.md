@@ -12,6 +12,7 @@ GluoMem is a research-stage Python library (version 0.0.1). It runs locally agai
 - **Hybrid retrieval**: SQLite FTS5 (BM25) and sqlite-vec exact KNN, fused with RRF, then a four-signal relevance model (temporal, popularity, contextual, importance) and an optional cross-encoder reranker.
 - **DSPy write path**: typed extraction behind an `Extractors` protocol, with deterministic fake extractors for offline tests, an admission gate (regex injection scanner, quarantine or reject), and an extraction cache. Quarantined frames are kept for inspection by id but excluded from search, current-state reads, graph linking and compaction ([eligibility rule](./gluomem/frames/eligibility.py)).
 - **Benchmark harness**: LoCoMo and LongMemEval (S and oracle) adapters, full-context, BM25 and vector-RAG baselines, an optional mem0 comparison, judge panels, protocol tags, offline rescore of a run directory, and usage accounting.
+- **Fail-closed components**: each embedder, reranker and LLM backend is built from the provider its config names, or construction raises; nothing falls back to the mock embedder. Test doubles (`provider: fake` embedders, `fake` backends) need `components.allow_fake: true`. A `.mind` file records the fingerprint of the embedder that wrote its vectors (implementation, model, revision, dim, preprocessing, index schema) and rejects any other embedder before reading or writing a vector. `gluomem components` prints the effective components and their readiness without secrets; `gluomem index rebuild` and `gluomem index adopt` are the explicit ways to change or record a file's embedder.
 - **Configuration**: one typed config tree (pydantic-settings, `GLUOMEM_` prefix). Precedence is `defaults < conf/config.yaml < variant < env < with_overrides()`.
 
 ## What is not implemented
@@ -24,7 +25,6 @@ GluoMem is a research-stage Python library (version 0.0.1). It runs locally agai
 
 These are tracked for the first hardening iteration and are being fixed:
 
-- Embedding compatibility is checked by vector dimension only.
 - With reranking enabled, the abstention threshold is compared against reranker logits instead of fusion scores.
 
 ## Evidence status
@@ -54,16 +54,18 @@ make install             # uv sync --locked --extra all (full development enviro
 # or: make install-offline  (uv sync --locked --extra llm; enough for make check, no torch)
 make check               # ruff lint + pyrefly type check + offline tests
 make wheel-check         # build the wheel, install it core-only outside the checkout, write and read
-uv run gluomem --help    # CLI: ingest, bench run|rescore|gate|sample|fetch|ingest|verify
+uv run gluomem --help    # CLI: ingest, components, index rebuild|adopt, bench run|rescore|gate|sample|fetch|ingest|verify
 ```
 
 CI (`.github/workflows/ci.yml`) runs `make check` on Python 3.11, 3.12 and 3.13 and `make wheel-check` on every pull request. Slow tests that download models run only when the workflow is dispatched manually with `run_model_tests`.
 
-Deterministic ingest of a bundled synthetic fixture, using the fake extractors and mock embeddings:
+Deterministic ingest of a bundled synthetic fixture, using the fake extractors and mock embeddings (test doubles, so they need an explicit opt-in):
 
 ```bash
 uv run gluomem ingest tests/fixtures/locomo_tiny.json --db /tmp/demo.mind \
-  --override write.extraction_backend=fake --override embedding.model=mock
+  --override write.extraction_backend=fake --override embedding.model=mock \
+  --override components.allow_fake=true
+uv run gluomem components --db /tmp/demo.mind   # effective components, readiness, stored fingerprint
 ```
 
 Tests that download real models are marked `slow` and excluded by default (`addopts = "-m 'not slow'"`). Live provider tests skip unless `OPENROUTER_API_KEY` is set. The default configuration uses DSPy extraction through OpenRouter, so `gluomem ingest` and `gluomem bench run` without the overrides above call a paid provider when a key is present. Copy `.env.example` to `.env` only when you intend to make live calls.

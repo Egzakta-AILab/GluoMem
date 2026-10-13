@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from gluomem.bench.types import Prediction, RetrievedDoc, Sample
-from gluomem.embedding.providers import MockEmbedder, make_embedder
+from gluomem.embedding.providers import make_embedder
 from gluomem.embedding.reranker import make_reranker
 from gluomem.frames.store import FrameStore
 from gluomem.kg.graph import KnowledgeGraph
@@ -78,15 +78,12 @@ class GluoMemRetriever:
         """The query-side embedder MUST match the one that embedded the
         frames at ingest — else vector similarities are noise and hybrid
         search silently degrades to keyword-only. Resolve from config
-        (real MiniLM by default), built once and shared across stacks;
-        only fall back to a mock when config asks for one.
+        (real MiniLM by default), built once and shared across stacks. The
+        mock is only built when config names it and allows fakes; each
+        store also checks the embedder fingerprint recorded at ingest.
         """
         if self._embedder is None:
-            self._embedder = (
-                MockEmbedder(dim=db.dim)
-                if self._cfg.embedding.model == "mock"
-                else make_embedder(self._cfg)
-            )
+            self._embedder = make_embedder(self._cfg)
         return self._embedder
 
     def _resolve_reranker(self) -> Reranker | None:

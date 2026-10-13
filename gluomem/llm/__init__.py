@@ -38,7 +38,8 @@ def make_extractors(cfg: AppConfig) -> Extractors:
 
     - ``"dspy"`` — the real DSPy-backed extractors; the ONLY path that imports
       dspy (lazily, inside this function body).
-    - ``"fake"`` — deterministic rule-based ``FakeExtractors`` (loud banner).
+    - ``"fake"`` — deterministic rule-based ``FakeExtractors`` (loud banner);
+      requires ``components.allow_fake``.
     - ``"none"`` — ``NullExtractors``; no extraction (raw-turns-only baseline).
 
     When ``cfg.write.extraction_cache.mode != "off"`` the built backend is
@@ -48,6 +49,9 @@ def make_extractors(cfg: AppConfig) -> Extractors:
     backend = cfg.write.extraction_backend
     inner: Extractors
     if backend == "fake":
+        from gluomem.components import require_fake_allowed
+
+        require_fake_allowed(cfg, "write.extraction_backend='fake'")
         inner = FakeExtractors()
     elif backend == "none":
         inner = NullExtractors()

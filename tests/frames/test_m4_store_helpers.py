@@ -10,13 +10,14 @@ from pathlib import Path
 
 import pytest
 
+from gluomem.embedding.providers import MockEmbedder
 from gluomem.frames.store import FrameStore
 from gluomem.storage.db import MindDB
 
 
 def _store(tmp_path: Path, *, dim: int = 384) -> tuple[MindDB, FrameStore]:
     db = MindDB(tmp_path / "test.mind", dim=dim)
-    return db, FrameStore(db)
+    return db, FrameStore(db, embedder=MockEmbedder(dim=db.dim))
 
 
 def test_find_frame_by_hash_hit_and_miss(tmp_path: Path) -> None:

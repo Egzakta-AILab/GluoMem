@@ -78,7 +78,11 @@ def test_dia_content_matches_ingested_raw_turns(
     from gluomem.write.ingest import ingest_path
 
     ingest_cfg = cfg.with_overrides(
-        {"write.extraction_backend": "none", "embedding.model": "mock"}
+        {
+            "write.extraction_backend": "none",
+            "embedding.model": "mock",
+            "components.allow_fake": True,
+        }
     )
     db_path = tmp_path / "tiny.mind"
     ingest_path(

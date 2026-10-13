@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from gluomem.embedding.providers import MockEmbedder
 from gluomem.frames.store import FrameStore
 from gluomem.kg.graph import Entity, KnowledgeGraph, Relation
 from gluomem.storage.db import MindDB
@@ -70,7 +71,7 @@ def test_entity_and_relation_roundtrip(tmp_path: Path) -> None:
 def test_entity_frame_bridge_both_directions(tmp_path: Path) -> None:
     """Link entity<->frame; query both directions."""
     db, kg = _kg(tmp_path)
-    store = FrameStore(db)
+    store = FrameStore(db, embedder=MockEmbedder(dim=db.dim))
 
     e = kg.create_entity("concept", "memory")
     frame = store.create_i_frame("gop-1", "a memory frame")

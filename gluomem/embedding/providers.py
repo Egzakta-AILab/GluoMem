@@ -3,18 +3,22 @@
 Two embedders plus a config-driven factory:
 
 - **MockEmbedder** — a deterministic, offline, hash-based embedder (native dim,
-  no network). When selected as a FALLBACK via :func:`make_embedder` it emits a
-  LOUD all-caps ``MOCK`` banner to stderr AND ``logging.warning`` so a
-  misconfigured or unavailable model is never silent. Constructed directly it
-  stays quiet (tests use it that way).
-- **MiniLMEmbedder** — the real ``sentence-transformers/all-MiniLM-L6-v2``
-  wrapper (native dim 384, NO zero-pad). The model is lazy-loaded on first
+  no network). It is a test double: :func:`make_embedder` builds it only for
+  a registry entry with ``provider: fake`` and only when
+  ``components.allow_fake`` is set, and prints a loud ``MOCK`` banner when it
+  does. Constructed directly it stays quiet (tests use it that way).
+- **MiniLMEmbedder** — a ``sentence-transformers`` wrapper (``provider:
+  inprocess``; native dim, NO zero-pad). The model is lazy-loaded on first
   ``embed``/``embed_batch`` call so merely importing or constructing this class
   does NOT download anything.
-- **make_embedder(cfg)** — a factory that resolves ``cfg.embedding.model`` via
-  the registry and returns the right :class:`Embedder`. When the configured
-  model is ``'mock'`` or unavailable (e.g. ``sentence-transformers`` is not
-  importable) it falls back to :class:`MockEmbedder` and prints the banner.
+- **make_embedder(cfg)** — resolves ``cfg.embedding.model`` via the registry
+  and builds the implementation its ``provider`` names. An unknown model, an
+  unsupported provider, a missing dim, a dim mismatch, a missing extra or a
+  disallowed fake raises; nothing falls back to the mock.
+
+Each embedder declares an
+:class:`~gluomem.embedding.fingerprint.EmbedderFingerprint` used to keep a
+``*.mind`` file on one encoder.
 
 The mock derives a stable native-dim float32 vector from a hash of the text:
 the SHA-256 digest seeds a numpy RNG (default_rng, PCG64) which draws ``dim``
@@ -31,18 +35,23 @@ from typing import Any
 
 import numpy as np
 
+from gluomem.components import ProviderUnavailableError, require_fake_allowed
 from gluomem.config.app_config import AppConfig
-from gluomem.config.registry import ModelRegistry
+from gluomem.config.registry import ModelRegistry, UnknownModelError
 from gluomem.embedding.base import Embedder
+from gluomem.embedding.fingerprint import EmbedderFingerprint
+
+#: Embedding providers with an implementation in this package.
+EMBEDDING_PROVIDERS: tuple[str, ...] = ("fake", "inprocess")
 
 _log = logging.getLogger("gluomem.embedding")
 
-# The LOUD all-caps banner emitted when the mock is selected as a FALLBACK.
-# Written to stderr AND logging.warning so a misconfigured model is never silent.
+# Written to stderr AND logging.warning whenever the factory builds the mock,
+# so a run on placeholder vectors is never silent.
 _MOCK_BANNER = (
-    "MOCK EMBEDDER FALLBACK IN USE — NO REAL MODEL LOADED. "
-    "Vectors are deterministic hash-based placeholders, not MiniLM embeddings. "
-    "Set embedding.model to a real, available model for production embeddings."
+    "MOCK EMBEDDER IN USE — NO REAL MODEL LOADED. "
+    "Vectors are deterministic hash-based placeholders for tests. "
+    "Set embedding.model to a real model for production embeddings."
 )
 
 
@@ -66,9 +75,8 @@ class MockEmbedder:
         pure function of the same seed).
     fallback:
         If True, emit the LOUD all-caps ``MOCK`` banner on construction — used
-        by :func:`make_embedder` when the mock is selected because the
-        configured model is unavailable or ``embedding.model == 'mock'``.
-        Default False keeps direct construction quiet (for tests).
+        by :func:`make_embedder`. Default False keeps direct construction
+        quiet (for tests).
 
     Determinism
     -----------
@@ -91,6 +99,16 @@ class MockEmbedder:
     @property
     def dim(self) -> int:
         return self._dim
+
+    @property
+    def fingerprint(self) -> EmbedderFingerprint:
+        return EmbedderFingerprint(
+            implementation="gluomem.mock",
+            model="sha256-pcg64",
+            revision=None,
+            dim=self._dim,
+            preprocessing=f"utf-8;normalize={self._normalize}",
+        )
 
     def _vector(self, text: str) -> np.ndarray:
         digest = hashlib.sha256(text.encode("utf-8")).digest()
@@ -128,21 +146,40 @@ class MiniLMEmbedder:
     dim:
         The native embedding dimension (from the registry / config). Vectors
         are emitted at this dim with no padding.
+    revision:
+        Optional pinned model revision passed to ``SentenceTransformer``.
+
+    The tokenizer and pooling are part of the model at ``revision``; the
+    encode options GluoMem passes are recorded as ``preprocessing`` in the
+    fingerprint.
 
     This class is OPTIONAL and never loaded by the default test run. Any test
     exercising it is ``@pytest.mark.slow``.
     """
 
-    def __init__(self, model_name: str, *, dim: int) -> None:
+    def __init__(
+        self, model_name: str, *, dim: int, revision: str | None = None
+    ) -> None:
         if dim <= 0:
             raise ValueError(f"MiniLMEmbedder dim must be positive, got {dim}")
         self._model_name: str = model_name
         self._dim: int = int(dim)
+        self._revision: str | None = revision
         self._model: Any = None  # SentenceTransformer, typed loose to avoid an import
 
     @property
     def dim(self) -> int:
         return self._dim
+
+    @property
+    def fingerprint(self) -> EmbedderFingerprint:
+        return EmbedderFingerprint(
+            implementation="sentence-transformers",
+            model=self._model_name,
+            revision=self._revision,
+            dim=self._dim,
+            preprocessing="encode;normalize_embeddings=False",
+        )
 
     def _load(self) -> Any:
         if self._model is None:
@@ -151,7 +188,9 @@ class MiniLMEmbedder:
             require("embeddings", f"embedding model '{self._model_name}'")
             from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(self._model_name)
+            self._model = SentenceTransformer(
+                self._model_name, revision=self._revision
+            )
         return self._model
 
     def _vectors(self, texts: list[str]) -> list[np.ndarray]:
@@ -181,51 +220,43 @@ class MiniLMEmbedder:
 
 
 def make_embedder(cfg: AppConfig) -> Embedder:
-    """Build the configured embedder, falling back to the mock with a loud banner.
+    """Build the embedder ``cfg.embedding.model`` names, or raise.
 
-    Resolves ``cfg.embedding.model`` via the :class:`ModelRegistry`. When the
-    configured model is ``'mock'`` or unavailable (e.g.
-    ``sentence-transformers`` is not importable, or the model has no native
-    dim), it returns a :class:`MockEmbedder` with ``fallback=True`` (which
-    emits the LOUD all-caps ``MOCK`` banner to stderr and ``logging.warning``).
-
-    The native dim is read from ``cfg.storage.vector_dim`` (cross-validated to
-    equal the active embedder dim) — never hardcoded.
+    Raises :class:`~gluomem.components.ProviderUnavailableError` for an
+    unknown model, a provider with no embedding implementation, a model with
+    no dim or a dim that differs from ``cfg.storage.vector_dim``;
+    :class:`~gluomem.extras.MissingExtraError` when ``sentence-transformers``
+    is not installed; :class:`~gluomem.components.FakeComponentError` for a
+    fake provider without ``components.allow_fake``. Construction does not
+    download anything (the real model lazy-loads on first embed).
     """
     dim = int(cfg.storage.vector_dim)
     name = cfg.embedding.model
+    try:
+        entry = ModelRegistry(cfg).resolve(name)
+    except UnknownModelError as exc:
+        raise ProviderUnavailableError("embedder", name, str(exc)) from None
 
-    # Explicit mock selection → mock with the loud fallback banner.
-    if name == "mock":
+    if entry.provider == "fake":
+        require_fake_allowed(cfg, f"embedding.model={name!r} (provider: fake)")
         return MockEmbedder(dim=dim, fallback=True)
 
-    registry = ModelRegistry(cfg)
-    try:
-        entry = registry.resolve(name)
-    except KeyError:
-        # Unknown model reference → fall back loud rather than crash at import.
-        _emit_mock_banner()
-        return MockEmbedder(dim=dim, fallback=False)
-
-    # A model without a native dim cannot embed → fall back loud.
+    if entry.provider != "inprocess":
+        raise ProviderUnavailableError(
+            "embedder",
+            name,
+            f"provider {entry.provider!r} has no embedding implementation; "
+            f"supported: {', '.join(EMBEDDING_PROVIDERS)}",
+        )
     if entry.dim is None:
-        _emit_mock_banner()
-        return MockEmbedder(dim=dim, fallback=False)
+        raise ProviderUnavailableError("embedder", name, "registry entry has no dim")
+    if entry.dim != dim:
+        raise ProviderUnavailableError(
+            "embedder",
+            name,
+            f"model dim {entry.dim} != storage.vector_dim {dim}",
+        )
+    from gluomem.extras import require
 
-    # Try to build the real embedder. If sentence-transformers is not
-    # importable (or construction raises), fall back loud. Construction itself
-    # does NOT download — the model lazy-loads on first embed.
-    try:
-        emb: Embedder
-        if entry.provider == "inprocess":
-            emb = MiniLMEmbedder(entry.provider_model, dim=entry.dim)
-            if emb.dim != dim:
-                _emit_mock_banner()
-                return MockEmbedder(dim=dim, fallback=False)
-            return emb
-        # Non-inprocess embedding providers are unsupported → mock fallback.
-        _emit_mock_banner()
-        return MockEmbedder(dim=dim, fallback=False)
-    except Exception:  # noqa: BLE001 — any construction/import failure → fallback
-        _emit_mock_banner()
-        return MockEmbedder(dim=dim, fallback=False)
+    require("embeddings", f"embedding model '{entry.provider_model}'")
+    return MiniLMEmbedder(entry.provider_model, dim=entry.dim, revision=entry.revision)

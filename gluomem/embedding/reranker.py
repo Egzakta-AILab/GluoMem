@@ -61,9 +61,14 @@ class CrossEncoderReranker:
     exercising it is ``@pytest.mark.slow``.
     """
 
-    def __init__(self, model_name: str) -> None:
+    def __init__(self, model_name: str, *, revision: str | None = None) -> None:
         self._model_name: str = model_name
+        self._revision: str | None = revision
         self._model: Any = None  # CrossEncoder, typed loose to avoid an import
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
 
     def _load(self) -> Any:
         if self._model is None:
@@ -72,7 +77,7 @@ class CrossEncoderReranker:
             require("embeddings", f"reranker model '{self._model_name}'")
             from sentence_transformers import CrossEncoder
 
-            self._model = CrossEncoder(self._model_name)
+            self._model = CrossEncoder(self._model_name, revision=self._revision)
         return self._model
 
     def score(self, query: str, docs: list[str]) -> list[float]:
@@ -82,13 +87,34 @@ class CrossEncoderReranker:
         return [float(x) for x in logits]
 
 
+#: Reranker providers with an implementation in this package.
+RERANKER_PROVIDERS: tuple[str, ...] = ("inprocess",)
+
+
 def make_reranker(cfg: AppConfig) -> Reranker | None:
     """Config-resolved reranker; ``None`` when reranking is disabled.
 
-    Construction is cheap (the cross-encoder lazy-loads on first score), so
-    this is safe to call on offline paths that never actually rerank.
+    The registry entry's ``provider`` selects the implementation; only
+    ``inprocess`` (a ``sentence-transformers`` cross-encoder) exists, and any
+    other provider raises
+    :class:`~gluomem.components.ProviderUnavailableError` instead of silently
+    running a different implementation. A missing ``embeddings`` extra raises
+    :class:`~gluomem.extras.MissingExtraError`. Construction does not download
+    the model.
     """
     if not cfg.search.rerank.enabled:
         return None
-    entry = cfg.models[cfg.search.rerank.model]
-    return CrossEncoderReranker(entry.provider_model)
+    from gluomem.components import ProviderUnavailableError
+    from gluomem.extras import require
+
+    name = cfg.search.rerank.model
+    entry = cfg.models[name]
+    if entry.provider not in RERANKER_PROVIDERS:
+        raise ProviderUnavailableError(
+            "reranker",
+            name,
+            f"provider {entry.provider!r} has no reranker implementation; "
+            f"supported: {', '.join(RERANKER_PROVIDERS)}",
+        )
+    require("embeddings", f"reranker model '{entry.provider_model}'")
+    return CrossEncoderReranker(entry.provider_model, revision=entry.revision)
