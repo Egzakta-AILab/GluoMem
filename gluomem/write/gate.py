@@ -9,7 +9,9 @@ max weight among matched ``safety.scanner.patterns``. At or above
 ``safety.block_threshold`` the gate applies ``safety.fail_mode``:
 
 - ``quarantine`` — demote ``trust`` to ``'quarantined'`` and admit anyway
-  (retrieval down-weights it; extraction skips it);
+  for inspection; the frame is recall-ineligible
+  (:mod:`gluomem.frames.eligibility`), skips semantic dedup and KG linking,
+  and extraction skips it;
 - ``reject`` — drop the write entirely (no store row).
 
 Dedup: the gate probes ``store.find_frame_by_hash`` for EVERY frame type, so
@@ -25,6 +27,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from gluomem.frames.eligibility import is_recall_eligible
 from gluomem.frames.store import (
     Frame,
     FrameSource,
@@ -130,6 +133,11 @@ def admit(
                 admitted=False, frame=None, verdict=verdict, trust=trust
             )
         trust = "quarantined"
+    if not is_recall_eligible(trust):
+        # An ineligible write must not supersede (keep_longest) an eligible
+        # near-duplicate, nor be recorded as a dedup target that would absorb
+        # later clean restatements.
+        deduper = None
 
     existing = store.find_frame_by_hash(gop, content)
     if existing is not None:
@@ -220,7 +228,7 @@ def admit(
     if deduper is not None and probe is not None:
         deduper.record(gop, frame.id, probe.vector)
 
-    if kg is not None and trust != "quarantined":
+    if kg is not None and is_recall_eligible(trust):
         for eid in entity_ids:
             kg.link_entity_frame(eid, frame.id)
 

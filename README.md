@@ -9,7 +9,7 @@ GluoMem is a research-stage Python library (version 0.0.1). It runs locally agai
 - **I/P/B memory frames** (a video-codec model of memory): I-frames hold self-contained facts and are content-hash deduplicated per GOP (group of pictures, a topic or session scope); P-frames hold refinements on a base I-frame; B-frames hold corrections written by the contradiction detector. Compaction merges a GOP's P-frames into its I-frame.
 - **Temporal knowledge graph** with `valid_from`/`valid_to` on relations and relation retirement.
 - **Hybrid retrieval**: SQLite FTS5 (BM25) and sqlite-vec exact KNN, fused with RRF, then a four-signal relevance model (temporal, popularity, contextual, importance) and an optional cross-encoder reranker.
-- **DSPy write path**: typed extraction behind an `Extractors` protocol, with deterministic fake extractors for offline tests, an admission gate (regex injection scanner, quarantine or reject), and an extraction cache.
+- **DSPy write path**: typed extraction behind an `Extractors` protocol, with deterministic fake extractors for offline tests, an admission gate (regex injection scanner, quarantine or reject), and an extraction cache. Quarantined frames are kept for inspection by id but excluded from search, current-state reads, graph linking and compaction ([eligibility rule](./gluomem/frames/eligibility.py)).
 - **Benchmark harness**: LoCoMo and LongMemEval (S and oracle) adapters, full-context, BM25 and vector-RAG baselines, an optional mem0 comparison, judge panels, protocol tags, offline rescore of a run directory, and usage accounting.
 - **Configuration**: one typed config tree (pydantic-settings, `GLUOMEM_` prefix). Precedence is `defaults < conf/config.yaml < variant < env < with_overrides()`.
 
@@ -23,7 +23,6 @@ GluoMem is a research-stage Python library (version 0.0.1). It runs locally agai
 
 These are tracked for the first hardening iteration and are being fixed:
 
-- Quarantined frames can still be returned by search, and compaction can merge quarantined text into a trusted frame.
 - Frame insertion and its FTS/vector indexing are separate commits; an indexing failure can leave a stored but unsearchable frame that deduplication then hides on retry.
 - Reasserting a retired graph relation rewrites the original row's validity interval.
 - A timezone-aware `created_at` can raise `TypeError` during search recency scoring.

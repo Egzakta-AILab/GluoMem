@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from gluomem.embedding.providers import MockEmbedder, make_embedder
+from gluomem.frames.eligibility import is_recall_eligible
 from gluomem.frames.store import FrameStore
 from gluomem.kg.graph import KnowledgeGraph
 from gluomem.kg.normalizer import predicate_family
@@ -417,6 +418,9 @@ def _admit_observation(
         **admit_kwargs,
     )
     _count_frame(new_i, report)
+    if new_i.frame is None or not is_recall_eligible(new_i.trust):
+        # Ineligible "new truth" must not correct, demote or retire anything.
+        return
 
     if mode == "ipb":
         if new_i.frame is not None:
@@ -531,16 +535,30 @@ def ingest_conversation(
         # Cognify: LLM calls fan out (write.parallelism); KG resolution is
         # applied sequentially in observation order (identical ids to a
         # sequential run). Per-observation failures are recorded, not fatal.
-        graphs = cognify_texts(
-            [obs.text for obs in observations],
+        # Observations the gate will quarantine or reject never reach cognify:
+        # their entities/relations would otherwise wire flagged text into the
+        # KG and nominate contradiction targets before admission.
+        flagged = [
+            scanner.scan(obs.text, context="agent_inferred").score
+            >= cfg.safety.block_threshold
+            for obs in observations
+        ]
+        clean_idx = [i for i, f in enumerate(flagged) if not f]
+        clean_graphs = cognify_texts(
+            [observations[i].text for i in clean_idx],
             facade=facade,
             kg=kg,
             cfg=cfg,
             valid_from_list=[
-                _event_time_for(obs, session_iso) for obs in observations
+                _event_time_for(observations[i], session_iso) for i in clean_idx
             ],
             max_workers=cfg.write.parallelism,
         )
+        graphs: list[ResolvedGraph | Exception] = [
+            ResolvedGraph() for _ in observations
+        ]
+        for i, g in zip(clean_idx, clean_graphs, strict=True):
+            graphs[i] = g
 
         touched: set[str] = set()
         for obs, graph in zip(observations, graphs, strict=True):
