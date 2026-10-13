@@ -1,0 +1,510 @@
+{
+  "fixture": "extraction_v1",
+  "version": 1,
+  "authored": true,
+  "license": "Apache-2.0; authored for GluoMem; fictional people and organizations",
+  "note": "Each claim lists anchor groups (all must match; any alternative per group; '*' = stem prefix), the subject entity, polarity, modality, update status and the exact source span that supports it. Serbian cases are written natively, not machine-translated. Matching folds diacritics and transliterates Cyrillic to Latin. Claims with required: false (superseded states) are not needed for recall, but an extraction of them must mark them as previous.",
+  "split_policy": {
+    "version": 1,
+    "group_by": "source_family",
+    "splits": {
+      "train": "optimizer trainset; feedback allowed",
+      "dev": "optimizer validation and reflection feedback",
+      "sealed_test": "scores only, never feedback; never in an optimizer trainset or valset; evaluated once per frozen candidate"
+    },
+    "overlap": "every case of a source_family (including its translations) belongs to exactly one split",
+    "inputs": "only the task signature inputs (source text, reference date) reach a model; claims, support spans and splits never do"
+  },
+  "cases": [
+    {
+      "case_id": "en-ana-move",
+      "task": "fact_extraction",
+      "language": "en",
+      "split": "dev",
+      "source_family": "ana-move",
+      "source": "Ana moved from Belgrade to Novi Sad in March 2026. Her brother Marko still lives in Belgrade. Ana does not own a car. She might buy a bicycle next year.",
+      "entities": {
+        "Ana": [
+          "ana"
+        ],
+        "Marko": [
+          "marko"
+        ]
+      },
+      "claims": [
+        {
+          "claim_id": "c1",
+          "subject": "Ana",
+          "anchors": [
+            [
+              "novi sad"
+            ],
+            [
+              "mov*",
+              "live*",
+              "living",
+              "resid*",
+              "based",
+              "relocat*"
+            ]
+          ],
+          "support": "Ana moved from Belgrade to Novi Sad in March 2026."
+        },
+        {
+          "claim_id": "c2",
+          "subject": "Ana",
+          "status": "superseded",
+          "anchors": [
+            [
+              "belgrade"
+            ],
+            [
+              "mov*",
+              "live*",
+              "living",
+              "resid*",
+              "based",
+              "relocat*"
+            ]
+          ],
+          "support": "Ana moved from Belgrade to Novi Sad in March 2026.",
+          "required": false
+        },
+        {
+          "claim_id": "c3",
+          "subject": "Marko",
+          "anchors": [
+            [
+              "belgrade"
+            ],
+            [
+              "live*",
+              "living",
+              "resid*",
+              "based",
+              "stay*"
+            ]
+          ],
+          "support": "Her brother Marko still lives in Belgrade."
+        },
+        {
+          "claim_id": "c4",
+          "subject": "Ana",
+          "negated": true,
+          "anchors": [
+            [
+              "car*"
+            ],
+            [
+              "own*",
+              "has",
+              "have"
+            ]
+          ],
+          "support": "Ana does not own a car."
+        },
+        {
+          "claim_id": "c5",
+          "subject": "Ana",
+          "modality": "hypothetical",
+          "anchors": [
+            [
+              "bicycle*",
+              "bike*"
+            ],
+            [
+              "buy*",
+              "bought",
+              "purchas*",
+              "get*",
+              "acquir*"
+            ]
+          ],
+          "support": "She might buy a bicycle next year."
+        }
+      ]
+    },
+    {
+      "case_id": "sr-latn-ana-move",
+      "task": "fact_extraction",
+      "language": "sr-Latn",
+      "split": "dev",
+      "source_family": "ana-move",
+      "source": "Ana se u martu 2026. preselila iz Beograda u Novi Sad. Njen brat Marko i dalje živi u Beogradu. Ana nema automobil. Možda će sledeće godine kupiti bicikl.",
+      "entities": {
+        "Ana": [
+          "ana",
+          "ane",
+          "ani",
+          "anu",
+          "anom"
+        ],
+        "Marko": [
+          "marko",
+          "marka",
+          "marku",
+          "markom"
+        ]
+      },
+      "claims": [
+        {
+          "claim_id": "c1",
+          "subject": "Ana",
+          "anchors": [
+            [
+              "nov* sad*"
+            ],
+            [
+              "presel*",
+              "ziv*",
+              "stanuje"
+            ]
+          ],
+          "support": "Ana se u martu 2026. preselila iz Beograda u Novi Sad."
+        },
+        {
+          "claim_id": "c2",
+          "subject": "Ana",
+          "status": "superseded",
+          "anchors": [
+            [
+              "beograd*"
+            ],
+            [
+              "presel*",
+              "ziv*",
+              "stanova*"
+            ]
+          ],
+          "support": "Ana se u martu 2026. preselila iz Beograda u Novi Sad.",
+          "required": false
+        },
+        {
+          "claim_id": "c3",
+          "subject": "Marko",
+          "anchors": [
+            [
+              "beograd*"
+            ],
+            [
+              "ziv*",
+              "stanuje"
+            ]
+          ],
+          "support": "Njen brat Marko i dalje živi u Beogradu."
+        },
+        {
+          "claim_id": "c4",
+          "subject": "Ana",
+          "negated": true,
+          "anchors": [
+            [
+              "automobil*",
+              "auto",
+              "kola"
+            ],
+            [
+              "ima",
+              "nema",
+              "poseduje"
+            ]
+          ],
+          "support": "Ana nema automobil."
+        },
+        {
+          "claim_id": "c5",
+          "subject": "Ana",
+          "modality": "hypothetical",
+          "anchors": [
+            [
+              "bicikl*"
+            ],
+            [
+              "kup*"
+            ]
+          ],
+          "support": "Možda će sledeće godine kupiti bicikl."
+        }
+      ]
+    },
+    {
+      "case_id": "en-greeting",
+      "task": "fact_extraction",
+      "language": "en",
+      "split": "dev",
+      "source_family": "greeting",
+      "source": "Hi! How are you doing today? Talk to you soon.",
+      "entities": {},
+      "claims": []
+    },
+    {
+      "case_id": "sr-cyrl-greeting",
+      "task": "fact_extraction",
+      "language": "sr-Cyrl",
+      "split": "dev",
+      "source_family": "greeting",
+      "source": "Здраво! Како си данас? Чујемо се ускоро.",
+      "entities": {},
+      "claims": []
+    },
+    {
+      "case_id": "en-demo-dates",
+      "task": "event_extraction",
+      "language": "en",
+      "split": "dev",
+      "source_family": "demo-dates",
+      "source": "The project kickoff took place on 3 February 2026. The client demo was moved from 10 March to 24 March 2026.",
+      "reference_date": "2026-03-01T00:00:00",
+      "entities": {},
+      "claims": [
+        {
+          "claim_id": "e1",
+          "anchors": [
+            [
+              "kickoff",
+              "kick"
+            ]
+          ],
+          "date": "2026-02-03",
+          "support": "The project kickoff took place on 3 February 2026."
+        },
+        {
+          "claim_id": "e2",
+          "anchors": [
+            [
+              "demo"
+            ]
+          ],
+          "date": "2026-03-24",
+          "support": "The client demo was moved from 10 March to 24 March 2026."
+        },
+        {
+          "claim_id": "e3",
+          "status": "superseded",
+          "anchors": [
+            [
+              "demo"
+            ]
+          ],
+          "date": "2026-03-10",
+          "support": "The client demo was moved from 10 March to 24 March 2026.",
+          "required": false
+        }
+      ]
+    },
+    {
+      "case_id": "en-plant-migration",
+      "task": "fact_extraction",
+      "language": "en",
+      "split": "train",
+      "source_family": "plant-migration",
+      "source": "The Kragujevac plant migrated its ERP system to SAP in 2025. The Čačak plant has not migrated yet. It plans to migrate in 2027.",
+      "entities": {
+        "Kragujevac plant": [
+          "kragujevac"
+        ],
+        "Čačak plant": [
+          "cacak"
+        ]
+      },
+      "claims": [
+        {
+          "claim_id": "c1",
+          "subject": "Kragujevac plant",
+          "anchors": [
+            [
+              "sap",
+              "erp"
+            ],
+            [
+              "migrat*",
+              "mov*",
+              "switch*"
+            ]
+          ],
+          "support": "The Kragujevac plant migrated its ERP system to SAP in 2025."
+        },
+        {
+          "claim_id": "c2",
+          "subject": "Čačak plant",
+          "negated": true,
+          "anchors": [
+            [
+              "migrat*",
+              "mov*",
+              "switch*"
+            ]
+          ],
+          "support": "The Čačak plant has not migrated yet."
+        },
+        {
+          "claim_id": "c3",
+          "subject": "Čačak plant",
+          "modality": "hypothetical",
+          "anchors": [
+            [
+              "2027"
+            ]
+          ],
+          "support": "It plans to migrate in 2027."
+        }
+      ]
+    },
+    {
+      "case_id": "sr-cyrl-plant-migration",
+      "task": "event_extraction",
+      "language": "sr-Cyrl",
+      "split": "train",
+      "source_family": "plant-migration",
+      "source": "Фабрика у Крагујевцу је прешла на SAP у марту 2025. Фабрика у Чачку још није прешла.",
+      "reference_date": "2026-01-01T00:00:00",
+      "entities": {
+        "Kragujevac plant": [
+          "kragujev*"
+        ],
+        "Čačak plant": [
+          "cacak",
+          "cacku",
+          "cacka"
+        ]
+      },
+      "claims": [
+        {
+          "claim_id": "e1",
+          "subject": "Kragujevac plant",
+          "anchors": [
+            [
+              "sap"
+            ],
+            [
+              "presl*",
+              "prelaz*",
+              "migr*"
+            ]
+          ],
+          "date": "2025-03",
+          "support": "Фабрика у Крагујевцу је прешла на SAP у марту 2025."
+        }
+      ]
+    },
+    {
+      "case_id": "en-jelena-role",
+      "task": "fact_extraction",
+      "language": "en",
+      "split": "sealed_test",
+      "source_family": "jelena-role",
+      "source": "Since September 2026 Jelena has led the payments team. Before that she worked in support. She does not work on weekends.",
+      "entities": {
+        "Jelena": [
+          "jelena"
+        ]
+      },
+      "claims": [
+        {
+          "claim_id": "c1",
+          "subject": "Jelena",
+          "anchors": [
+            [
+              "payment*"
+            ],
+            [
+              "lead*",
+              "led",
+              "head*",
+              "manag*",
+              "run*"
+            ]
+          ],
+          "support": "Since September 2026 Jelena has led the payments team."
+        },
+        {
+          "claim_id": "c2",
+          "subject": "Jelena",
+          "status": "superseded",
+          "anchors": [
+            [
+              "support"
+            ]
+          ],
+          "support": "Before that she worked in support.",
+          "required": false
+        },
+        {
+          "claim_id": "c3",
+          "subject": "Jelena",
+          "negated": true,
+          "anchors": [
+            [
+              "weekend*"
+            ],
+            [
+              "work*"
+            ]
+          ],
+          "support": "She does not work on weekends."
+        }
+      ]
+    },
+    {
+      "case_id": "sr-latn-jelena-role",
+      "task": "fact_extraction",
+      "language": "sr-Latn",
+      "split": "sealed_test",
+      "source_family": "jelena-role",
+      "source": "Jelena je od septembra 2026. vođa tima za plaćanja. Pre toga je radila u podršci. Ne radi vikendom.",
+      "entities": {
+        "Jelena": [
+          "jelena",
+          "jelene",
+          "jeleni",
+          "jelenu",
+          "jelenom"
+        ]
+      },
+      "claims": [
+        {
+          "claim_id": "c1",
+          "subject": "Jelena",
+          "anchors": [
+            [
+              "plac*"
+            ],
+            [
+              "vod*",
+              "rukovod*",
+              "lider*",
+              "sef*"
+            ]
+          ],
+          "support": "Jelena je od septembra 2026. vođa tima za plaćanja."
+        },
+        {
+          "claim_id": "c2",
+          "subject": "Jelena",
+          "status": "superseded",
+          "anchors": [
+            [
+              "podrs*"
+            ]
+          ],
+          "support": "Pre toga je radila u podršci.",
+          "required": false
+        },
+        {
+          "claim_id": "c3",
+          "subject": "Jelena",
+          "negated": true,
+          "anchors": [
+            [
+              "vikend*"
+            ],
+            [
+              "radi"
+            ]
+          ],
+          "support": "Ne radi vikendom."
+        }
+      ]
+    }
+  ]
+}
