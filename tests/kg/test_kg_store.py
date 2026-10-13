@@ -213,3 +213,105 @@ def test_as_of_boundary_strict(tmp_path: Path) -> None:
     state2 = kg2.as_of("2025-06-01T00:00:00")
     assert rel2.id in [r.id for r in state2.relations]
     db.close()
+
+
+# --- re-assertion after a retirement gap -------------------------------------
+
+
+def _ab(kg: KnowledgeGraph) -> tuple[int, int]:
+    return kg.create_entity("person", "alice").id, kg.create_entity("city", "boston").id
+
+
+def _holds(kg: KnowledgeGraph, rid: int, iso: str) -> bool:
+    return rid in {r.id for r in kg.as_of(iso).relations}
+
+
+def test_reassert_after_gap_preserves_the_gap(tmp_path: Path) -> None:
+    """valid [Jan, Mar), retired, re-asserted from Jun: April is false,
+    February and July are true, and the answers survive a reopen."""
+    db, kg = _kg(tmp_path)
+    a, b = _ab(kg)
+    rel = kg.create_relation(a, b, "LIVES_IN", valid_from="2025-01-01T00:00:00")
+    kg.retire_relation(rel.id, valid_to="2025-03-01T00:00:00")
+    back = kg.reopen_relation(rel.id, valid_from="2025-06-01T00:00:00")
+
+    assert back.id == rel.id and back.valid_to is None
+    assert back.valid_from == "2025-06-01T00:00:00"
+    assert kg.relation_intervals(rel.id) == [
+        ("2025-01-01T00:00:00", "2025-03-01T00:00:00"),
+        ("2025-06-01T00:00:00", None),
+    ]
+    expected = {
+        "2024-12-31": False,
+        "2025-02-01": True,
+        "2025-03-01": False,  # half-open: valid_to excluded
+        "2025-04-15": False,  # inside the gap
+        "2025-06-01": True,
+        "2025-07-01": True,
+    }
+    assert {d: _holds(kg, rel.id, d) for d in expected} == expected
+    snap = kg.as_of("2025-02-01")
+    hist = next(r for r in snap.relations if r.id == rel.id)
+    assert (hist.valid_from, hist.valid_to) == ("2025-01-01T00:00:00", "2025-03-01T00:00:00")
+    db.close()
+
+    db = MindDB(tmp_path / "test.mind", dim=384)
+    kg = KnowledgeGraph(db)
+    assert {d: _holds(kg, rel.id, d) for d in expected} == expected
+    assert kg.find_valid_relations(a, "LIVES_IN")[0].id == rel.id
+    db.close()
+
+
+def test_reassert_overlapping_retirement_continues_interval(tmp_path: Path) -> None:
+    """A re-assertion valid from before the old valid_to means the fact never
+    stopped holding: no history row, the interval just continues."""
+    db, kg = _kg(tmp_path)
+    a, b = _ab(kg)
+    rel = kg.create_relation(a, b, "LIVES_IN", valid_from="2025-01-01T00:00:00")
+    kg.retire_relation(rel.id, valid_to="2025-03-01T00:00:00")
+    kg.reopen_relation(rel.id, valid_from="2025-02-15T00:00:00")
+    assert kg.relation_intervals(rel.id) == [("2025-01-01T00:00:00", None)]
+    assert _holds(kg, rel.id, "2025-04-15")
+    db.close()
+
+
+def test_reopen_valid_relation_is_noop(tmp_path: Path) -> None:
+    db, kg = _kg(tmp_path)
+    a, b = _ab(kg)
+    rel = kg.create_relation(a, b, "LIVES_IN", valid_from="2025-01-01T00:00:00")
+    assert kg.reopen_relation(rel.id, valid_from="2025-06-01T00:00:00") == rel
+    assert kg.relation_intervals(rel.id) == [("2025-01-01T00:00:00", None)]
+    db.close()
+
+
+def test_offset_aware_validity_is_stored_and_compared_as_utc(tmp_path: Path) -> None:
+    db, kg = _kg(tmp_path)
+    a, b = _ab(kg)
+    rel = kg.create_relation(a, b, "LIVES_IN", valid_from="2025-01-01T02:00:00+02:00")
+    assert rel.valid_from == "2025-01-01T00:00:00"
+    kg.retire_relation(rel.id, valid_to="2025-03-01T00:00:00Z")
+    assert kg.get_relation(rel.id).valid_to == "2025-03-01T00:00:00"
+    assert _holds(kg, rel.id, "2025-01-01T01:00:00+01:00")  # = 00:00Z, inclusive start
+    assert not _holds(kg, rel.id, "2024-12-31T23:59:59Z")
+    assert not _holds(kg, rel.id, "2025-03-01T01:00:00+01:00")  # = valid_to
+    db.close()
+
+
+def test_legacy_file_without_history_table_upgrades_and_reads(tmp_path: Path) -> None:
+    """A 0.0.1 file (no history table; a relation reopened the old way, so
+    its gap was already lost) opens, reads as before, and records gaps for
+    new re-assertions."""
+    db, kg = _kg(tmp_path)
+    a, b = _ab(kg)
+    rel = kg.create_relation(a, b, "LIVES_IN", valid_from="2025-01-01T00:00:00")
+    db.conn.execute("DROP TABLE knowledge_relation_history")
+    db.conn.commit()
+    db.close()
+
+    db = MindDB(tmp_path / "test.mind", dim=384)
+    kg = KnowledgeGraph(db)
+    assert _holds(kg, rel.id, "2025-02-01")
+    kg.retire_relation(rel.id, valid_to="2025-03-01T00:00:00")
+    kg.reopen_relation(rel.id, valid_from="2025-06-01T00:00:00")
+    assert not _holds(kg, rel.id, "2025-04-15")
+    db.close()

@@ -13,6 +13,7 @@ profile weights) is read from ``AppConfig``.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pytest import approx
@@ -431,5 +432,76 @@ def test_low_trust_memory_remains_usable(tmp_path: Path) -> None:
         }
         res = search.search("alpha", limit=10)
         assert {h.frame.id for h in res.hits} == ids
+    finally:
+        db.close()
+
+
+# --- UTC time handling ------------------------------------------------------
+
+_FIXED_NOW = datetime(2025, 1, 20, 10, 0, tzinfo=UTC)
+
+
+def _fixed_search(db: MindDB, store: FrameStore, cfg: AppConfig) -> HybridSearch:
+    return HybridSearch(
+        db, store, cfg, embedder=store.embedder, clock=lambda: _FIXED_NOW
+    )
+
+
+def test_offset_and_naive_created_at_score_as_the_same_instant(tmp_path: Path) -> None:
+    """``12:00+02:00`` and naive ``10:00`` are the same UTC instant, so with a
+    fixed clock they decay identically; the aware value is stored as UTC."""
+    cfg = _cfg(**{"search.rerank.enabled": False, "search.abstain.enabled": False})
+    db, store, _s, _e = _build(tmp_path, cfg=cfg)
+    try:
+        aware = store.create_i_frame(
+            "gop-1", "alpha aware", created_at="2025-01-10T12:00:00+02:00"
+        )
+        naive = store.create_i_frame("gop-2", "alpha naive", created_at="2025-01-10T10:00:00")
+        assert aware.created_at == "2025-01-10T10:00:00"
+        hits = {h.frame.id: h for h in _fixed_search(db, store, cfg).search("alpha").hits}
+        assert hits[aware.id].relevance == approx(hits[naive.id].relevance)
+    finally:
+        db.close()
+
+
+def test_legacy_aware_created_at_row_does_not_break_search(tmp_path: Path) -> None:
+    """A row written before normalization with an offset in ``created_at``
+    used to raise (naive minus aware). It now ranks by its UTC age."""
+    cfg = _cfg(**{"search.rerank.enabled": False, "search.abstain.enabled": False})
+    db, store, _s, _e = _build(tmp_path, cfg=cfg)
+    try:
+        legacy = store.create_i_frame("gop-1", "alpha legacy")
+        modern = store.create_i_frame("gop-2", "alpha modern", created_at="2025-01-10T10:00:00")
+        db.conn.execute(
+            "UPDATE memory_frames SET created_at=? WHERE id=?",
+            ("2025-01-10T12:00:00+02:00", legacy.id),
+        )
+        db.conn.commit()
+        hits = {h.frame.id: h for h in _fixed_search(db, store, cfg).search("alpha").hits}
+        assert set(hits) == {legacy.id, modern.id}
+        assert hits[legacy.id].relevance == approx(hits[modern.id].relevance)
+    finally:
+        db.close()
+
+
+def test_event_time_filter_compares_offsets_as_utc(tmp_path: Path) -> None:
+    """``2024-06-01T01:00+02:00`` is 2024-05-31 23:00 UTC: outside a range
+    starting at date-only ``2024-06-01`` (midnight UTC); ``2024-06-01T00:30Z``
+    is inside, and so is an offset ``until`` bound equal to it."""
+    cfg = _cfg(**{"search.rerank.enabled": False, "search.abstain.enabled": False})
+    db, store, search, _e = _build(tmp_path, cfg=cfg)
+    try:
+        before = store.create_i_frame(
+            "gop-1", "alpha before", event_time="2024-06-01T01:00:00+02:00"
+        )
+        inside = store.create_i_frame("gop-2", "alpha inside", event_time="2024-06-01T00:30:00Z")
+        assert before.event_time == "2024-05-31T23:00:00"
+        ids = {h.frame.id for h in search.search("alpha", since="2024-06-01").hits}
+        assert ids == {inside.id}
+        ids = {
+            h.frame.id
+            for h in search.search("alpha", until="2024-06-01T02:30:00+02:00").hits
+        }
+        assert ids == {before.id, inside.id}
     finally:
         db.close()

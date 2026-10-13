@@ -95,6 +95,11 @@ CREATE TABLE knowledge_relations (id INTEGER PK AUTOINCREMENT,
   relation_type TEXT, confidence REAL DEFAULT 1.0, properties TEXT DEFAULT '{}',
   valid_from TEXT DEFAULT (datetime('now')), valid_to TEXT, recorded_at TEXT DEFAULT (datetime('now')),
   UNIQUE(source_id, target_id, relation_type));
+-- earlier validity intervals of a relation that was retired and re-asserted
+CREATE TABLE knowledge_relation_history (id INTEGER PK AUTOINCREMENT,
+  relation_id INTEGER REFERENCES knowledge_relations(id) ON DELETE CASCADE,
+  valid_from TEXT NOT NULL, valid_to TEXT NOT NULL, recorded_at TEXT NOT NULL,
+  closed_recorded_at TEXT NOT NULL DEFAULT (datetime('now')));
 CREATE TABLE kg_entity_frames (entity_id INTEGER REFERENCES knowledge_entities(id) ON DELETE CASCADE,
   frame_id INTEGER REFERENCES memory_frames(id) ON DELETE CASCADE, PRIMARY KEY(entity_id, frame_id));
 ```
@@ -179,7 +184,7 @@ relevance = w.t*temporal + w.p*popularity + w.c*contextual + w.i*importance
 
 ## 6. Knowledge graph + temporal
 
-Bitemporal entities/relations, retire-not-delete, `as_of(T)`. **Seeding** is a word-boundary/token match (config `seed_min_len` aligned with the technical-token allowlist). **BFS** is symmetric (in + out), with config depth and step vector. KG-lane errors emit a metric (never a silent zero). Backdating: DSPy resolves relative time cues to `event_time`; `created_at` stays ingest time.
+Bitemporal entities/relations, retire-not-delete, `as_of(T)`. Valid time (`valid_from`/`valid_to`) says when a fact held in the world; `recorded_at` says when GluoMem learned it. Re-asserting a retired relation after a gap archives the closed interval in `knowledge_relation_history` and starts a new one on the same row (a re-assertion valid from before the old `valid_to` just continues the interval); `as_of(T)` checks the current row and its history. Conflicting single-valued facts are resolved by valid time: a newer-valid fact closes the older edge at its own `valid_from`, and an older fact recorded late is closed at the newer edge's `valid_from` instead of retiring it. All timestamps follow one UTC rule (`gluomem/timeutil.py`): naive is UTC, aware is converted to naive UTC on write, date-only means midnight UTC. **Seeding** is a word-boundary/token match (config `seed_min_len` aligned with the technical-token allowlist). **BFS** is symmetric (in + out), with config depth and step vector. KG-lane errors emit a metric (never a silent zero). Backdating: DSPy resolves relative time cues to `event_time`; `created_at` stays ingest time.
 
 ```python
 class KnowledgeGraph:

@@ -12,8 +12,9 @@ into KG row ids:
   triple raises ``sqlite3.IntegrityError`` (UNIQUE source/target/type); the
   gate recovers idempotently by looking the existing edge up.
 - ``retire_conflicting_relations`` implements functional-edge invalidation on
-  the contradiction path: a new ``(s, rtype, t_new)`` retires every valid
-  ``(s, rtype, t_old != t_new)`` — bitemporal retire-not-delete.
+  the contradiction path: of ``(s, rtype, t_new)`` and a valid
+  ``(s, rtype, t_old != t_new)`` the one valid from earlier is closed when the
+  other begins — bitemporal retire-not-delete, ordered by valid time.
 
 dspy-free: only the ``Extractors`` protocol and pydantic output types cross
 this boundary.
@@ -26,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from gluomem.kg.normalizer import predicate_family
+from gluomem.timeutil import utc_key
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -213,8 +215,9 @@ def resolve_cognify_result(
             # Duplicate triple. Valid row -> recover it (idempotent re-ingest).
             # Retired row -> the fact is being RE-ASSERTED after a
             # contradiction retired it (real LoCoMo does this): reopen the
-            # edge so it is valid again, feeding contradiction detection like
-            # any fresh edge.
+            # edge from this assertion's valid time (the retirement gap is
+            # kept in the relation history), feeding contradiction detection
+            # like any fresh edge.
             existing = [
                 r
                 for r in kg.find_valid_relations(source_id, rel.relation_type)
@@ -228,7 +231,7 @@ def resolve_cognify_result(
                 )
                 if retired_row is None:
                     raise
-                created = kg.reopen_relation(retired_row.id)
+                created = kg.reopen_relation(retired_row.id, valid_from=valid_from)
         if created.id not in relation_ids:
             relation_ids.append(created.id)
             relations.append(created)
@@ -244,13 +247,22 @@ def retire_conflicting_relations(
     kg: KnowledgeGraph,
     kg_cfg: KgConfig | None = None,
 ) -> list[int]:
-    """Functional-edge invalidation: retire ``(s, rtype, t_old != t_new)``.
+    """Functional-edge invalidation for ``(s, rtype, t_old != t_new)``.
 
     For each new relation, every OTHER currently-valid relation with the same
-    source and type but a different target is retired (``valid_to`` set, row
-    kept — bitemporal history preserved). With ``kg_cfg.predicate_families``
-    configured, "same type" widens to the whole predicate family, so
-    ``MOVED_TO`` can retire a stale ``LIVES_IN``. Returns retired ids.
+    source and type but a different target conflicts with it. With
+    ``kg_cfg.predicate_families`` configured, "same type" widens to the whole
+    predicate family, so ``MOVED_TO`` can retire a stale ``LIVES_IN``.
+
+    The conflict is resolved by VALID time, not by recording order:
+
+    - the new edge is valid from on or after the old one: the old edge is
+      closed at the new edge's ``valid_from`` (when the change happened);
+    - the new edge is valid from strictly earlier (a backdated, older fact
+      recorded late): the old edge stays current and the new edge is closed
+      at the old edge's ``valid_from``.
+
+    Retire-not-delete either way. Returns the retired relation ids.
     """
     retired: list[int] = []
     for rel in new_relations:
@@ -261,10 +273,16 @@ def retire_conflicting_relations(
         for rtype in rtypes:
             for existing in kg.find_valid_relations(rel.source_id, rtype):
                 if (
-                    existing.id != rel.id
-                    and existing.target_id != rel.target_id
-                    and existing.id not in retired
+                    existing.id == rel.id
+                    or existing.target_id == rel.target_id
+                    or existing.id in retired
+                    or rel.id in retired
                 ):
-                    kg.retire_relation(existing.id)
+                    continue
+                if utc_key(rel.valid_from) >= utc_key(existing.valid_from):
+                    kg.retire_relation(existing.id, valid_to=rel.valid_from)
                     retired.append(existing.id)
+                else:
+                    kg.retire_relation(rel.id, valid_to=existing.valid_from)
+                    retired.append(rel.id)
     return retired
