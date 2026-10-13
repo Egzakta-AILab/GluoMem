@@ -34,15 +34,33 @@ These are tracked for the first hardening iteration and are being fixed:
 
 The benchmark reports in [docs/research/](./docs/research/README.md) are historical. The `experiments/` run directories they cite were never published, so their numbers cannot currently be rescored. See the [evidence inventory](./docs/research/EVIDENCE_INVENTORY.md). Use them as research notes, not as product claims, until a new rescorable baseline is published.
 
+## Installation
+
+The core package is small. Model-backed components are optional extras. When a configured component needs an extra that is not installed, GluoMem raises `MissingExtraError` naming the extra; it never substitutes a fake or mock component because a package is missing.
+
+| Install | Adds | Readiness |
+|---|---|---|
+| `gluomem` (core) | Config, SQLite storage, I/P/B frames, hybrid search, KG, fake extractors, mock embedder | Works offline; real embedding, reranking and DSPy extraction raise `MissingExtraError` |
+| `gluomem[llm]` | DSPy 3.2.1: extraction, answerer, judges, prompt optimization | Needs `OPENROUTER_API_KEY` at call time; calls are paid |
+| `gluomem[embeddings]` | sentence-transformers MiniLM embedder and cross-encoder reranker | Downloads models from Hugging Face on first use |
+| `gluomem[all]` | `llm` and `embeddings` | Both of the above |
+| `gluomem[mem0]` | mem0ai 2.0.11 comparison baseline | Benchmark comparison only |
+
+`gluomem.extras.status()` reports which extras are installed without importing or downloading anything.
+
 ## Quickstart
 
 Requires Python 3.11 or newer and [uv](https://docs.astral.sh/uv/). Every command below runs offline and makes no paid model calls.
 
 ```bash
-uv sync --locked         # install exactly what uv.lock pins
+make install             # uv sync --locked --extra all (full development environment)
+# or: make install-offline  (uv sync --locked --extra llm; enough for make check, no torch)
 make check               # ruff lint + pyrefly type check + offline tests
+make wheel-check         # build the wheel, install it core-only outside the checkout, write and read
 uv run gluomem --help    # CLI: ingest, bench run|rescore|gate|sample|fetch|ingest|verify
 ```
+
+CI (`.github/workflows/ci.yml`) runs `make check` on Python 3.11, 3.12 and 3.13 and `make wheel-check` on every pull request. Slow tests that download models run only when the workflow is dispatched manually with `run_model_tests`.
 
 Deterministic ingest of a bundled synthetic fixture, using the fake extractors and mock embeddings:
 

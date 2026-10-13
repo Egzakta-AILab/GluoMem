@@ -7,20 +7,30 @@ license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Egzakta" }]
 requires-python = ">=3.11"
+# Core: config, SQLite storage, frames, hybrid search, KG, fake extractors and
+# mock embeddings. Heavier capabilities are extras; see README "Installation".
 dependencies = [
     "pydantic",
     "pydantic-settings",
     "pyyaml",
     "sqlite-vec",
-    "sentence-transformers",
-    "onnxruntime",
     "numpy",
-    "scipy",
-    "dspy==3.2.1",
     "python-dotenv>=1.2.2",
 ]
 
 [project.optional-dependencies]
+# DSPy extraction, answerer, judges and prompt optimization (OpenRouter calls).
+llm = [
+    "dspy==3.2.1",
+]
+# In-process sentence-transformers embedder and cross-encoder reranker
+# (downloads models from Hugging Face on first use).
+embeddings = [
+    "sentence-transformers",
+]
+all = [
+    "gluomem[llm,embeddings]",
+]
 # M5.5 head-to-head competitor: install with `uv sync --extra mem0`.
 # Exact pin — the paper's manifest records this version; the offline gate
 # must pass WITHOUT this extra (all mem0 imports are function-local).

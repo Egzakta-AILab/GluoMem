@@ -67,6 +67,9 @@ class CrossEncoderReranker:
 
     def _load(self) -> Any:
         if self._model is None:
+            from gluomem.extras import require
+
+            require("embeddings", f"reranker model '{self._model_name}'")
             from sentence_transformers import CrossEncoder
 
             self._model = CrossEncoder(self._model_name)

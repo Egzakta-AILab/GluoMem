@@ -1,0 +1,76 @@
+name: ci
+
+# Offline gate: lint, type check, offline tests and the installed-wheel
+# boundary check. No secrets, no paid provider calls, no model downloads.
+# Real-model tests run only in the manually dispatched `models` job.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_model_tests:
+        description: "Also run slow tests that download Hugging Face models (no paid calls)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_LOCKED: "1"
+  FORCE_COLOR: "0"
+
+jobs:
+  check:
+    name: make check (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - name: Install from uv.lock (core + llm extra, no model packages)
+        run: make install-offline
+      - name: Record environment
+        run: |
+          uv --version
+          uv run python -c "import platform, gluomem, gluomem.extras as e; print(platform.platform(), platform.python_version(), gluomem.__version__, e.status())"
+      - name: make check
+        run: make check
+
+  wheel:
+    name: installed-wheel check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Build, install core-only outside the checkout, write and read
+        run: make wheel-check PYTHON=3.12
+
+  models:
+    name: slow model tests (manual)
+    if: github.event_name == 'workflow_dispatch' && inputs.run_model_tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: make install
+      - name: Slow tests (model downloads; live provider tests skip without a key)
+        run: uv run pytest -m slow

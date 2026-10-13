@@ -54,6 +54,9 @@ def make_extractors(cfg: AppConfig) -> Extractors:
     else:
         # backend == "dspy" (enum-validated): lazy import keeps dspy out of
         # every other code path.
+        from gluomem.extras import require
+
+        require("llm", "write.extraction_backend=dspy")
         from gluomem.llm.modules import DspyExtractors
 
         inner = DspyExtractors(cfg)
