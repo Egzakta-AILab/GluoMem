@@ -9,7 +9,7 @@ GluoMem is a research-stage Python library (version 0.0.1). It runs locally agai
 - **I/P/B memory frames** (a video-codec model of memory): I-frames hold self-contained facts and are content-hash deduplicated per GOP (group of pictures, a topic or session scope); P-frames hold refinements on a base I-frame; B-frames hold corrections written by the contradiction detector. Compaction merges a GOP's P-frames into its I-frame and records each merged frame's identity as lineage. A frame row and its FTS/vector index commit together; `FrameStore.repair_indexes()` rebuilds missing or stale indexes in files written by 0.0.1.
 - **Temporal knowledge graph** with `valid_from`/`valid_to` on relations and relation retirement. A relation that is retired and later re-asserted keeps its earlier interval in `knowledge_relation_history`, so `as_of()` answers false inside the gap. Conflicting facts are ordered by valid time, not by when they were recorded.
 - **One UTC convention**: naive timestamps are UTC, offset-aware ones are converted to UTC on write and read, and search recency reads time from an injectable clock ([timeutil](./gluomem/timeutil.py)).
-- **Hybrid retrieval**: SQLite FTS5 (BM25) and sqlite-vec exact KNN, fused with RRF, then a four-signal relevance model (temporal, popularity, contextual, importance) and an optional cross-encoder reranker.
+- **Hybrid retrieval**: SQLite FTS5 (BM25) and sqlite-vec exact KNN, fused with RRF, then a four-signal relevance model (temporal, popularity, contextual, importance) and an optional cross-encoder reranker. Abstention is separate from ranking: `search.abstain.score` names the scale the threshold is read on (`fusion`, the default, gives the same decision with reranking on or off; `rerank` requires a declared calibration matching the reranker model), and every search returns an `AbstentionDecision` with the reason, score identity, top score and calibration. No threshold has been calibrated; the default `0.0` abstains only when no eligible evidence exists.
 - **DSPy write path**: typed extraction behind an `Extractors` protocol, with deterministic fake extractors for offline tests, an admission gate (regex injection scanner, quarantine or reject), and an extraction cache. Quarantined frames are kept for inspection by id but excluded from search, current-state reads, graph linking and compaction ([eligibility rule](./gluomem/frames/eligibility.py)).
 - **Benchmark harness**: LoCoMo and LongMemEval (S and oracle) adapters, full-context, BM25 and vector-RAG baselines, an optional mem0 comparison, judge panels, protocol tags, offline rescore of a run directory, and usage accounting.
 - **Fail-closed components**: each embedder, reranker and LLM backend is built from the provider its config names, or construction raises; nothing falls back to the mock embedder. Test doubles (`provider: fake` embedders, `fake` backends) need `components.allow_fake: true`. A `.mind` file records the fingerprint of the embedder that wrote its vectors (implementation, model, revision, dim, preprocessing, index schema) and rejects any other embedder before reading or writing a vector. `gluomem components` prints the effective components and their readiness without secrets; `gluomem index rebuild` and `gluomem index adopt` are the explicit ways to change or record a file's embedder.
@@ -20,12 +20,6 @@ GluoMem is a research-stage Python library (version 0.0.1). It runs locally agai
 - **Offline numeric tuning.** `gluomem/tune` is a placeholder, and `gluomem tune` and `gluomem ablate` exit with "not implemented". The tuning design in [DESIGN.md §9](./DESIGN.md#9-tuning-subsystem) is a plan.
 - **Prompt optimization quality metric.** `make optimize-prompts` runs DSPy MIPROv2 with a parse-or-exact-match metric; it spends real tokens and is never run automatically.
 - **Service features**: HTTP or MCP API, multi-user identity, tenants, workspaces, RBAC, durable jobs, deployment packaging.
-
-## Known limitations at 0.0.1
-
-These are tracked for the first hardening iteration and are being fixed:
-
-- With reranking enabled, the abstention threshold is compared against reranker logits instead of fusion scores.
 
 ## Evidence status
 

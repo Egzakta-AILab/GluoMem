@@ -132,12 +132,14 @@ class GluoMemRetriever:
             result = self._search_for(s.conv_id).search(
                 s.question, limit=self._cfg.benchmark.answer.context_k
             )
+        decision = result.abstention.as_dict() if result.abstention else None
         if result.abstained or not result.hits:
             return Prediction(
                 sample_id=s.id,
                 answer=self._cfg.benchmark.answer.abstain_text,
                 abstained=True,
                 latency_ms=(time.perf_counter() - start) * 1000.0,
+                abstention=decision,
             )
         evidence = set(s.evidence)
         docs: list[RetrievedDoc] = []
@@ -170,6 +172,7 @@ class GluoMemRetriever:
             prompt_tokens=out.prompt_tokens,
             completion_tokens=out.completion_tokens,
             latency_ms=(time.perf_counter() - start) * 1000.0,
+            abstention=decision,
         )
 
     def manifest_extra(self) -> dict[str, object]:
@@ -188,7 +191,12 @@ class GluoMemRetriever:
                 "pool": rerank.pool,
                 "active": self._resolve_reranker() is not None,
             },
-            "abstain": {"enabled": self._cfg.search.abstain.enabled},
+            "abstain": {
+                "enabled": self._cfg.search.abstain.enabled,
+                "score": self._cfg.search.abstain.score,
+                "threshold": self._cfg.search.abstain.threshold,
+                "calibration": self._cfg.search.abstain.calibration or "uncalibrated",
+            },
         }
 
 

@@ -18,12 +18,17 @@ lanes together with:
   ``limit*lane_fetch_time_mult`` when a since/until time filter is set. The
   effective ``lane_fetch`` is EXPOSED on the result so it is observable.
 - **rerank pool** — when ``search.rerank.enabled`` and a reranker is configured,
-  the top ``rerank.pool`` hits are re-scored by the cross-encoder and each
-  pooled hit's ``final`` is REPLACED by the logit; the pool is then re-sorted by
-  logit descending.
-- **abstain gate** — when ``search.abstain.enabled`` and the top ``final`` is
-  below ``abstain.threshold`` (or there are no hits), an abstained result (empty
-  hits + ``abstained=True``) is returned instead of ranked frames.
+  the top ``rerank.pool`` hits are re-scored by the cross-encoder; each pooled
+  hit's ``rerank`` holds the logit and its ranking score ``final`` becomes the
+  logit; the pool is then re-sorted by logit descending. ``fusion`` keeps
+  ``rrf * relevance`` for every hit.
+- **abstain gate** — ranking and sufficiency are separate. The gate reads the
+  score ``search.abstain.score`` names (``fusion``: top ``fusion`` among
+  eligible hits, identical with rerank on or off; ``rerank``: top logit, only
+  with a matching declared calibration, validated in config) and compares it
+  with ``abstain.threshold``. Every result carries an
+  :class:`AbstentionDecision` (reason, score identity, top score, threshold,
+  calibration), including when the gate is disabled or nothing matched.
 
 - **eligibility** — recall-ineligible frames (quarantined; see
   :mod:`gluomem.frames.eligibility`) are dropped inside each lane and again at
@@ -45,7 +50,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from gluomem.config.app_config import AppConfig, ProfileWeights
+from gluomem.config.app_config import AppConfig, ProfileWeights, reranker_calibration_id
 from gluomem.embedding.base import Embedder
 from gluomem.embedding.compat import bind_embedder
 from gluomem.embedding.reranker import Reranker
@@ -62,7 +67,7 @@ from gluomem.storage.db import MindDB
 from gluomem.storage.sqlite_vec import SqliteVecStore
 from gluomem.timeutil import Clock, parse_utc, utc_key, utc_now
 
-__all__ = ["HybridSearch", "SearchHit", "SearchResult"]
+__all__ = ["AbstentionDecision", "HybridSearch", "SearchHit", "SearchResult"]
 
 
 # ---------------------------------------------------------------------------
@@ -75,8 +80,10 @@ class SearchHit:
     """A single ranked search hit.
 
     ``rrf`` and ``relevance`` are the pre-rerank fusion / personalization
-    scores; ``final`` is the displayed score — ``rrf * relevance`` before
-    rerank, or the cross-encoder logit after rerank for pooled hits.
+    scores and ``fusion == rrf * relevance``. ``rerank`` is the cross-encoder
+    logit for pooled hits (``None`` otherwise). ``final`` is the ranking
+    score: the logit for reranked hits, else ``fusion``. Abstention reads
+    ``fusion`` or ``rerank`` explicitly, never ``final``.
     """
 
     frame: Frame
@@ -84,15 +91,44 @@ class SearchHit:
     relevance: float
     final: float
     rank: int = 0
+    fusion: float = 0.0
+    rerank: float | None = None
+
+
+@dataclass(frozen=True)
+class AbstentionDecision:
+    """Why a search did or did not abstain, on which scale.
+
+    ``reason`` is ``no_hits`` (no eligible evidence), ``below_threshold``,
+    ``sufficient`` or ``disabled`` (gate off, evidence present).
+    ``score_identity`` names the scale (``fusion/rrf_k=60/profile=balanced``
+    or ``rerank/<model>``); ``calibration`` is the declared threshold source,
+    ``"uncalibrated"`` when none was declared.
+    """
+
+    enabled: bool
+    abstained: bool
+    reason: str
+    score: str
+    score_identity: str
+    threshold: float
+    calibration: str
+    top_score: float | None
+    candidates: int
+
+    def as_dict(self) -> dict[str, object]:
+        return dict(self.__dict__)
 
 
 @dataclass
 class SearchResult:
     """The outcome of a :meth:`HybridSearch.search` call.
 
-    ``abstained`` is True when the abstain gate fired (insufficient top score);
-    in that case ``hits`` is empty. ``lane_fetch`` is the effective per-lane
-    fetch used (exposed for observability).
+    ``abstained`` is True when the abstain gate fired (no eligible evidence or
+    insufficient top score); in that case ``hits`` is empty. ``abstention``
+    records the decision and its score contract for every search.
+    ``lane_fetch`` is the effective per-lane fetch used (exposed for
+    observability).
     ``kg_lane_errors`` counts KG contextual-lane failures observed during the
     search: a normal run leaves it at 0; a KG-lane exception increments it
     (distinguishable from a legitimate zero-contextual result) and the lane
@@ -104,6 +140,7 @@ class SearchResult:
     lane_fetch: int = 0
     profile: str = "balanced"
     kg_lane_errors: int = 0
+    abstention: AbstentionDecision | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +206,12 @@ class HybridSearch:
         elif embedder is not store.embedder:
             bind_embedder(db, embedder)
         self._embedder: Embedder = embedder
+        abstain = cfg.search.abstain
+        if abstain.enabled and abstain.score == "rerank" and reranker is None:
+            raise ValueError(
+                "search.abstain.score='rerank' needs a reranker; none was given, "
+                "so the gate would have no logit to read"
+            )
         self._reranker: Reranker | None = reranker
         self._kg: KnowledgeGraph | None = kg
         self._frames_vec: SqliteVecStore = SqliteVecStore(
@@ -284,10 +327,11 @@ class HybridSearch:
                 scoring=cfg.scoring,
                 weights=weights,
             )
-            # (8) final = rrf * relevance.
+            # (8) final = fusion = rrf * relevance (until rerank).
+            fused = rrf_score * rel
             hits.append(
                 SearchHit(
-                    frame=frame, rrf=rrf_score, relevance=rel, final=rrf_score * rel
+                    frame=frame, rrf=rrf_score, relevance=rel, final=fused, fusion=fused
                 )
             )
 
@@ -303,20 +347,11 @@ class HybridSearch:
         for i, h in enumerate(hits):
             h.rank = i
 
-        # (10) Abstain gate: if enabled and the top final is below the threshold
-        # (or there are no hits), return an abstained result with empty hits.
-        # NOTE on scale: when ``search.rerank.enabled`` is true, step (9) has
-        # REPLACED ``hits[0].final`` with the cross-encoder logit — a different
-        # scale than ``rrf * relevance``. ``abstain.threshold`` (default 0.0) is
-        # calibrated for the rrf*relevance scale, so under rerank it changes
-        # meaning; combining rerank + abstain may need a separately-calibrated
-        # threshold.
-        abstain = cfg.search.abstain
-        abstained = False
-        if abstain.enabled:
-            if not hits or hits[0].final < abstain.threshold:
-                abstained = True
-                hits = []
+        # (10) Sufficiency gate on its declared scale, never on ``final``.
+        decision = self._abstention(hits, prof_name)
+        abstained = decision.abstained
+        if abstained:
+            hits = []
 
         # Truncate to the requested limit (after abstain so an abstained result
         # stays empty).
@@ -329,6 +364,37 @@ class HybridSearch:
             lane_fetch=lane_fetch,
             profile=prof_name,
             kg_lane_errors=kg_lane_errors,
+            abstention=decision,
+        )
+
+    def _abstention(self, hits: list[SearchHit], profile: str) -> AbstentionDecision:
+        cfg = self._cfg
+        abstain = cfg.search.abstain
+        if abstain.score == "rerank":
+            identity = f"rerank/{reranker_calibration_id(cfg)}"
+            scores = [h.rerank for h in hits if h.rerank is not None]
+        else:
+            identity = f"fusion/rrf_k={cfg.search.rrf_k}/profile={profile}"
+            scores = [h.fusion for h in hits]
+        top = max(scores) if scores else None
+        if top is None:
+            reason = "no_hits"
+        elif not abstain.enabled:
+            reason = "disabled"
+        elif top < abstain.threshold:
+            reason = "below_threshold"
+        else:
+            reason = "sufficient"
+        return AbstentionDecision(
+            enabled=abstain.enabled,
+            abstained=abstain.enabled and reason in ("no_hits", "below_threshold"),
+            reason=reason,
+            score=abstain.score,
+            score_identity=identity,
+            threshold=abstain.threshold,
+            calibration=abstain.calibration or "uncalibrated",
+            top_score=top,
+            candidates=len(hits),
         )
 
     # --- lanes --------------------------------------------------------------
@@ -412,9 +478,9 @@ class HybridSearch:
     ) -> list[SearchHit]:
         """Rerank the top ``rerank.pool`` hits with the cross-encoder.
 
-        Each pooled hit's ``final`` is REPLACED by the cross-encoder logit; the
-        pool is then re-sorted by logit descending. Hits beyond the pool keep
-        their ``rrf * relevance`` final and order.
+        Each pooled hit's ``rerank`` and ranking score ``final`` become the
+        cross-encoder logit (``fusion`` is kept); the pool is then re-sorted by
+        logit descending. Hits beyond the pool keep their fusion score and order.
         """
         pool_size = int(self._cfg.search.rerank.pool)
         if pool_size <= 0 or not hits:
@@ -425,7 +491,8 @@ class HybridSearch:
         docs = [_indexable_text(h.frame) for h in pooled]
         logits = self._reranker.score(query, docs) if self._reranker else []
         for h, logit in zip(pooled, logits, strict=True):
-            h.final = float(logit)
+            h.rerank = float(logit)
+            h.final = h.rerank
 
         # Re-sort the pool by logit descending (stable on equal logits).
         pooled.sort(key=lambda h: (h.final, -h.frame.id), reverse=True)

@@ -111,8 +111,39 @@ class RerankConfig(BaseModel):
 
 
 class AbstainConfig(BaseModel):
+    """Evidence-sufficiency gate, separate from ranking.
+
+    ``score`` names the scale ``threshold`` is compared against:
+
+    - ``fusion`` — the top ``rrf * relevance`` among eligible hits. Computed
+      before any rerank, so the decision is the same with reranking on or off.
+    - ``rerank`` — the top cross-encoder logit. Requires reranking enabled and
+      ``calibration`` equal to the reranker's ``provider_model`` (with
+      ``@revision`` when pinned), so a threshold chosen for one scale or model
+      cannot silently be read on another.
+
+    ``calibration`` identifies where the threshold came from; ``None`` means
+    uncalibrated (the default 0.0 fusion threshold only abstains on no hits).
+    """
+
     enabled: bool = True
     threshold: float = 0.0
+    score: str = "fusion"
+    calibration: str | None = None
+
+
+#: Scores the abstention gate can read (see :class:`AbstainConfig`).
+ABSTAIN_SCORES: tuple[str, ...] = ("fusion", "rerank")
+
+
+def reranker_calibration_id(cfg: AppConfig) -> str:
+    """Identity a rerank-scale threshold must declare: model[@revision]."""
+    entry = cfg.models.get(cfg.search.rerank.model)
+    if entry is None:
+        return cfg.search.rerank.model
+    if entry.revision:
+        return f"{entry.provider_model}@{entry.revision}"
+    return entry.provider_model
 
 
 class SearchConfig(BaseModel):
@@ -950,6 +981,34 @@ class AppConfig(BaseSettings):
                 f"storage.vector_dim ({self.storage.vector_dim}) must equal the "
                 f"active embedder dim: embedding.model='{embed_name}' has dim "
                 f"{entry.dim}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_abstain_contract(self) -> AppConfig:
+        """``search.abstain`` names a supported score with matching calibration."""
+        abstain = self.search.abstain
+        if abstain.score not in ABSTAIN_SCORES:
+            raise ValueError(
+                f"search.abstain.score {abstain.score!r} invalid; must be one of "
+                f"{list(ABSTAIN_SCORES)}"
+            )
+        if abstain.score != "rerank" or not abstain.enabled:
+            return self
+        rerank = self.search.rerank
+        if not rerank.enabled or rerank.pool < 1:
+            raise ValueError(
+                "search.abstain.score='rerank' needs search.rerank.enabled=true "
+                "and search.rerank.pool >= 1; use score='fusion' without reranking"
+            )
+        expected = reranker_calibration_id(self)
+        if abstain.calibration != expected:
+            raise ValueError(
+                f"search.abstain.score='rerank' compares threshold "
+                f"{abstain.threshold} against {expected} logits, but "
+                f"search.abstain.calibration is {abstain.calibration!r}. Set it to "
+                f"{expected!r} once the threshold was calibrated for that model, "
+                f"or use score='fusion'."
             )
         return self
 

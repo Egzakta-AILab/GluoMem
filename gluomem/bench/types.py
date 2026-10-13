@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from gluomem.llm.outputs import AnswerResult, Verdict
@@ -66,6 +66,11 @@ class Prediction:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     latency_ms: float | None = None
+    # Why the retriever answered (or abstained): at least ``reason``
+    # (``no_hits`` | ``below_threshold`` | ``sufficient`` | ``disabled``);
+    # gluomem adds the score contract (see ``AbstentionDecision``). Kept on
+    # every prediction so no-evidence cases stay visible in the denominator.
+    abstention: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

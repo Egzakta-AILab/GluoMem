@@ -463,6 +463,7 @@ class Mem0Retriever:
                 answer=self._cfg.benchmark.answer.abstain_text,
                 abstained=True,
                 latency_ms=(time.perf_counter() - start) * 1000.0,
+                abstention={"reason": "no_hits", "candidates": 0},
             )
         docs: list[RetrievedDoc] = []
         lines: list[str] = []
