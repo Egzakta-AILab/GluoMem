@@ -12,7 +12,12 @@ delete; FTS and vec0 rows are not FK-cascaded and are removed explicitly).
 Only P-frames that :func:`gluomem.frames.eligibility.can_merge_into` accepts
 for the base are counted toward the trigger or merged: the merged I keeps the
 base's trust and source, so a quarantined, lower-trust, other-source or
-other-GOP delta is never folded into (and promoted by) the base.
+other-GOP delta is never folded into (and promoted by) the base. A P-frame
+that is itself the base of another frame is not merged.
+
+Publication is failure-atomic: the merged text is embedded first, then the
+content update, re-index, lineage rows (``FrameStore.lineage``), KG-link
+carry-over and P-frame deletes commit together or not at all.
 
 Every constant (trigger, keep_recent, separator) is read from the passed
 ``AppConfig`` — nothing is hardcoded. The defaults (trigger=10, keep_recent=5,
@@ -75,7 +80,7 @@ def compact(store: FrameStore, gop: str, cfg: AppConfig) -> None:
         base = store.get_frame(base_id)
         compatible = [
             p for p in (store.get_frame(pid) for pid in p_ids)
-            if can_merge_into(base, p)
+            if can_merge_into(base, p) and not store.frames_based_on(p.id)
         ]
         if len(compatible) <= trigger:
             continue
@@ -85,7 +90,6 @@ def compact(store: FrameStore, gop: str, cfg: AppConfig) -> None:
         )
         if not older_frames:
             continue
-        older = [p.id for p in older_frames]
 
         # Merge the older P-frame bodies INTO the base I-frame content, joined
         # by the separator. P-frame content is plain text (B-frames are not
@@ -93,24 +97,36 @@ def compact(store: FrameStore, gop: str, cfg: AppConfig) -> None:
         older_bodies = [p.content for p in older_frames]
         merged_content = base.content + sep + sep.join(older_bodies)
 
-        # Update the I-frame content + content_hash (the merged content is a new
-        # canonical dedup key).
+        # Embed the merged text before touching any row: an embedder failure
+        # leaves the base, its index and every P-frame exactly as they were.
+        prepared = store._prepare_index(merged_content)
         new_hash = content_hash(merged_content)
-        store._conn.execute(
-            "UPDATE memory_frames SET content=?, content_hash=? WHERE id=?",
-            (merged_content, new_hash, base_id),
-        )
-        store._conn.commit()
+        old_hash = store._content_hash_of(base_id)
 
-        # Re-embed / re-index the merged I-frame (replaces its FTS + vec + chunks).
-        merged_frame = store.get_frame(base_id)
-        store._index(merged_frame)
-
-        # Referentially delete the merged P-frames and their index rows. The
-        # memory_frame_chunks rows cascade on the frame delete, but the FTS and
-        # vec0 rows are not FK-cascaded — _delete_index_rows removes them
-        # explicitly (including chunk-vec rows by chunk id).
-        for pid in older:
-            store._delete_index_rows(pid)
-            store._conn.execute("DELETE FROM memory_frames WHERE id=?", (pid,))
-        store._conn.commit()
+        # Publish in ONE transaction: new content + hash, its index rows, the
+        # constituent lineage, KG links carried over to the base, then the
+        # merged P-frames and their (non-FK-cascaded) FTS/vec rows. Readers
+        # never see new content with an old index or lost constituents.
+        conn = store._conn
+        try:
+            conn.execute(
+                "UPDATE memory_frames SET content=?, content_hash=? WHERE id=?",
+                (merged_content, new_hash, base_id),
+            )
+            store._write_index(base_id, prepared)
+            store._record_lineage(base_id, base, old_hash, "compaction_base")
+            for p in older_frames:
+                store._record_lineage(
+                    base_id, p, content_hash(p.content), "compaction_merge"
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO kg_entity_frames(entity_id, frame_id) "
+                    "SELECT entity_id, ? FROM kg_entity_frames WHERE frame_id=?",
+                    (base_id, p.id),
+                )
+                store._delete_index_rows(p.id, commit=False)
+                conn.execute("DELETE FROM memory_frames WHERE id=?", (p.id,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise

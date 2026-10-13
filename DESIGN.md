@@ -137,6 +137,8 @@ class FrameStore:
 
 Importance multipliers, compaction trigger/keep-window, and the merge separator are all config. The compaction trigger fires at 10 accumulated P-frames and keeps the most recent 5.
 
+**Write atomicity.** Every `create_*` embeds first, then commits the frame row with its FTS, vector and chunk rows in one transaction. `FrameStore.index_state(id)` reports whether a frame's projections match its current text; dedup hits call `ensure_indexed`, and `repair_indexes()` is the recovery path for existing files. Compaction embeds the merged text first, then commits the content update, re-index, `memory_frame_lineage` rows (constituent id, type, hash, source, trust, timestamps; not text), KG-link carry-over and P-frame deletes together. `memory_frame_lineage` is created by `schema.sql` with `IF NOT EXISTS`, so older files gain it on open.
+
 ---
 
 ## 3. Embedding / chunking / reranker

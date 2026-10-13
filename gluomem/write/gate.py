@@ -16,8 +16,10 @@ max weight among matched ``safety.scanner.patterns``. At or above
 
 Dedup: the gate probes ``store.find_frame_by_hash`` for EVERY frame type, so
 whole-conversation re-ingest is idempotent (the store itself only dedups
-I-frames). Indexing (FTS + vector + chunks) is write-through inside the
-store's ``create_*``; KG entity links are written post-insert, and skipped
+I-frames); a dedup hit whose index is missing or stale is re-indexed
+(``FrameStore.ensure_indexed``). Indexing (FTS + vector + chunks) commits
+with the frame row inside the store's ``create_*``; KG entity links are
+written post-insert, and skipped
 for quarantined content so flagged text never wires into the graph.
 """
 
@@ -141,6 +143,8 @@ def admit(
 
     existing = store.find_frame_by_hash(gop, content)
     if existing is not None:
+        # A frame left unindexed by an older build is repaired, not absorbed.
+        store.ensure_indexed(existing)
         return AdmitResult(
             admitted=True,
             frame=existing,
@@ -176,6 +180,7 @@ def admit(
                 deduper.forget(gop, matched.id)
                 superseded_id = matched.id
             else:
+                store.ensure_indexed(matched)
                 return AdmitResult(
                     admitted=True,
                     frame=matched,
