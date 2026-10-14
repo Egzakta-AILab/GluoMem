@@ -288,7 +288,9 @@ def _retrieve_query_pool(
     limit: int = 10,
     content_to_dias: Mapping[str, tuple[str, ...]] | None = None,
 ) -> list[CandidateRow]:
-    search = HybridSearch(db, store, cfg, embedder=embedder, kg=kg)
+    # Raw pools precede the response gate and do not need a reranker.
+    candidate_cfg = cfg.with_overrides({"search.abstain.enabled": False})
+    search = HybridSearch(db, store, candidate_cfg, embedder=embedder, kg=kg)
     pool = search.candidates(
         spec.query,
         scope=scope or store.scope,

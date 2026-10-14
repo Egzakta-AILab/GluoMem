@@ -264,3 +264,25 @@ def test_manifest_digest_excludes_wall_clock_and_fractional_config_is_exact() ->
     cfg = load_config().with_overrides(p.to_config_overrides())
     assert ParamVector.from_config(cfg).half_life_days == 17.4
     assert ParamVector.from_config(cfg).flat_boost_days == 0.4
+
+
+def test_raw_cache_does_not_need_the_rerank_response_gate(tmp_path: Path) -> None:
+    cfg = load_config().with_overrides(
+        {
+            "embedding.model": "mock",
+            "components.allow_fake": True,
+            "search.abstain.score": "rerank",
+            "search.abstain.calibration": load_config().models["reranker"].provider_model,
+        }
+    )
+    with MindDB(tmp_path / "raw.mind", dim=cfg.storage.vector_dim) as db:
+        store = FrameStore(db, embedder=MockEmbedder(dim=cfg.storage.vector_dim))
+        frame = store.create_i_frame("g1", "PostgreSQL production database")
+        cache = build_cache_for_db(
+            db,
+            store,
+            cfg,
+            [QuerySpec("q", "PostgreSQL", (f"frame:{frame.id}",))],
+        )
+        assert cache.rows("q")[0].frame_id == frame.id
+        assert cfg.search.abstain.enabled
