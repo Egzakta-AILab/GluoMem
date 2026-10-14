@@ -61,5 +61,14 @@ CREATE TABLE IF NOT EXISTS knowledge_relations (id INTEGER PRIMARY KEY AUTOINCRE
   relation_type TEXT, confidence REAL DEFAULT 1.0, properties TEXT DEFAULT '{}',
   valid_from TEXT DEFAULT (datetime('now')), valid_to TEXT, recorded_at TEXT DEFAULT (datetime('now')),
   UNIQUE(source_id, target_id, relation_type));
+-- Closed validity intervals of a relation that was retired and later
+-- re-asserted after a gap. knowledge_relations holds the current interval;
+-- this table keeps earlier ones so as_of(T) inside the gap stays false.
+-- Added after 0.0.1; IF NOT EXISTS upgrades older files on open.
+CREATE TABLE IF NOT EXISTS knowledge_relation_history (id INTEGER PRIMARY KEY AUTOINCREMENT,
+  relation_id INTEGER NOT NULL REFERENCES knowledge_relations(id) ON DELETE CASCADE,
+  valid_from TEXT NOT NULL, valid_to TEXT NOT NULL, recorded_at TEXT NOT NULL,
+  closed_recorded_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE INDEX IF NOT EXISTS idx_rel_history_rel ON knowledge_relation_history(relation_id);
 CREATE TABLE IF NOT EXISTS kg_entity_frames (entity_id INTEGER REFERENCES knowledge_entities(id) ON DELETE CASCADE,
   frame_id INTEGER REFERENCES memory_frames(id) ON DELETE CASCADE, PRIMARY KEY(entity_id, frame_id));

@@ -14,6 +14,18 @@ Bitemporal model
 - ``as_of(T)`` reconstructs the state valid at T: rows where
   ``valid_from <= T AND (valid_to IS NULL OR valid_to > T)`` — i.e. the
   half-open validity interval ``[valid_from, valid_to)`` contains T.
+- **Re-assertion keeps gaps.** One row per triple holds the CURRENT interval.
+  Re-asserting a retired triple after a gap moves the old closed interval to
+  ``knowledge_relation_history`` and starts a new one, so ``as_of(T)`` inside
+  the gap stays false. A re-assertion that starts on or before the old
+  ``valid_to`` simply continues the interval.
+- **Valid time vs recorded time.** ``valid_from`` / ``valid_to`` are world
+  time (backdated from the observation's event time when known; ingest time
+  when unknown); ``recorded_at`` is when GluoMem wrote the interval. Later
+  recording never implies later validity: see
+  :func:`gluomem.write.cognify.retire_conflicting_relations`.
+- Timestamps follow :mod:`gluomem.timeutil` (naive = UTC, aware converted,
+  date-only = midnight UTC).
 
 The triple-UNIQUE constraint ``UNIQUE(source_id, target_id, relation_type)``
 is honored: a duplicate triple insert raises ``sqlite3.IntegrityError`` (the
@@ -35,11 +47,11 @@ import re
 import sqlite3
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
 
 from gluomem.config.app_config import KgConfig
 from gluomem.kg.normalizer import normalize
 from gluomem.storage.db import MindDB
+from gluomem.timeutil import to_storage, utc_key
 
 __all__ = ["Entity", "Relation", "KgSnapshot", "KnowledgeGraph"]
 
@@ -115,7 +127,7 @@ class KnowledgeGraph:
         # create_function with the same name replaces any prior registration,
         # so this is safe even if the connection is shared across KG instances.
         self._conn.create_function(
-            "_gluomem_norm_iso", 1, _normalize_iso, deterministic=True
+            "_gluomem_norm_iso", 1, utc_key, deterministic=True
         )
 
     # --- entities ----------------------------------------------------------
@@ -137,6 +149,7 @@ class KnowledgeGraph:
         time).
         """
         props = json.dumps(properties or {}, ensure_ascii=False, separators=(",", ":"))
+        valid_from = to_storage(valid_from)
         if valid_from is None:
             cur = self._conn.execute(
                 "INSERT INTO knowledge_entities "
@@ -181,6 +194,7 @@ class KnowledgeGraph:
         """
         # Ensure the entity exists (raise KeyError otherwise).
         self.get_entity(eid)
+        valid_to = to_storage(valid_to)
         if valid_to is None:
             self._conn.execute(
                 "UPDATE knowledge_entities SET valid_to=datetime('now') WHERE id=?",
@@ -212,6 +226,7 @@ class KnowledgeGraph:
         raises ``sqlite3.IntegrityError`` (the schema enforces the UNIQUE).
         """
         props = json.dumps(properties or {}, ensure_ascii=False, separators=(",", ":"))
+        valid_from = to_storage(valid_from)
         if valid_from is None:
             cur = self._conn.execute(
                 "INSERT INTO knowledge_relations "
@@ -255,6 +270,7 @@ class KnowledgeGraph:
         Retire-not-delete. Raises ``KeyError`` if the relation does not exist.
         """
         self.get_relation(rid)
+        valid_to = to_storage(valid_to)
         if valid_to is None:
             self._conn.execute(
                 "UPDATE knowledge_relations SET valid_to=datetime('now') WHERE id=?",
@@ -351,20 +367,69 @@ class KnowledgeGraph:
         ).fetchone()
         return None if row is None else self._row_to_relation(row)
 
-    def reopen_relation(self, rid: int) -> Relation:
-        """Re-assert a retired relation: clear ``valid_to``, keep the row.
+    def reopen_relation(
+        self, rid: int, *, valid_from: str | None = None
+    ) -> Relation:
+        """Re-assert a retired relation from ``valid_from`` (default: now).
 
-        One row per triple means one validity interval — a fact retired and
-        later re-asserted becomes valid again from its ORIGINAL
-        ``valid_from``; the retirement gap is not representable (documented
-        schema limitation). Raises ``KeyError`` if the relation is missing.
+        If ``valid_from`` is after the old ``valid_to`` the old closed
+        interval is kept in ``knowledge_relation_history`` and the row starts
+        a new interval, preserving the gap. If it is on or before the old
+        ``valid_to`` the fact never stopped holding: the interval continues
+        (``valid_to`` cleared, ``valid_from`` moved earlier if needed). A
+        currently-valid relation is returned unchanged. Raises ``KeyError``
+        if the relation is missing.
         """
-        self.get_relation(rid)
-        self._conn.execute(
-            "UPDATE knowledge_relations SET valid_to=NULL WHERE id=?", (rid,)
-        )
-        self._conn.commit()
+        rel = self.get_relation(rid)
+        if rel.valid_to is None:
+            return rel
+        new_from = to_storage(valid_from)
+        if new_from is None:
+            new_from = self._conn.execute("SELECT datetime('now')").fetchone()[0]
+        try:
+            if utc_key(new_from) <= utc_key(rel.valid_to):
+                start = (
+                    new_from
+                    if utc_key(new_from) < utc_key(rel.valid_from)
+                    else rel.valid_from
+                )
+                self._conn.execute(
+                    "UPDATE knowledge_relations SET valid_from=?, valid_to=NULL "
+                    "WHERE id=?",
+                    (start, rid),
+                )
+            else:
+                self._conn.execute(
+                    "INSERT INTO knowledge_relation_history "
+                    "(relation_id, valid_from, valid_to, recorded_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (rid, rel.valid_from, rel.valid_to, rel.recorded_at),
+                )
+                self._conn.execute(
+                    "UPDATE knowledge_relations SET valid_from=?, valid_to=NULL, "
+                    "recorded_at=datetime('now') WHERE id=?",
+                    (new_from, rid),
+                )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
         return self.get_relation(rid)
+
+    def relation_intervals(self, rid: int) -> list[tuple[str, str | None]]:
+        """Every validity interval of a relation, oldest first.
+
+        Closed earlier intervals come from ``knowledge_relation_history``;
+        the last entry is the row's current interval (``valid_to`` may be
+        None). Raises ``KeyError`` if the relation is missing.
+        """
+        rel = self.get_relation(rid)
+        rows = self._conn.execute(
+            "SELECT valid_from, valid_to FROM knowledge_relation_history "
+            "WHERE relation_id=? ORDER BY id ASC",
+            (rid,),
+        ).fetchall()
+        return [(str(r[0]), str(r[1])) for r in rows] + [(rel.valid_from, rel.valid_to)]
 
     # --- entity <-> frame bridge ------------------------------------------
 
@@ -410,13 +475,13 @@ class KnowledgeGraph:
 
             valid_from <= T AND (valid_to IS NULL OR valid_to > T)
 
-        T and the validity bounds are compared as ISO-8601 strings of equal
-        shape (lexicographic order == chronological order for equal-format ISO
-        datetimes). A bare date ``YYYY-MM-DD`` is padded to
-        ``YYYY-MM-DDT00:00:00``; an SQLite ``datetime('now')`` value
-        ``YYYY-MM-DD HH:MM:SS`` is normalized to ``YYYY-MM-DDTHH:MM:SS``.
+        T and the validity bounds are compared as UTC instants
+        (:func:`gluomem.timeutil.utc_key`): naive values are UTC, aware values
+        are converted, and a bare date means midnight UTC. Closed intervals
+        kept by :meth:`reopen_relation` count, so a date inside a retirement
+        gap does not see the relation.
         """
-        t = _normalize_iso(iso)
+        t = utc_key(iso)
         ent_rows = self._conn.execute(
             "SELECT id, entity_type, name, properties, valid_from, valid_to, "
             "recorded_at FROM knowledge_entities "
@@ -425,14 +490,24 @@ class KnowledgeGraph:
             "ORDER BY id ASC",
             (t, t),
         ).fetchall()
+        # Current intervals plus closed historical ones; a relation's intervals
+        # never overlap, so at most one matches T. The returned Relation
+        # carries the interval that contains T.
         rel_rows = self._conn.execute(
             "SELECT id, source_id, target_id, relation_type, confidence, "
             "properties, valid_from, valid_to, recorded_at "
             "FROM knowledge_relations "
             "WHERE _gluomem_norm_iso(valid_from) <= ? "
             "AND (valid_to IS NULL OR _gluomem_norm_iso(valid_to) > ?) "
-            "ORDER BY id ASC",
-            (t, t),
+            "UNION ALL "
+            "SELECT r.id, r.source_id, r.target_id, r.relation_type, r.confidence, "
+            "r.properties, h.valid_from, h.valid_to, h.recorded_at "
+            "FROM knowledge_relation_history h "
+            "JOIN knowledge_relations r ON r.id = h.relation_id "
+            "WHERE _gluomem_norm_iso(h.valid_from) <= ? "
+            "AND _gluomem_norm_iso(h.valid_to) > ? "
+            "ORDER BY 1 ASC",
+            (t, t, t, t),
         ).fetchall()
         entities = [self._row_to_entity(r) for r in ent_rows]
         relations = [self._row_to_relation(r) for r in rel_rows]
@@ -642,24 +717,3 @@ def _load_props(raw: str | None) -> dict[str, object]:
     except (json.JSONDecodeError, TypeError):
         return {}
     return loaded if isinstance(loaded, dict) else {}
-
-
-def _normalize_iso(value: str) -> str:
-    """Normalize an ISO-ish datetime/date to a fixed-width comparable string.
-
-    A bare date ``YYYY-MM-DD`` is padded to ``YYYY-MM-DDT00:00:00``; an SQLite
-    ``datetime('now')`` value ``YYYY-MM-DD HH:MM:SS`` is converted to the
-    ``T``-separated ISO form so it compares lexicographically against full
-    datetimes on equal footing.
-    """
-    s = value.strip()
-    if len(s) == 10 and s[4] == "-":
-        return s + "T00:00:00"
-    if " " in s and "T" not in s:
-        return s.replace(" ", "T")
-    return s
-
-
-def _now_iso() -> str:
-    """Return the current local time as ``YYYY-MM-DDTHH:MM:SS`` (debug helper)."""
-    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")

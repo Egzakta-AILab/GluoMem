@@ -8,6 +8,8 @@ lanes together with:
 - **event_time range filter** — frames are filtered by ``event_time`` (DISTINCT
   from ``created_at``) when ``since``/``until`` are supplied. The decay anchor
   stays ``created_at``; only the range filter anchors on ``event_time``.
+  All timestamps compare as UTC instants (:mod:`gluomem.timeutil`), and
+  recency decay reads "now" from an injectable clock.
 - **relevance multiplier** — ``final = rrf * relevance`` where ``relevance`` is
   the active profile's weighted sum of temporal/popularity/contextual/importance
   (:mod:`gluomem.search.scoring`). Every constant comes from
@@ -58,6 +60,7 @@ from gluomem.search.sanitize import sanitize
 from gluomem.search.scoring import relevance
 from gluomem.storage.db import MindDB
 from gluomem.storage.sqlite_vec import SqliteVecStore
+from gluomem.timeutil import Clock, parse_utc, utc_key, utc_now
 
 __all__ = ["HybridSearch", "SearchHit", "SearchResult"]
 
@@ -131,6 +134,9 @@ class HybridSearch:
         Optional cross-encoder reranker. Used only when
         ``cfg.search.rerank.enabled`` is True. When ``None`` the rerank step is
         skipped even if enabled (no reranker to score with).
+    clock:
+        Returns "now" for recency decay. Defaults to the UTC wall clock;
+        evaluation injects a fixed clock so scores are reproducible.
     kg:
         Optional ``KnowledgeGraph`` providing the contextual KG signal. When
         wired, the search computes ``kg.contextual(query, ...)`` and feeds
@@ -150,8 +156,10 @@ class HybridSearch:
         embedder: Embedder | None = None,
         reranker: Reranker | None = None,
         kg: KnowledgeGraph | None = None,
+        clock: Clock | None = None,
     ) -> None:
         self._db: MindDB = db
+        self._clock: Clock = clock or utc_now
         self._conn: sqlite3.Connection = db.conn
         self._store: FrameStore = store
         self._cfg: AppConfig = cfg
@@ -245,6 +253,7 @@ class HybridSearch:
                 ctx_map = {}
         # Frames absent from the contextual map are "beyond depth" -> contextual 0.0.
         beyond_depth = cfg.scoring.bfs_depth + 1
+        now = self._clock()
 
         # (6) Load frames and apply the event_time since/until range filter.
         hits: list[SearchHit] = []
@@ -263,7 +272,7 @@ class HybridSearch:
             # back to "beyond depth" -> contextual 0.0.
             bfs_distance = ctx_map.get(fid, beyond_depth)
             rel = relevance(
-                days_since_created=_days_since_created(frame.created_at),
+                days_since_created=_days_since_created(frame.created_at, now),
                 access_count=frame.access_count,
                 bfs_distance=bfs_distance,
                 importance_level=frame.importance,
@@ -440,64 +449,39 @@ def _indexable_text(frame: Frame) -> str:
     return frame.content
 
 
-def _days_since_created(created_at: str) -> float:
-    """Days between ``created_at`` (ingest time) and now.
+def _days_since_created(created_at: str, now: datetime) -> float:
+    """Days between ``created_at`` and ``now``, both read as UTC.
 
-    ``created_at`` is the SQLite ``datetime('now')`` format
-    ``"YYYY-MM-DD HH:MM:SS"``. Returns a non-negative float (clamped at 0 for
-    clock skew). Pure except for reading the wall clock.
+    ``created_at`` may be SQLite ``YYYY-MM-DD HH:MM:SS`` (UTC), naive ISO
+    (UTC by convention), date-only (midnight UTC) or offset-aware. Returns a
+    non-negative float (clamped at 0 for future or backdated-ahead values);
+    an unparsable legacy value counts as age 0 rather than failing recall.
     """
-    dt = _parse_iso_like(created_at)
-    now = datetime.now()
-    delta = (now - dt).total_seconds() / 86400.0
+    try:
+        dt = parse_utc(created_at)
+    except ValueError:
+        return 0.0
+    delta = (parse_utc(now) - dt).total_seconds() / 86400.0
     return max(0.0, delta)
 
 
 def _event_time_in_range(
     event_time: str | None, since: str | None, until: str | None
 ) -> bool:
-    """True when ``event_time`` falls within the ``[since, until]`` range.
+    """True when ``event_time`` falls within the inclusive ``[since, until]``.
 
-    A frame with no ``event_time`` is excluded ONLY when a range is set (it
-    carries no world-time to test). ``since``/``until`` are inclusive bounds
-    compared as ISO-8601 strings (lexicographic order == chronological order
-    for equal-format ISO datetimes). When neither bound is set, every frame
-    passes.
+    A frame with no ``event_time`` (unknown world time) is excluded ONLY when
+    a range is set. All three values compare as UTC instants
+    (:func:`gluomem.timeutil.utc_key`): naive is UTC, aware is converted,
+    and a date-only bound means midnight UTC of that day.
     """
     if since is None and until is None:
         return True
     if event_time is None:
         return False
-    et = _normalize_iso(event_time)
-    if since is not None and et < _normalize_iso(since):
+    et = utc_key(event_time)
+    if since is not None and et < utc_key(since):
         return False
-    if until is not None and et > _normalize_iso(until):
+    if until is not None and et > utc_key(until):
         return False
     return True
-
-
-def _parse_iso_like(value: str) -> datetime:
-    """Parse an SQLite/ISO datetime string into a :class:`datetime`.
-
-    Accepts ``"YYYY-MM-DD HH:MM:SS"`` (SQLite ``datetime('now')``), full ISO
-    ``"YYYY-MM-DDTHH:MM:SS"``, and a bare date ``"YYYY-MM-DD"`` (midnight).
-    """
-    s = value.strip()
-    if len(s) == 10 and s[4] == "-":
-        s = s + "T00:00:00"
-    # datetime.fromisoformat (3.11+) accepts the space-separated form directly.
-    return datetime.fromisoformat(s)
-
-
-def _normalize_iso(value: str) -> str:
-    """Normalize an ISO-ish datetime/date to a fixed-width comparable string.
-
-    A bare date ``"YYYY-MM-DD"`` is padded to ``"YYYY-MM-DDT00:00:00"`` so it
-    compares lexicographically against full datetimes on equal footing.
-    """
-    s = value.strip()
-    if len(s) == 10 and s[4] == "-":
-        return s + "T00:00:00"
-    if " " in s and "T" not in s:
-        return s.replace(" ", "T")
-    return s

@@ -194,3 +194,58 @@ def test_entity_type_drop_relinks_relation_to_existing_allowlisted(env) -> None:
     assert all(
         e.entity_type != "vibes" for e in env.kg.find_valid_entities("acme", cfg.kg)
     )
+
+
+# --- valid time, not recording order ----------------------------------------
+
+
+def _rel_on(env, city: str, when: str | None):
+    g = cognify_text(
+        f"t-{city}-{when}", facade=_facade(_lives_in(city)), kg=env.kg,
+        cfg=env.cfg, valid_from=when,
+    )
+    return env.kg.get_relation(g.relation_ids[0]), g
+
+
+def test_newer_fact_closes_old_edge_at_its_valid_time(env) -> None:
+    old, _ = _rel_on(env, "boston", "2023-01-01T00:00:00")
+    new, g = _rel_on(env, "seattle", "2023-05-01T00:00:00")
+    assert retire_conflicting_relations(g.relations, kg=env.kg) == [old.id]
+    assert env.kg.get_relation(old.id).valid_to == "2023-05-01T00:00:00"
+    assert {r.id for r in env.kg.as_of("2023-03-01").relations} == {old.id}
+    assert {r.id for r in env.kg.as_of("2023-06-01").relations} == {new.id}
+
+
+def test_late_recorded_older_fact_does_not_retire_newer_one(env) -> None:
+    """Seattle (valid May) is recorded first; Boston (valid Jan) is recorded
+    later. Newest-recorded is not newest-valid: Seattle stays current and
+    Boston is closed when Seattle began."""
+    seattle, _ = _rel_on(env, "seattle", "2023-05-01T00:00:00")
+    boston, g = _rel_on(env, "boston", "2023-01-01T00:00:00")
+    assert retire_conflicting_relations(g.relations, kg=env.kg) == [boston.id]
+    assert env.kg.get_relation(seattle.id).valid_to is None
+    assert env.kg.get_relation(boston.id).valid_to == "2023-05-01T00:00:00"
+    assert {r.id for r in env.kg.as_of("2023-03-01").relations} == {boston.id}
+    assert {r.id for r in env.kg.as_of("2023-06-01").relations} == {seattle.id}
+
+
+def test_replayed_history_keeps_gap_after_reassertion(env) -> None:
+    """Boston (Jan) -> Seattle (Mar) -> Boston again (Jul), replayed with
+    fixed valid times: April is Seattle, not Boston."""
+    boston, _ = _rel_on(env, "boston", "2023-01-01T00:00:00")
+    _seattle, g = _rel_on(env, "seattle", "2023-03-01T00:00:00")
+    retire_conflicting_relations(g.relations, kg=env.kg)
+    again = cognify_text(
+        "t-back", facade=_facade(_lives_in("boston")), kg=env.kg, cfg=env.cfg,
+        valid_from="2023-07-01T00:00:00",
+    )
+    assert again.relation_ids == [boston.id]
+    retire_conflicting_relations(again.relations, kg=env.kg)
+
+    def city_at(iso: str) -> set[int]:
+        return {r.target_id for r in env.kg.as_of(iso).relations if r.relation_type == "LIVES_IN"}
+
+    b_id, s_id = boston.target_id, _seattle.target_id
+    assert city_at("2023-02-01") == {b_id}
+    assert city_at("2023-04-01") == {s_id}
+    assert city_at("2023-08-01") == {b_id}

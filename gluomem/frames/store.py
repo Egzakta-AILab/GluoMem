@@ -41,6 +41,7 @@ from gluomem.frames.eligibility import INELIGIBLE_PARAMS, INELIGIBLE_PLACEHOLDER
 from gluomem.frames.sessions import get_or_create_session
 from gluomem.storage.db import MindDB
 from gluomem.storage.sqlite_vec import SqliteVecStore
+from gluomem.timeutil import to_storage
 
 if TYPE_CHECKING:
     from gluomem.config.app_config import AppConfig
@@ -761,7 +762,11 @@ class FrameStore:
         ``created_at=None`` keeps the schema default (ingest time = decay
         anchor); an explicit ISO string BACKDATES the row — benchmark ingest
         uses this so recency decay measures conversation time, not run time.
+        Both timestamps follow :mod:`gluomem.timeutil` (aware input is stored
+        as naive UTC; naive and date-only input is stored verbatim).
         """
+        created_at = to_storage(created_at)
+        event_time = to_storage(event_time)
         t_row = self._conn.execute(
             "SELECT COALESCE(MAX(t), -1) FROM memory_frames WHERE gop_id=?",
             (gop,),
