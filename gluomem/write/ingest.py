@@ -319,6 +319,7 @@ def _admit_observation(
         cfg=cfg,
         source="agent_inferred",
         entity_ids=graph.entity_ids,
+        relation_ids=graph.relation_ids,
         created_at=created_at,
         scope=s,
     )
@@ -556,7 +557,9 @@ def ingest_path(
     if embedder is None:
         embedder = make_embedder(cfg)
     s = resolve_scope(scope)
-    store = FrameStore(db, embedder=embedder, chunking=cfg.chunking, scope=s)
+    store = FrameStore(
+        db, embedder=embedder, chunking=cfg.chunking, scope=s, lifecycle=cfg.lifecycle
+    )
     kg = KnowledgeGraph(db, scope=s)
     scanner = InjectionScanner(cfg.safety)
 

@@ -234,6 +234,22 @@ def build_metadata(dim: int = 384) -> sa.MetaData:
         ),
     )
     index("idx_kg_entity_frames_frame", links, "frame_id")
+    relation_links = table(
+        "kg_relation_frames",
+        sa.Column(
+            "relation_id",
+            sa.BigInteger,
+            sa.ForeignKey("knowledge_relations.id", ondelete="CASCADE"),
+            primary_key=True,
+        ),
+        sa.Column(
+            "frame_id",
+            sa.BigInteger,
+            sa.ForeignKey("memory_frames.id", ondelete="CASCADE"),
+            primary_key=True,
+        ),
+    )
+    index("idx_kg_relation_frames_frame", relation_links, "frame_id")
     events = table(
         "source_events",
         ident(),
@@ -276,6 +292,29 @@ def build_metadata(dim: int = 384) -> sa.MetaData:
     )
     index("idx_tombstones_scope_hash", tombstones, *_SCOPE, "content_hash")
     index("idx_tombstones_scope_event", tombstones, *_SCOPE, "source_event_id")
+    table(
+        "memory_frame_keys",
+        sa.Column(
+            "frame_id",
+            sa.BigInteger,
+            sa.ForeignKey("memory_frames.id", ondelete="CASCADE"),
+            primary_key=True,
+            autoincrement=False,
+        ),
+        text("suppression_key", nullable=False),
+    )
+    tombstone_keys = table(
+        "memory_tombstone_keys",
+        sa.Column(
+            "tombstone_id",
+            sa.BigInteger,
+            sa.ForeignKey("memory_tombstones.id", ondelete="CASCADE"),
+            primary_key=True,
+            autoincrement=False,
+        ),
+        text("suppression_key", nullable=False),
+    )
+    index("idx_tombstone_keys_suppression", tombstone_keys, "suppression_key")
     table(
         "scope_generations",
         *(sa.Column(name, sa.Text, primary_key=True) for name in _SCOPE),

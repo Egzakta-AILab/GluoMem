@@ -713,6 +713,11 @@ _PYDANTIC_DEFAULTS: dict[str, Any] = {
 }
 
 
+class LifecycleConfig(BaseModel):
+    episode_ttl_days: int = Field(default=90, ge=1)
+    review_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
+
+
 class AppConfig(BaseSettings):
     """Root typed config tree (pydantic-settings v2)."""
 
@@ -728,6 +733,7 @@ class AppConfig(BaseSettings):
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     components: ComponentsConfig = Field(default_factory=ComponentsConfig)
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
+    lifecycle: LifecycleConfig = Field(default_factory=LifecycleConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     kg: KgConfig = Field(default_factory=KgConfig)

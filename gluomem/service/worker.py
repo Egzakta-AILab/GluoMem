@@ -12,15 +12,7 @@ from typing import Any
 
 from gluomem.config.app_config import AppConfig
 from gluomem.frames.eligibility import is_recall_eligible
-from gluomem.frames.lifecycle import get_scope_generation
-
-try:
-    from gluomem.frames.lifecycle import (
-        current_scope_generation,  # type: ignore[missing-module-attribute]
-    )
-except ImportError:
-    # Older lifecycle modules expose the same read under this name.
-    current_scope_generation = get_scope_generation
+from gluomem.frames.generation import current_scope_generation
 from gluomem.frames.store import FrameStore
 from gluomem.kg.graph import KnowledgeGraph
 from gluomem.service.jobs import (
@@ -39,6 +31,8 @@ from gluomem.write.events import ingest_source_event
 _LOG = logging.getLogger(__name__)
 
 JobHandler = Callable[[MemoryJob], None]
+
+_PAYLOAD_JOB_TYPES = frozenset({"ingest_event", "cognify_frame", "compact_gop"})
 
 
 class MemoryWorker:
@@ -122,7 +116,7 @@ class MemoryWorker:
         relations: list[dict[str, Any]] = list(payload.get("relations") or [])
 
         frame = self._store.get_frame(frame_id, scope=job.scope)
-        if not is_recall_eligible(frame) and frame.status != "candidate":
+        if not is_recall_eligible(frame):
             return
 
         entity_map: dict[str, int] = {}
@@ -153,13 +147,14 @@ class MemoryWorker:
             tgt_name = str(rel.get("target", "")).strip().lower()
             rel_type = str(rel.get("relation_type", "related_to")).strip()
             if src_name in entity_map and tgt_name in entity_map and rel_type:
-                self._kg.create_relation(
+                relation = self._kg.create_relation(
                     entity_map[src_name],
                     entity_map[tgt_name],
                     rel_type,
                     confidence=float(rel.get("confidence", 1.0)),
                     scope=job.scope,
                 )
+                self._kg.link_relation_frame(relation.id, frame.id, scope=job.scope)
 
     def _handle_compact_gop(self, job: MemoryJob) -> None:
         gop_id = str(job.payload["gop_id"])
@@ -191,7 +186,9 @@ class MemoryWorker:
                     handler = self._handlers.get(job.job_type)
                     if handler is None:
                         raise ValueError(f"unknown_job_type:{job.job_type}")
-                    handler(job)
+                    # Forget and retract redact queued payloads to {}; nothing is left to write.
+                    if job.payload or job.job_type not in _PAYLOAD_JOB_TYPES:
+                        handler(job)
                     return self._queue.complete(
                         job.id,
                         worker_id=self._worker_id,

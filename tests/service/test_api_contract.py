@@ -12,7 +12,6 @@ from gluomem.frames.store import FrameStore
 from gluomem.service import app as app_module
 from gluomem.service.app import create_app
 from gluomem.storage.db import MindDB
-from gluomem.write import events as events_module
 
 HEADERS = {
     "Authorization": "Bearer secret",
@@ -109,20 +108,7 @@ def test_scope_isolation_and_pagination(client: TestClient) -> None:
     assert following["next_cursor"] is None
 
 
-@pytest.mark.parametrize(
-    "async_mode",
-    [
-        True,
-        pytest.param(
-            False,
-            marks=pytest.mark.xfail(
-                condition=not hasattr(events_module, "EventConflictError"),
-                strict=True,
-                reason="Requires lifecycle EventConflictError for sync payload conflicts",
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("async_mode", [True, False])
 def test_payload_conflict(client: TestClient, async_mode: bool) -> None:
     body = {"event_id": "event", "source_ref": "doc", "content": "one", "async_mode": async_mode}
     first = client.post("/v1/events", json=body, headers=HEADERS)

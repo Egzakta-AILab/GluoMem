@@ -148,7 +148,11 @@ def create_app(
             live[id(handle)] = handle
         try:
             local_store = FrameStore(
-                handle, embedder=store.embedder, chunking=store.chunking, scope=store.scope
+                handle,
+                embedder=store.embedder,
+                chunking=store.chunking,
+                scope=store.scope,
+                lifecycle=cfg.lifecycle,
             )
             local_kg = KnowledgeGraph(handle, scope=store.scope)
             local_search = HybridSearch(

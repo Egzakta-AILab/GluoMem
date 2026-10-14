@@ -764,7 +764,9 @@ def _cmd_worker(args: argparse.Namespace) -> int:
     embedder = make_embedder(cfg)
     db = MindDB.from_config(cfg, path_override=args.db)
     try:
-        store = FrameStore(db, embedder=embedder, chunking=cfg.chunking)
+        store = FrameStore(
+            db, embedder=embedder, chunking=cfg.chunking, lifecycle=cfg.lifecycle
+        )
         kg = KnowledgeGraph(db)
         queue = JobQueue(
             db.backend,
@@ -857,7 +859,9 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     embedder = make_embedder(cfg)
     db = MindDB.from_config(cfg, path_override=args.db)
     try:
-        store = FrameStore(db, embedder=embedder, chunking=cfg.chunking)
+        store = FrameStore(
+            db, embedder=embedder, chunking=cfg.chunking, lifecycle=cfg.lifecycle
+        )
         kg = KnowledgeGraph(db)
         queue = JobQueue(db.backend, max_pending_per_scope=args.max_pending_per_scope)
         app = create_app(

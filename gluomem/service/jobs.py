@@ -13,14 +13,7 @@ from gluomem.frames.lifecycle import get_scope_generation
 from gluomem.storage.backend import DatabaseBackend
 from gluomem.storage.scope import DEFAULT_SCOPE, MemoryScope, scope_sql
 from gluomem.timeutil import now_utc, parse_utc, utc_key
-
-try:
-    from gluomem.write.events import EventConflictError  # type: ignore[missing-module-attribute]
-except ImportError:
-    # The lifecycle implementation supplies this exception when integrated.
-    class EventConflictError(ValueError):
-        """An event or job key was reused with a different payload."""
-
+from gluomem.write.events import EventConflictError
 
 JobStatus = Literal["queued", "leased", "succeeded", "dead_letter"]
 JobType = Literal["ingest_event", "cognify_frame", "compact_gop"]
