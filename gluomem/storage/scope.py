@@ -25,7 +25,6 @@ FrameStatus = Literal[
     "forgotten",
     "tombstoned",
 ]
-FRAME_STATUSES: tuple[str, ...] = get_args(FrameStatus)
 
 
 @dataclass(frozen=True, slots=True)

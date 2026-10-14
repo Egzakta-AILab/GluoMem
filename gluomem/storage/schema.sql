@@ -1,5 +1,5 @@
 -- gluomem SQLite schema.
--- Applied idempotently (IF NOT EXISTS) by MindDB on every open.
+-- Installed only for fresh files by the PRAGMA user_version gate.
 -- The two vec0 virtual tables (memory_frames_vec, memory_frame_chunks_vec) are
 -- created by SqliteBackend after loading this file because their float[<dim>]
 -- column dimension is parameterized at runtime from config.
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     gop_id       TEXT NOT NULL,
     project_id   TEXT,
     status       TEXT DEFAULT 'active',
-    started_at   TEXT DEFAULT (datetime('now')),
+    started_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
     ended_at     TEXT,
     summary      TEXT,
     UNIQUE(tenant_id, principal_id, namespace, gop_id)
@@ -54,9 +54,9 @@ CREATE TABLE IF NOT EXISTS memory_frames (
     pinned           INTEGER NOT NULL DEFAULT 0,
     verified_by_user INTEGER NOT NULL DEFAULT 0,
     access_count     INTEGER NOT NULL DEFAULT 0,
-    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
     event_time       TEXT,
-    last_accessed    TEXT NOT NULL DEFAULT (datetime('now')),
+    last_accessed    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
     content_hash     TEXT,
     FOREIGN KEY (tenant_id, principal_id, namespace, gop_id)
         REFERENCES sessions(tenant_id, principal_id, namespace, gop_id)
@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS memory_frame_lineage (
     source_created_at   TEXT NOT NULL,
     source_event_time   TEXT,
     operation           TEXT NOT NULL,
-    recorded_at         TEXT NOT NULL DEFAULT (datetime('now'))
+    recorded_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_lineage_derived ON memory_frame_lineage(derived_frame_id);
@@ -119,9 +119,9 @@ CREATE TABLE IF NOT EXISTS knowledge_entities (
     name           TEXT,
     canonical_name TEXT,
     properties     TEXT DEFAULT '{}',
-    valid_from     TEXT DEFAULT (datetime('now')),
+    valid_from     TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
     valid_to       TEXT,
-    recorded_at    TEXT DEFAULT (datetime('now'))
+    recorded_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_kg_entities_canonical
@@ -139,9 +139,9 @@ CREATE TABLE IF NOT EXISTS knowledge_relations (
     relation_type TEXT,
     confidence    REAL DEFAULT 1.0,
     properties    TEXT DEFAULT '{}',
-    valid_from    TEXT DEFAULT (datetime('now')),
+    valid_from    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
     valid_to      TEXT,
-    recorded_at   TEXT DEFAULT (datetime('now')),
+    recorded_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
     UNIQUE(tenant_id, principal_id, namespace, source_id, target_id, relation_type)
 );
 
@@ -158,7 +158,7 @@ CREATE TABLE IF NOT EXISTS knowledge_relation_history (
     valid_from         TEXT NOT NULL,
     valid_to           TEXT NOT NULL,
     recorded_at        TEXT NOT NULL,
-    closed_recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+    closed_recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_kg_rel_history_rel
@@ -184,7 +184,7 @@ CREATE TABLE IF NOT EXISTS source_events (
     source_ref   TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     payload_hash TEXT NOT NULL,
-    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
     UNIQUE(tenant_id, principal_id, namespace, event_id, revision)
 );
 
@@ -202,7 +202,7 @@ CREATE TABLE IF NOT EXISTS memory_provenance (
     source_ref      TEXT NOT NULL,
     message_id      TEXT,
     verbatim_span   TEXT,
-    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_provenance_frame
@@ -220,7 +220,7 @@ CREATE TABLE IF NOT EXISTS memory_tombstones (
     source_event_id TEXT,
     source_ref      TEXT,
     frame_id        INTEGER,
-    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_tombstones_scope_hash
@@ -233,7 +233,7 @@ CREATE TABLE IF NOT EXISTS scope_generations (
     principal_id TEXT NOT NULL,
     namespace    TEXT NOT NULL,
     generation   INTEGER NOT NULL DEFAULT 0,
-    updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
     PRIMARY KEY (tenant_id, principal_id, namespace)
 );
 

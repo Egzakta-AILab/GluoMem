@@ -679,124 +679,77 @@ def _add_tune_and_ablate_parsers(sub: argparse._SubParsersAction) -> None:
 
 
 def _cmd_migrate(args: argparse.Namespace) -> int:
-    from gluomem.migrations import get_heads, run_downgrade, run_upgrade
+    from gluomem.migrations import get_current, get_heads, run_revision
+    from gluomem.migrations.runner import run_migration
 
-    cfg = _config_from(args)
     subcmd = args.migrate_command
-    if subcmd not in ("upgrade", "downgrade", "heads"):
-        print(
-            "gluomem migrate: pick a subcommand (upgrade, downgrade, heads)",
-            file=sys.stderr,
-        )
-        return 1
-
-    schema = args.schema or cfg.storage.postgres_schema
-    vector_dim = int(args.vector_dim or cfg.storage.vector_dim)
     if subcmd == "heads":
-        for head in get_heads(schema=schema, vector_dim=vector_dim):
-            print(head)
+        print("\n".join(get_heads()))
         return 0
-
-    dsn = (
-        args.dsn
-        or cfg.storage.dsn
-        or (
-            "postgresql+psycopg://localhost/gluomem"
-            if getattr(args, "sql", False)
-            else None
-        )
-    )
-    if not dsn:
+    if subcmd not in ("upgrade", "downgrade", "revision", "current"):
         print(
-            "gluomem migrate: pass --dsn or set storage.dsn (or pass --sql for offline SQL)",
-            file=sys.stderr,
+            "gluomem migrate: pick upgrade, downgrade, revision, heads or current", file=sys.stderr
         )
         return 1
-
+    cfg = _config_from(args)
+    schema = args.schema or cfg.storage.postgres_schema
+    vector_dim = args.vector_dim if args.vector_dim is not None else cfg.storage.vector_dim
+    sql = getattr(args, "sql", False)
+    dsn = args.dsn or cfg.storage.dsn or ("postgresql+psycopg://localhost/gluomem" if sql else None)
+    if not dsn:
+        print("gluomem migrate: pass --dsn or set storage.dsn", file=sys.stderr)
+        return 1
     try:
-        if subcmd == "upgrade":
-            out = run_upgrade(
+        if subcmd == "current":
+            print("\n".join(get_current(dsn, schema=schema)))
+        elif subcmd == "revision":
+            revision = run_revision(
                 dsn,
-                args.revision,
+                args.message,
                 schema=schema,
                 vector_dim=vector_dim,
-                sql=bool(args.sql),
+                autogenerate=args.autogenerate,
             )
+            print(revision.path)
         else:
-            out = run_downgrade(
+            out = run_migration(
                 dsn,
                 args.revision,
+                direction=subcmd,
                 schema=schema,
                 vector_dim=vector_dim,
-                sql=bool(args.sql),
+                sql=sql,
             )
-    except ValueError as exc:
+            if sql:
+                print(out.rstrip())
+            else:
+                print(
+                    f"migrate {subcmd}: schema={schema} revision={args.revision} dim={vector_dim}"
+                )
+    except (ValueError, RuntimeError) as exc:
         print(f"gluomem migrate {subcmd}: {exc}", file=sys.stderr)
         return 1
-
-    if args.sql and out:
-        print(out.rstrip())
-    elif not args.sql:
-        print(f"migrate {subcmd}: schema={schema} revision={args.revision} dim={vector_dim}")
     return 0
 
 
 def _add_migrate_parsers(sub: argparse._SubParsersAction) -> None:
-    migrate = sub.add_parser(
-        "migrate", help="run Alembic PostgreSQL schema migrations"
-    )
-    migrate_sub = migrate.add_subparsers(dest="migrate_command")
-
-    up = migrate_sub.add_parser("upgrade", help="upgrade schema to a target revision")
-    up.add_argument(
-        "revision", nargs="?", default="head", help="target revision (default: head)"
-    )
-    up.add_argument("--dsn", default=None, help="PostgreSQL DSN (default: storage.dsn)")
-    up.add_argument(
-        "--schema",
-        default=None,
-        help="PostgreSQL schema (default: storage.postgres_schema)",
-    )
-    up.add_argument(
-        "--vector-dim",
-        type=int,
-        default=None,
-        help="vector dimension (default: storage.vector_dim)",
-    )
-    up.add_argument(
-        "--sql", action="store_true", help="render offline SQL without connecting"
-    )
-    _add_config_args(up)
-
-    down = migrate_sub.add_parser(
-        "downgrade", help="downgrade schema to a target revision"
-    )
-    down.add_argument(
-        "revision", nargs="?", default="base", help="target revision (default: base)"
-    )
-    down.add_argument(
-        "--dsn", default=None, help="PostgreSQL DSN (default: storage.dsn)"
-    )
-    down.add_argument(
-        "--schema",
-        default=None,
-        help="PostgreSQL schema (default: storage.postgres_schema)",
-    )
-    down.add_argument(
-        "--vector-dim",
-        type=int,
-        default=None,
-        help="vector dimension (default: storage.vector_dim)",
-    )
-    down.add_argument(
-        "--sql", action="store_true", help="render offline SQL without connecting"
-    )
-    _add_config_args(down)
-
-    heads = migrate_sub.add_parser("heads", help="print current Alembic head revisions")
-    heads.add_argument("--schema", default=None, help="PostgreSQL schema")
-    heads.add_argument("--vector-dim", type=int, default=None, help="vector dimension")
-    _add_config_args(heads)
+    migrate = sub.add_parser("migrate", help="run Alembic PostgreSQL schema migrations")
+    commands = migrate.add_subparsers(dest="migrate_command")
+    commands.add_parser("heads", help="print Alembic head revisions")
+    for name in ("upgrade", "downgrade", "revision", "current"):
+        parser = commands.add_parser(name, help=f"Alembic {name}")
+        parser.add_argument("--dsn", default=None, help="PostgreSQL DSN (default: storage.dsn)")
+        parser.add_argument("--schema", default=None, help="PostgreSQL schema")
+        parser.add_argument("--vector-dim", type=int, default=None, help="vector dimension")
+        if name in ("upgrade", "downgrade"):
+            parser.add_argument(
+                "revision", nargs="?", default="head" if name == "upgrade" else "base"
+            )
+            parser.add_argument("--sql", action="store_true", help="render offline SQL")
+        elif name == "revision":
+            parser.add_argument("--autogenerate", action="store_true")
+            parser.add_argument("-m", "--message", required=True)
+        _add_config_args(parser)
 
 
 def _cmd_worker(args: argparse.Namespace) -> int:

@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from gluomem.storage.backend import IncompatibleSchemaError
 from gluomem.storage.db import MindDB
+from gluomem.storage.sqlite_backend import SQLITE_SCHEMA_VERSION
 
 
 def test_pragmas_vec_extension_and_idempotent_reopen(tmp_path: Path) -> None:
@@ -15,11 +17,10 @@ def test_pragmas_vec_extension_and_idempotent_reopen(tmp_path: Path) -> None:
     db = MindDB(path, dim=64)
     assert db.conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     assert db.conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert db.scalar("PRAGMA user_version") == SQLITE_SCHEMA_VERSION
     assert db.conn.execute("SELECT vec_version()").fetchone()[0].strip() != ""
     for tbl in ("memory_frames_vec", "memory_frame_chunks_vec"):
-        ddl = db.conn.execute(
-            "SELECT sql FROM sqlite_master WHERE name=?", (tbl,)
-        ).fetchone()[0]
+        ddl = db.conn.execute("SELECT sql FROM sqlite_master WHERE name=?", (tbl,)).fetchone()[0]
         assert "float[64]" in ddl
     db.close()
 
@@ -77,7 +78,18 @@ def test_schema_constraints_and_fts_tokenizer(mind_db: MindDB) -> None:
             (ids[0], ids[1]),
         )
 
-    ddl = c.execute(
-        "SELECT sql FROM sqlite_master WHERE name='memory_frames_fts'"
-    ).fetchone()[0]
+    ddl = c.execute("SELECT sql FROM sqlite_master WHERE name='memory_frames_fts'").fetchone()[0]
     assert "porter unicode61" in ddl
+
+
+@pytest.mark.parametrize("version", [0, 1, 999])
+def test_incompatible_sqlite_schema_is_rejected(tmp_path: Path, version: int) -> None:
+    path = tmp_path / "legacy.mind"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE memory_frames(id INTEGER PRIMARY KEY, content TEXT)")
+        conn.execute(f"PRAGMA user_version={version}")
+    with pytest.raises(IncompatibleSchemaError, match="recreate the database"):
+        MindDB(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == version
+        assert len(conn.execute("PRAGMA table_info(memory_frames)").fetchall()) == 2

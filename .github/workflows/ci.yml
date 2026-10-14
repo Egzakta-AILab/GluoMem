@@ -30,6 +30,7 @@ jobs:
   check:
     name: make check (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -40,7 +41,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           enable-cache: true
-      - name: Install from uv.lock (core + llm extra, no model packages)
+      - name: Install from uv.lock (offline extras, no model packages)
         run: make install-offline
       - name: Record environment
         run: |
@@ -50,21 +51,54 @@ jobs:
         run: make check
 
   wheel:
-    name: installed-wheel check
+    name: installed-wheel check (Python ${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - name: Build, install core-only outside the checkout, write and read
+        run: make wheel-check PYTHON=${{ matrix.python }}
+
+  postgres:
+    name: live PostgreSQL contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_PASSWORD: pg
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      GLUOMEM_TEST_PG_DSN: postgresql://postgres:pg@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           python-version: "3.12"
           enable-cache: true
-      - name: Build, install core-only outside the checkout, write and read
-        run: make wheel-check PYTHON=3.12
+      - run: make install-offline
+      - run: uv run pytest -m postgres
 
   models:
     name: slow model tests (manual)
     if: github.event_name == 'workflow_dispatch' && inputs.run_model_tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0

@@ -71,6 +71,7 @@ select = ["E", "F", "W", "I", "UP", "B"]
 [tool.pytest.ini_options]
 markers = [
     "slow: marks tests that download/load real models",
+    "postgres: live PostgreSQL and pgvector contracts (GLUOMEM_TEST_PG_DSN)",
 ]
 addopts = "-m 'not slow'"
 
