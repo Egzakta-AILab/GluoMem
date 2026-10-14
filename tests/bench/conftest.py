@@ -22,6 +22,7 @@ BENCH_OVERRIDES: dict[str, object] = {
     "benchmark.datasets.locomo.file": FIXTURE.name,
     "benchmark.datasets.locomo.sha256": FIXTURE_SHA,
     "embedding.model": "mock",
+    "components.allow_fake": True,
     "search.rerank.enabled": False,
 }
 

@@ -36,7 +36,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from gluomem.embedding.providers import MockEmbedder, make_embedder
+from gluomem.embedding.providers import make_embedder
 from gluomem.frames.eligibility import is_recall_eligible
 from gluomem.frames.store import FrameStore
 from gluomem.kg.graph import KnowledgeGraph
@@ -606,11 +606,7 @@ def ingest_path(
     conversations = load_locomo(path)
     db = MindDB(db_path or cfg.storage.path, dim=cfg.storage.vector_dim)
     if embedder is None:
-        embedder = (
-            MockEmbedder(dim=db.dim)
-            if cfg.embedding.model == "mock"
-            else make_embedder(cfg)
-        )
+        embedder = make_embedder(cfg)
     store = FrameStore(db, embedder=embedder, chunking=cfg.chunking)
     kg = KnowledgeGraph(db)
     scanner = InjectionScanner(cfg.safety)

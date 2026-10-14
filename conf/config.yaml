@@ -3,10 +3,12 @@
 # Precedence: defaults < this file < variant overlay < GLUOMEM_-prefixed env < with_overrides().
 
 models:                          # registry
-  mock:     {provider: inprocess, provider_model: mock, dim: null}              # deterministic offline fallback (loud banner via make_embedder)
+  mock:     {provider: fake,      provider_model: sha256-pcg64, dim: null}      # deterministic test double; needs components.allow_fake
+  # Embedding providers with an implementation: fake, inprocess (sentence-transformers).
+  # ollama is declared for configuration tests only; selecting it fails at build time.
   minilm:   {provider: inprocess, provider_model: sentence-transformers/all-MiniLM-L6-v2, dim: 384}
   ollama:   {provider: ollama,    provider_model: ollama/nomic-embed-text, dim: 768}
-  reranker: {provider: onnx,      provider_model: cross-encoder/ms-marco-MiniLM-L-6-v2}
+  reranker: {provider: inprocess, provider_model: cross-encoder/ms-marco-MiniLM-L-6-v2}
   # LLMs: ALL routed via OpenRouter (one gateway, one key). Routable slugs are
   # undated; per-experiment reproducibility pinning goes through
   # `extra: {extra_body: {provider: {...}}}` + recording the served version.
@@ -22,6 +24,7 @@ models:                          # registry
 
 storage:   {vector_backend: sqlite-vec, vector_dim: 384, path: ~/.gluomem/default.mind}   # exact KNN only
 embedding: {model: minilm, pad_to: null}                                                # native dim, no pad
+components: {allow_fake: false}                                                         # true admits test doubles (mock embedder, fake backends)
 chunking:  {max_chars: 2000, overlap_chars: 200, min_chunk_chars: 1500, enabled: true}
 
 search:

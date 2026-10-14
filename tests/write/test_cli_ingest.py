@@ -20,6 +20,8 @@ def test_cli_ingest_backend_none_e2e(tmp_path: Path, capsys) -> None:
             "write.extraction_backend=none",
             "--override",
             "embedding.model=mock",  # offline gate: never load MiniLM in tests
+            "--override",
+            "components.allow_fake=true",
         ]
     )
     assert rc == 0
@@ -47,6 +49,8 @@ def test_cli_ingest_fake_backend_extracts(tmp_path: Path, capsys) -> None:
             "write.extraction_backend=fake",
             "--override",
             "embedding.model=mock",
+            "--override",
+            "components.allow_fake=true",
         ]
     )
     assert rc == 0
@@ -68,7 +72,8 @@ def test_cli_ingest_never_imports_dspy_for_offline_backends(tmp_path: Path) -> N
         "import sys; from gluomem.cli import main; "
         f"main(['ingest', {FIXTURE!r}, '--db', {db!r}, "
         "'--override', 'write.extraction_backend=none', "
-        "'--override', 'embedding.model=mock']); "
+        "'--override', 'embedding.model=mock', "
+        "'--override', 'components.allow_fake=true']); "
         "sys.exit(1 if 'dspy' in sys.modules else 0)"
     )
     proc = subprocess.run(

@@ -55,6 +55,7 @@ from gluomem.bench.types import (
     Sample,
     Score,
 )
+from gluomem.components import require_fake_allowed
 from gluomem.llm.outputs import AnswerResult
 from gluomem.write.lanes import run_ordered
 
@@ -92,6 +93,7 @@ def _fake_answer_fn(question: str, context: str) -> AnswerResult:  # noqa: ARG00
 
 def _make_answer_fn(cfg: AppConfig) -> AnswerFn:
     if cfg.benchmark.answer.backend == "fake":
+        require_fake_allowed(cfg, "benchmark.answer.backend='fake'")
         return _fake_answer_fn
     from gluomem.extras import require
 
@@ -113,6 +115,7 @@ def _make_judge_fns(
     usage per model slug (empty on the fake path)."""
     backbones = cfg.benchmark.judge.backbones
     if cfg.benchmark.judge.backend == "fake":
+        require_fake_allowed(cfg, "benchmark.judge.backend='fake'")
         return {b: fake_judge_fn for b in backbones}, dict
     from gluomem.extras import require
 
@@ -638,7 +641,7 @@ def ingest_per_conversation(
     ``gluomem bench verify --write-sentinels``. Prints per-conversation wall
     time, token usage and cost (when the facade tracks usage) plus a total.
     """
-    from gluomem.embedding.providers import MockEmbedder, make_embedder
+    from gluomem.embedding.providers import make_embedder
     from gluomem.frames.store import FrameStore
     from gluomem.kg.graph import KnowledgeGraph
     from gluomem.llm.usage import total_tokens, usage_delta
@@ -653,11 +656,7 @@ def ingest_per_conversation(
     # One embedder for the whole batch (loading MiniLM per conversation
     # wastes ~20s and churns memory).
     if embedder is None:
-        embedder = (
-            MockEmbedder(dim=cfg.storage.vector_dim)
-            if cfg.embedding.model == "mock"
-            else make_embedder(cfg)
-        )
+        embedder = make_embedder(cfg)
 
     def snapshot() -> dict[str, dict[str, int]]:
         acc = getattr(facade, "usage", None)

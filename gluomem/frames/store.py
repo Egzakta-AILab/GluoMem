@@ -21,6 +21,11 @@ and no index rows, so a retry inserts cleanly. Databases written before this
 guarantee may hold frames without a complete index; :meth:`FrameStore.index_state`
 reports that truthfully, dedup hits repair it (:meth:`FrameStore.ensure_indexed`),
 and :meth:`FrameStore.repair_indexes` repairs a whole file.
+
+Embedder binding: a store checks its embedder's fingerprint against the one
+recorded in the file (:mod:`gluomem.embedding.compat`) before reading or
+writing any vector. Switching encoders goes through
+:meth:`FrameStore.rebuild_index`.
 """
 
 from __future__ import annotations
@@ -35,7 +40,8 @@ import numpy as np
 from gluomem.config.app_config import ChunkingConfig
 from gluomem.embedding.base import Embedder
 from gluomem.embedding.chunker import Chunk, chunk
-from gluomem.embedding.providers import MockEmbedder
+from gluomem.embedding.compat import bind_embedder, write_fingerprint
+from gluomem.embedding.fingerprint import EmbedderFingerprint, fingerprint_of
 from gluomem.frames.content_hash import content_hash
 from gluomem.frames.eligibility import INELIGIBLE_PARAMS, INELIGIBLE_PLACEHOLDERS
 from gluomem.frames.sessions import get_or_create_session
@@ -188,23 +194,29 @@ class FrameStore:
         store reuses its connection for all reads/writes.
     embedder:
         The embedder used by the ``_index`` write-through hook to produce
-        whole-frame and chunk vectors at the embedder's native dim. Defaults to
-        a deterministic ``MockEmbedder`` at ``db.dim`` so the store is fully
-        usable offline with no explicit embedder. ``embedder.dim`` MUST equal
-        ``db.dim`` (the vec0 tables were created at that dim).
+        whole-frame and chunk vectors at the embedder's native dim. Required:
+        there is no default, so a store never silently runs on placeholder
+        vectors (tests pass a ``MockEmbedder`` explicitly). ``embedder.dim``
+        MUST equal ``db.dim`` and its fingerprint must match the one recorded
+        in the file; otherwise construction raises
+        :class:`~gluomem.embedding.compat.EmbeddingMismatchError`.
     """
 
     def __init__(
         self,
         db: MindDB,
         *,
-        embedder: Embedder | None = None,
+        embedder: Embedder,
         chunking: ChunkingConfig | None = None,
+    ) -> None:
+        self._setup(db, embedder, chunking)
+        self._fingerprint: EmbedderFingerprint = bind_embedder(db, embedder)
+
+    def _setup(
+        self, db: MindDB, embedder: Embedder, chunking: ChunkingConfig | None
     ) -> None:
         self._db: MindDB = db
         self._conn: sqlite3.Connection = db.conn
-        if embedder is None:
-            embedder = MockEmbedder(dim=db.dim)
         if embedder.dim != db.dim:
             raise ValueError(
                 f"embedder.dim ({embedder.dim}) must equal db.dim ({db.dim}); "
@@ -227,6 +239,58 @@ class FrameStore:
         """The frame embedder (read-only) — reused by the semantic deduper so a
         probe and the write-through index share one embedding provider."""
         return self._embedder
+
+    @property
+    def fingerprint(self) -> EmbedderFingerprint:
+        """The embedder fingerprint this store is bound to."""
+        return self._fingerprint
+
+    @classmethod
+    def rebuild_index(
+        cls,
+        db: MindDB,
+        embedder: Embedder,
+        *,
+        chunking: ChunkingConfig | None = None,
+    ) -> FrameStore:
+        """Re-embed every frame with ``embedder`` and bind the file to it.
+
+        The deliberate path for switching encoders or adopting a file that
+        predates fingerprints. All frames are embedded before anything is
+        written; the old index rows are then replaced and the new fingerprint
+        recorded in one transaction. A failure at any step leaves the file
+        exactly as it was (old vectors, old fingerprint). Holds every vector
+        in memory until the commit.
+        """
+        store = cls.__new__(cls)
+        store._setup(db, embedder, chunking)
+        frames = [
+            store._row_to_frame(r)
+            for r in store._conn.execute(
+                f"SELECT {', '.join(_COLUMNS)} FROM memory_frames ORDER BY id"
+            ).fetchall()
+        ]
+        prepared = [
+            (f.id, store._prepare_index(store._indexable_text(f))) for f in frames
+        ]
+        fp = fingerprint_of(embedder)
+        try:
+            for table in (
+                "memory_frames_vec",
+                "memory_frame_chunks_vec",
+                "memory_frame_chunks",
+                "memory_frames_fts",
+            ):
+                store._conn.execute(f"DELETE FROM {table}")
+            for fid, prep in prepared:
+                store._write_index(fid, prep)
+            write_fingerprint(db, fp)
+            store._conn.commit()
+        except Exception:
+            store._conn.rollback()
+            raise
+        store._fingerprint = fp
+        return store
 
     # --- I-frames (facts) --------------------------------------------------
 
@@ -558,7 +622,9 @@ class FrameStore:
         """Rebuild every frame whose projections are missing or stale.
 
         The explicit recovery path for existing ``*.mind`` files. Returns the
-        repaired frame ids. Requires the same embedder the file was built with.
+        repaired frame ids. The store's fingerprint check guarantees the
+        repair uses the embedder the file was built with; use
+        :meth:`rebuild_index` to change embedders.
         """
         repaired: list[int] = []
         ids = [

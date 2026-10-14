@@ -47,7 +47,7 @@ from datetime import datetime
 
 from gluomem.config.app_config import AppConfig, ProfileWeights
 from gluomem.embedding.base import Embedder
-from gluomem.embedding.providers import MockEmbedder
+from gluomem.embedding.compat import bind_embedder
 from gluomem.embedding.reranker import Reranker
 from gluomem.frames.eligibility import (
     INELIGIBLE_PARAMS,
@@ -128,8 +128,9 @@ class HybridSearch:
         profile weights, …). Nothing is hardcoded.
     embedder:
         The embedder used to embed the query for the vector lane. Defaults to
-        a deterministic ``MockEmbedder`` at ``db.dim`` so the search is usable
-        offline with no explicit embedder.
+        the store's embedder. A different embedder must carry the fingerprint
+        recorded in the file, or construction raises
+        :class:`~gluomem.embedding.compat.EmbeddingMismatchError`.
     reranker:
         Optional cross-encoder reranker. Used only when
         ``cfg.search.rerank.enabled`` is True. When ``None`` the rerank step is
@@ -163,7 +164,11 @@ class HybridSearch:
         self._conn: sqlite3.Connection = db.conn
         self._store: FrameStore = store
         self._cfg: AppConfig = cfg
-        self._embedder: Embedder = embedder or MockEmbedder(dim=db.dim)
+        if embedder is None:
+            embedder = store.embedder
+        elif embedder is not store.embedder:
+            bind_embedder(db, embedder)
+        self._embedder: Embedder = embedder
         self._reranker: Reranker | None = reranker
         self._kg: KnowledgeGraph | None = kg
         self._frames_vec: SqliteVecStore = SqliteVecStore(

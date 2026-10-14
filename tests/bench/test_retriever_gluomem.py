@@ -117,17 +117,12 @@ def test_query_embedder_resolves_from_config_not_mock(
     assert calls == ["minilm"], "query embedder must resolve from config"
 
 
-def test_mock_config_still_uses_mock_embedder(
-    bench_cfg, ingested_db_dir, fixture_adapter, answer_fn, monkeypatch
+def test_mock_config_builds_mock_through_the_factory(
+    bench_cfg, ingested_db_dir, fixture_adapter, answer_fn
 ) -> None:
-    """When config asks for the mock embedder, make_embedder is NOT called
-    (offline determinism preserved)."""
-    import gluomem.bench.retriever as retr
-
-    monkeypatch.setattr(
-        retr, "make_embedder", lambda cfg: pytest.fail("must not build a real embedder")
-    )
-    r = GluoMemRetriever(  # bench_cfg pins embedding.model=mock
+    """A config naming the mock (with fakes allowed) gets it from
+    make_embedder; there is no separate mock shortcut to bypass the gate."""
+    r = GluoMemRetriever(  # bench_cfg pins embedding.model=mock + allow_fake
         bench_cfg,
         db_dir=ingested_db_dir,
         answer_fn=answer_fn,

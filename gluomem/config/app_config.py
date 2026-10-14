@@ -63,6 +63,9 @@ class ModelEntry(BaseModel):
 
     provider: str
     provider_model: str
+    # Pinned upstream revision (e.g. a Hugging Face commit). Part of the
+    # embedding fingerprint; ``None`` means "whatever the hub serves".
+    revision: str | None = None
     dim: int | None = None
     api_key_env: str | None = None
     api_base: str | None = None
@@ -80,6 +83,18 @@ class StorageConfig(BaseModel):
 class EmbeddingConfig(BaseModel):
     model: str = "minilm"
     pad_to: int | None = None
+
+
+class ComponentsConfig(BaseModel):
+    """Which component implementations a config may build.
+
+    ``allow_fake`` admits the deterministic test doubles (``provider: fake``
+    embedders, ``fake`` extraction/answer/judge backends). It is off by
+    default so a production config can never run on them; tests and offline
+    demos opt in explicitly.
+    """
+
+    allow_fake: bool = False
 
 
 class ChunkingConfig(BaseModel):
@@ -745,8 +760,8 @@ class BenchmarkConfig(BaseModel):
 def _default_models() -> dict[str, ModelEntry]:
     return {
         "mock": ModelEntry(
-            provider="inprocess",
-            provider_model="mock",
+            provider="fake",
+            provider_model="sha256-pcg64",
             dim=None,
         ),
         "minilm": ModelEntry(
@@ -760,7 +775,7 @@ def _default_models() -> dict[str, ModelEntry]:
             dim=768,
         ),
         "reranker": ModelEntry(
-            provider="onnx",
+            provider="inprocess",
             provider_model="cross-encoder/ms-marco-MiniLM-L-6-v2",
         ),
         # --- LLMs: ALL routed via OpenRouter (one gateway, one key). --------
@@ -878,6 +893,7 @@ class AppConfig(BaseSettings):
     models: dict[str, ModelEntry] = Field(default_factory=_default_models)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
+    components: ComponentsConfig = Field(default_factory=ComponentsConfig)
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
@@ -1152,7 +1168,7 @@ class AppConfig(BaseSettings):
 
         Example::
 
-            cfg.with_overrides({"search.rrf_k": 99, "embedding.model": "ollama"})
+            cfg.with_overrides({"search.rrf_k": 99, "embedding.model": "mock"})
         """
         merged = {**self._load_overrides, **overrides}
         return load_config(

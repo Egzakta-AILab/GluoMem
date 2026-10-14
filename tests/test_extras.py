@@ -62,7 +62,9 @@ def test_dspy_extraction_without_llm_extra_fails(no_model_packages: None) -> Non
 
 
 def test_fake_extraction_needs_no_extra(no_model_packages: None) -> None:
-    cfg = load_config().with_overrides({"write.extraction_backend": "fake"})
+    cfg = load_config().with_overrides(
+        {"write.extraction_backend": "fake", "components.allow_fake": True}
+    )
     assert make_extractors(cfg) is not None
 
 

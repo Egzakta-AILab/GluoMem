@@ -1,9 +1,10 @@
 """GluoMem CLI entrypoint (``gluomem``).
 
-``gluomem ingest`` and ``gluomem bench`` are live; ``tune``/``ablate`` remain
-stubs. The module top stays dspy-free — LLM backends are resolved
-lazily inside handlers (``make_extractors`` for ingest, the runner's backend
-dispatch for bench), so fake/none backends run fully offline, and the
+``gluomem ingest``, ``gluomem bench``, ``gluomem components`` (effective
+component readiness) and ``gluomem index`` (explicit embedding rebuild/adopt)
+are live; ``tune``/``ablate`` remain stubs. The module top stays dspy-free —
+LLM backends are resolved lazily inside handlers (``make_extractors`` for
+ingest, the runner's backend dispatch for bench), so fake/none backends run fully offline, and the
 ``bench rescore``/``gate``/``sample``/``fetch`` handlers never touch dspy at
 all.
 """
@@ -90,6 +91,72 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     )
     for err in report.extraction_errors:
         print(f"extraction error: {err}", file=sys.stderr)
+    return 0
+
+
+# --- components / index -------------------------------------------------------
+
+
+def _open_existing_db(path: str, cfg: AppConfig):  # noqa: ANN202 — MindDB, imported lazily
+    from pathlib import Path
+
+    from gluomem.storage.db import MindDB
+
+    if not Path(path).expanduser().is_file():
+        raise FileNotFoundError(f"no mind db at {path}")
+    return MindDB(path, dim=cfg.storage.vector_dim)
+
+
+def _cmd_components(args: argparse.Namespace) -> int:
+    import json
+
+    from gluomem.components import component_report
+
+    cfg = _config_from(args)
+    db = None
+    if args.db:
+        try:
+            db = _open_existing_db(args.db, cfg)
+        except FileNotFoundError as exc:
+            print(f"gluomem components: {exc}", file=sys.stderr)
+            return 1
+    try:
+        report = component_report(cfg, db=db)
+    finally:
+        if db is not None:
+            db.close()
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if args.require_ready:
+        store_ok = report.get("store", {}).get("embedder_matches") is not False
+        return 0 if report["ready"] and store_ok else 3
+    return 0
+
+
+def _cmd_index(args: argparse.Namespace) -> int:
+    from gluomem.embedding.compat import adopt_embedder
+    from gluomem.embedding.providers import make_embedder
+    from gluomem.frames.store import FrameStore
+
+    if args.index_command not in ("rebuild", "adopt"):
+        print("gluomem index: pick a subcommand (adopt, rebuild)", file=sys.stderr)
+        return 1
+    cfg = _config_from(args)
+    try:
+        db = _open_existing_db(args.db, cfg)
+    except FileNotFoundError as exc:
+        print(f"gluomem index: {exc}", file=sys.stderr)
+        return 1
+    try:
+        embedder = make_embedder(cfg)
+        if args.index_command == "rebuild":
+            store = FrameStore.rebuild_index(db, embedder, chunking=cfg.chunking)
+            n = db.conn.execute("SELECT COUNT(*) FROM memory_frames").fetchone()[0]
+            print(f"rebuilt index for {n} frame(s); fingerprint {store.fingerprint.digest}")
+        else:
+            fp = adopt_embedder(db, embedder)
+            print(f"adopted fingerprint {fp.digest} without re-embedding")
+    finally:
+        db.close()
     return 0
 
 
@@ -448,16 +515,45 @@ def main(argv: list[str] | None = None) -> int:
 
     _add_bench_parsers(sub)
 
+    components = sub.add_parser(
+        "components",
+        help="print effective component implementations and readiness (no secrets)",
+    )
+    components.add_argument("--db", default=None, help="also check this mind db's fingerprint")
+    components.add_argument(
+        "--require-ready",
+        action="store_true",
+        help="exit 3 unless every component is real and available",
+    )
+    _add_config_args(components)
+
+    index = sub.add_parser("index", help="explicit embedding index maintenance")
+    index_sub = index.add_subparsers(dest="index_command")
+    for name, text in (
+        ("rebuild", "re-embed every frame with the configured embedder and record it"),
+        ("adopt", "record the configured embedder for a pre-fingerprint file, no re-embed"),
+    ):
+        p = index_sub.add_parser(name, help=text)
+        p.add_argument("--db", required=True, help="mind db path")
+        _add_config_args(p)
+
     # Stub subcommands; not implemented yet.
     sub.add_parser("tune", help="offline parameter tuning")
     sub.add_parser("ablate", help="run ablation experiments")
 
     args = parser.parse_args(argv)
+    from gluomem.components import FakeComponentError, ProviderUnavailableError
+    from gluomem.embedding.compat import EmbeddingMismatchError
     from gluomem.extras import MissingExtraError
 
     try:
         return _dispatch(args, parser)
-    except MissingExtraError as exc:
+    except (
+        MissingExtraError,
+        ProviderUnavailableError,
+        FakeComponentError,
+        EmbeddingMismatchError,
+    ) as exc:
         print(f"gluomem: {exc}", file=sys.stderr)
         return 2
 
@@ -468,6 +564,10 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return 0
     if args.command == "ingest":
         return _cmd_ingest(args)
+    if args.command == "components":
+        return _cmd_components(args)
+    if args.command == "index":
+        return _cmd_index(args)
     if args.command == "bench":
         handler = _BENCH_HANDLERS.get(args.bench_command or "")
         if handler is None:

@@ -76,7 +76,11 @@ def test_null_extractors_extract_nothing() -> None:
 
 def test_make_extractors_backend_switch() -> None:
     cfg = load_config()
-    fake = make_extractors(cfg.with_overrides({"write.extraction_backend": "fake"}))
+    fake = make_extractors(
+        cfg.with_overrides(
+            {"write.extraction_backend": "fake", "components.allow_fake": True}
+        )
+    )
     assert isinstance(fake, FakeExtractors)
     null = make_extractors(cfg.with_overrides({"write.extraction_backend": "none"}))
     assert isinstance(null, NullExtractors)
