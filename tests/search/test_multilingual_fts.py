@@ -247,3 +247,35 @@ def test_postgres_query_expression_quotes_user_words_and_includes_stems() -> Non
     assert cyrillic_to_latin("Љ Њ Џ") == "Lj Nj Dž"
     assert fold_to_ascii("ǅ ǈ ǋ") == "dz lj nj"
     assert expand_fts5_query(sanitize("one two")) == '"one" AND "two"'
+
+
+def test_match_any_ors_terms_in_both_dialects(tmp_path: Path) -> None:
+    assert fold_query_text("one two", match_any=True) == "('one') | ('two')"
+    assert expand_fts5_query(sanitize("one two"), match_any=True) == '"one" OR "two"'
+
+    with MindDB(tmp_path / "any.mind", dim=16) as db:
+        store = FrameStore(db, embedder=MockEmbedder(dim=16))
+        both = store.create_i_frame("g1", "Главни трезор у Београду")
+        one = store.create_i_frame("g2", "Rezervni trezor u Nisu")
+        store.create_i_frame("g3", "unrelated note")
+        query = sanitize("glavni trezor beograd")
+        assert db.fts.search(query, limit=10) == [both.id]
+        assert db.fts.search(query, limit=10, match_any=True) == [both.id, one.id]
+
+
+def test_postgres_match_any_uses_only_the_folded_or_query() -> None:
+    executed: list[tuple[str, tuple[Any, ...]]] = []
+
+    class _FakePgBackend:
+        dialect = "postgres"
+
+        def fetchall(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+            executed.append((sql, tuple(params)))
+            return []
+
+    pg_fts = PgTsVectorStore(_FakePgBackend())  # type: ignore[arg-type]
+    pg_fts.search(sanitize("trezor beograd"), limit=5, match_any=True)
+    sql, params = executed[-1]
+    assert "plainto_tsquery" not in sql
+    assert params[0] == fold_query_text("trezor beograd", match_any=True)
+    assert " | " in params[0]

@@ -11,7 +11,8 @@
 | Frame Lifecycle Status | The visibility state of a frame: `candidate` (awaiting review, not recalled), `active` (eligible for recall), `superseded` (replaced by a correction, old plaintext scrubbed), `expired` (past its retention window), `forgotten` (erased by request or source retraction), or `tombstoned` (dismissed in review). |
 | Recall Eligibility | The invariant that a frame may enter retrieval, knowledge-graph seeding, reranking, or state reconstruction only when its trust is not `quarantined`, its status is `active`, and its expiration timestamp has not passed. |
 | Bitemporal Knowledge Graph | A scoped graph of entities and relations tracking both world validity (`valid_from`, `valid_to`) and system ingestion time (`recorded_at`), preserving retired intervals in relation history. |
-| Admission Gate | The single write boundary that scans candidate text for prompt injection, checks exact and semantic duplicates within the active Memory Scope, and indexes admitted frames across full-text and vector stores. |
+| Admission Gate | The single write boundary that scans candidate text for prompt injection, checks exact and semantic duplicates within the active Memory Scope, holds conflicting untrusted writes for review, and indexes admitted frames across full-text and vector stores. |
+| Conflict Review | The admission rule that stores a write from an untrusted source (default `import`) as a `candidate` when it restates an active fact from a more trusted source with a different value. |
 | Scope Generation | A per-scope counter bumped by every correct, forget, retract or review decision. A job leased at an older generation is re-run at the new one instead of writing stale data. |
 | Suppression Key | A normalized form of erased content stored without the plaintext, so replaying the same content after a forget or retraction does not bring it back. |
 | Hybrid Search | Recall pipeline combining scoped lexical search and scoped dense vector search via Reciprocal Rank Fusion (RRF), multiplied by a 4-signal relevance profile (`temporal`, `popularity`, `contextual`, `importance`) and gated by calibrated abstention. |
@@ -29,6 +30,7 @@
 | Recall Eligibility | `gluomem/frames/eligibility.py` (`is_recall_eligible`); SQL predicate `gluomem/storage/scope.py` (`eligible_sql`, `scope_sql`) |
 | Bitemporal Knowledge Graph | `gluomem/kg/graph.py` (`KnowledgeGraph`, `Entity`, `Relation`, `RelationInterval`) |
 | Admission Gate | `gluomem/write/gate.py` (`admit`, `AdmitResult`) |
+| Conflict Review | `gluomem/write/gate.py` (`find_conflict`); config `ConflictReviewConfig` in `gluomem/config/app_config.py` |
 | Scope Generation | `gluomem/frames/generation.py` (`current_scope_generation`, `bump_scope_generation`) |
 | Suppression Key | `gluomem/frames/content_hash.py` (`suppression_key`); tables `memory_frame_keys`, `memory_tombstone_keys` |
 | Hybrid Search | `gluomem/search/hybrid.py` (`HybridSearch`, `SearchHit`, `SearchResult`) |

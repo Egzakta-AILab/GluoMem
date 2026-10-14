@@ -219,6 +219,8 @@ def _entries() -> tuple[BenchmarkEntry, ...]:
                 "quarantine_recall_leak_rate@k",
                 "clean_recall_retention@k",
                 "benign_quarantine_rate",
+                "poison_review_rate",
+                "benign_review_rate",
             ),
             note="Poison admission/recall, quarantine leakage, retention and false positives",
             capabilities=("adversarial_safety", "memory_poisoning", "multilingual_safety"),

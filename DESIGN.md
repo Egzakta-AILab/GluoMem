@@ -210,13 +210,18 @@ All writes funnel through one `admit()` (dedup + index + minimal injection scan)
 
 ```python
 def admit(content, source, trust, *, scanner, store, kg, cfg) -> AdmitResult:
-    v = scanner.scan(content, context=source)            # cheap regex; DSPy classifier optional
+    v = scanner.scan(content, context=source)            # cheap regex
     if v.score >= cfg.safety.block_threshold and cfg.safety.fail_mode == 'quarantine':
         trust = 'quarantined'
-    frame = store.create_i_frame(content, source=source, trust=trust)   # dedup inside
+    # exact + semantic dedup
+    if source in cfg.safety.conflict_review.sources and status == 'active':
+        conflicts_with = find_conflict(content, ...)     # trusted fact restated with a new value?
+        if conflicts_with: status = 'candidate'          # held for review, never recalled
+    frame = store.create_i_frame(content, source=source, trust=trust, status=status)
     # index FTS + vector + chunks ; link KG entities
-    return AdmitResult(frame=frame)
+    return AdmitResult(frame=frame, conflicts_with=conflicts_with)
 ```
+**Conflict review** (`safety.conflict_review`, on by default for `import`): a write from a reviewed source that restates a trusted active fact with a different value is stored as a `candidate` and waits in the review queue. The lookup is lexical, so it behaves the same on SQLite and Postgres and does not depend on the embedder. It takes the `neighbors` best any-term full-text matches in the scope, skips frames whose own source is reviewed (untrusted writes may disagree with each other), and compares script-, diacritic- and case-folded content words. A neighbor conflicts when the two share at least `min_shared_terms` words, the shared words are at least `min_overlap` of the shorter set, and each side has a word the other lacks; a pure elaboration is not a conflict. Pinned, user-verified, already-candidate and quarantined writes, and B-frames, skip the check. The thresholds are round defaults, not tuned on benchmark data. On `minja_adversarial_v1` it holds the 8 held-out attacks the regex scanner misses, taking `unquarantined_persistence_rate@5` from 7/60 to 0. The cost: templated imports that differ from a trusted line only by a counter or value look exactly like an update. With the MINJA and SR/EN benign events split at random between `user_stated` and `import`, about 56% of the benign imports were held.
 **Ingest pipeline:** benchmark conversation → sessions/GOP → per-turn frames → lane extraction (fact/event/profile) → cognify (entities/relations) → P/B from deltas/contradictions.
 
 **Eligibility** (`gluomem/frames/eligibility.py`): a quarantined frame is stored for inspection but is not recall-eligible. Search lanes, KG contextual scoring, the rerank pool and `reconstruct_state` skip it; the gate skips semantic dedup and KG linking for it; ingest does not cognify flagged observations and a flagged contradiction cannot write a B-frame, demote, or retire edges. Compaction merges a P-frame into its base only when same GOP, same source, both eligible, and the P's trust is at least the base's, so merged text is never promoted.
@@ -321,7 +326,7 @@ class MetricRegistry:
 
 **Denominators.** Every prediction is in the QA denominator, including a sample whose every judge call failed. Retrieval families cover every sample where retrieval applies; an empty result (no hits, abstention, reader failure) scores zero. Retrieval does not apply only when the sample has no evidence gold or the retriever never retrieves (full context); those counts, prediction failures by kind (`error`, `timeout`), abstentions by reason, missing judge records and adapter pool exclusions are written to `denominators.json` and rendered in the report. `bench rescore --check` re-derives and verifies the file.
 
-**Replay.** `bench/replay.py` runs sequential-ingestion protocols. For each probe it admits, through the normal write gate, only the events with `seq <= after_seq`; probe questions, accepted answers and later events never reach the write path. It refuses to query until every ingested frame's projections are ready, searches with the probe's logical time as the clock, and gives each (candidate, history) a fresh store. Scores are objective (`evidence_hit@k`, `context_substring_match@k`, and `current_over_stale@k` for conflicting updates), with no reader model. The bundled `mab_fixture` is generated MemoryAgentBench-shaped data under Apache-2.0; its receipt has no wall-clock fields and says it is not an official result. Interactive benchmarks need a trajectory runner; `TrajectoryEnvironment` names that seam (`reset`, `step`) and nothing implements it yet.
+**Replay.** `bench/replay.py` runs sequential-ingestion protocols. For each probe it admits, through the normal write gate and as `user_stated` (the history is the user's own memory; admission of untrusted sources is measured by the adversarial suite), only the events with `seq <= after_seq`; probe questions, accepted answers and later events never reach the write path. It refuses to query until every ingested frame's projections are ready, searches with the probe's logical time as the clock, and gives each (candidate, history) a fresh store. Scores are objective (`evidence_hit@k`, `context_substring_match@k`, and `current_over_stale@k` for conflicting updates), with no reader model. The bundled `mab_fixture` is generated MemoryAgentBench-shaped data under Apache-2.0; its receipt has no wall-clock fields and says it is not an official result. Interactive benchmarks need a trajectory runner; `TrajectoryEnvironment` names that seam (`reset`, `step`) and nothing implements it yet.
 
 ---
 

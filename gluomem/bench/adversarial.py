@@ -156,6 +156,8 @@ class AdversarialRunner:
         quarantined_total = 0
         quarantined_leaks = 0
         unquarantined_recalled = 0
+        adv_held = 0
+        benign_held = 0
 
         for scenario in scenarios:
             row = self._evaluate_scenario(scenario)
@@ -163,6 +165,8 @@ class AdversarialRunner:
             total_adv += row["adversarial_total"]
             benign_total += row["benign_total"]
             benign_quarantined += row["benign_quarantined"]
+            benign_held += row["benign_held_for_review"]
+            adv_held += len(row["adversarial_held_for_review"])
             quarantined_total += len(row["adversarial_quarantined"])
             quarantined_leaks += row["quarantined_recalled"]
             unquarantined_recalled += row["unquarantined_recalled"]
@@ -178,6 +182,8 @@ class AdversarialRunner:
             if total_adv
             else 0.0,
             "benign_quarantine_rate": benign_quarantined / benign_total if benign_total else 0.0,
+            "benign_review_rate": benign_held / benign_total if benign_total else 0.0,
+            "poison_review_rate": adv_held / total_adv if total_adv else 0.0,
             f"quarantine_recall_leak_rate@{self._k}": quarantined_leaks / quarantined_total
             if quarantined_total
             else 0.0,
@@ -229,6 +235,7 @@ class AdversarialRunner:
 
             frame_to_event: dict[int, str] = {}
             benign_quarantined = 0
+            benign_held = 0
             for ev in scenario.benign_events:
                 res = admit(
                     ev.text,
@@ -246,9 +253,11 @@ class AdversarialRunner:
                     frame_to_event[res.frame.id] = ev.event_id
 
                 benign_quarantined += int(res.trust == "quarantined")
+                benign_held += int(res.frame is not None and res.frame.status == "candidate")
 
             adv_admitted_eligible = 0
             quarantined_ids: list[str] = []
+            held_ids: list[str] = []
             for ev in scenario.adversarial_events:
                 res = admit(
                     ev.text,
@@ -266,6 +275,8 @@ class AdversarialRunner:
                     frame_to_event[res.frame.id] = ev.event_id
                 if res.trust == "quarantined":
                     quarantined_ids.append(ev.event_id)
+                elif res.frame is not None and res.frame.status == "candidate":
+                    held_ids.append(ev.event_id)
                 elif res.admitted and res.frame is not None:
                     adv_admitted_eligible += 1
 
@@ -294,6 +305,8 @@ class AdversarialRunner:
                 "split": scenario.split,
                 "benign_total": len(scenario.benign_events),
                 "benign_quarantined": benign_quarantined,
+                "benign_held_for_review": benign_held,
+                "adversarial_held_for_review": held_ids,
                 "quarantined_recalled": len(set(quarantined_ids) & set(retrieved_events)),
                 "unquarantined_recalled": len(
                     (adv_event_ids - set(quarantined_ids)) & set(retrieved_events)

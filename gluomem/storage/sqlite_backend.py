@@ -192,12 +192,13 @@ class SqliteFts5Store:
         *,
         scope: MemoryScope | None = None,
         now_iso: str | None = None,
+        match_any: bool = False,
     ) -> list[int]:
         if not sanitized_query or limit <= 0:
             return []
         eff_scope = resolve_scope(scope)
         eff_now = format_now_iso(now_iso)
-        match_expr = expand_fts5_query(sanitized_query) or sanitized_query
+        match_expr = expand_fts5_query(sanitized_query, match_any=match_any) or sanitized_query
         try:
             rows = self._backend.fetchall(
                 "SELECT f.rowid AS rowid FROM memory_frames_fts f "

@@ -14,13 +14,13 @@ from gluomem.frames.store import (
     Importance,
     Trust,
 )
-from gluomem.search.multilingual import fold_to_ascii
+from gluomem.search.multilingual import canonical_terms, fold_to_ascii
 from gluomem.storage.scope import FrameStatus, MemoryKind, MemoryScope, resolve_scope
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from gluomem.config.app_config import AppConfig, SafetyConfig
+    from gluomem.config.app_config import AppConfig, ConflictReviewConfig, SafetyConfig
     from gluomem.frames.store import FrameStore, _PreparedIndex
     from gluomem.kg.graph import KnowledgeGraph
     from gluomem.write.dedup import SemanticDeduper
@@ -57,9 +57,68 @@ class InjectionScanner:
         return ScanVerdict(score=score, matched=matched)
 
 
+_STOPWORDS = frozenset(
+    (
+        "a an and are as at be by for from has in is it its of on or that the this to was with "
+        "da do i iz ili je na od sa se su u za"
+    ).split()
+)
+
+
+def _fact_terms(text: str) -> frozenset[str]:
+    """Content words of ``text``; digits always count, other one-letter words do not."""
+    return frozenset(
+        t
+        for t in canonical_terms(text)
+        if t not in _STOPWORDS and (len(t) > 1 or t.isdigit())
+    )
+
+
+def _restates_with_new_value(
+    new: frozenset[str], old: frozenset[str], cfg: ConflictReviewConfig
+) -> bool:
+    shared = len(new & old)
+    if shared < cfg.min_shared_terms or not (new - old) or not (old - new):
+        return False
+    return shared / min(len(new), len(old)) >= cfg.min_overlap
+
+
+def find_conflict(
+    content: str,
+    *,
+    store: FrameStore,
+    scope: MemoryScope,
+    cfg: ConflictReviewConfig,
+) -> int | None:
+    """Return the id of a more-trusted active frame ``content`` restates with a new value.
+
+    Frames from the reviewed sources themselves are not compared: untrusted
+    writes may disagree with each other, but not silently with a trusted one.
+    """
+    new = _fact_terms(content)
+    if len(new) < cfg.min_shared_terms:
+        return None
+    query = " ".join(f'"{t}"' for t in sorted(new))
+    ids = store._fts.search(query, cfg.neighbors, scope=scope, match_any=True)
+    frames = store.get_frames(ids, scope=scope)
+    for fid in ids:
+        frame = frames.get(fid)
+        if (
+            frame is not None
+            and frame.source not in cfg.sources
+            and _restates_with_new_value(new, _fact_terms(frame.indexable_text), cfg)
+        ):
+            return fid
+    return None
+
+
 @dataclass
 class AdmitResult:
-    """Outcome of one admission: the frame (or None under reject) and verdict."""
+    """Outcome of one admission: the frame (or None under reject) and verdict.
+
+    ``conflicts_with`` names the active frame an untrusted write restated with a
+    different value; such a write is stored as a ``candidate`` for review.
+    """
 
     admitted: bool
     frame: Frame | None
@@ -68,6 +127,7 @@ class AdmitResult:
     deduped: bool = False
     semantic_deduped: bool = False
     superseded_id: int | None = None
+    conflicts_with: int | None = None
 
 
 def admit(
@@ -169,6 +229,20 @@ def admit(
                     semantic_deduped=True,
                 )
 
+    conflicts_with: int | None = None
+    review = cfg.safety.conflict_review
+    if (
+        review.enabled
+        and frame_type != "B"
+        and source in review.sources
+        and status == "active"
+        and not (pinned or verified_by_user)
+        and is_recall_eligible(trust, status=status, expires_at=expires_at)
+    ):
+        conflicts_with = find_conflict(content, store=store, scope=s, cfg=review)
+        if conflicts_with is not None:
+            status = "candidate"
+
     if frame_type == "I":
         frame = store.create_i_frame(
             gop,
@@ -242,4 +316,5 @@ def admit(
         verdict=verdict,
         trust=trust,
         superseded_id=superseded_id,
+        conflicts_with=conflicts_with,
     )

@@ -26,6 +26,17 @@ FrameStatus = Literal[
     "tombstoned",
 ]
 
+FrameSource = Literal[
+    "user_stated",
+    "tool_verified",
+    "agent_inferred",
+    "import",
+    "system",
+    "personal",
+    "workspace",
+    "team_sync",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class MemoryScope:

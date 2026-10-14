@@ -222,7 +222,7 @@ class ReplayRunner:
                         store=store,
                         kg=None,
                         cfg=cfg,
-                        source="import",
+                        source="user_stated",
                         event_time=event.at,
                         created_at=event.at,
                     )

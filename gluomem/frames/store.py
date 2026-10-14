@@ -20,6 +20,7 @@ from gluomem.frames.sessions import get_or_create_session
 from gluomem.storage.db import MindDB
 from gluomem.storage.scope import (
     DEFAULT_SCOPE,
+    FrameSource,
     FrameStatus,
     MemoryKind,
     MemoryScope,
@@ -33,16 +34,6 @@ if TYPE_CHECKING:
 
 FrameType = Literal["I", "P", "B"]
 Importance = Literal["critical", "important", "normal", "temporary", "deprecated"]
-FrameSource = Literal[
-    "user_stated",
-    "tool_verified",
-    "agent_inferred",
-    "import",
-    "system",
-    "personal",
-    "workspace",
-    "team_sync",
-]
 Trust = Literal["trusted", "normal", "low", "quarantined"]
 
 _DEFAULT_IMPORTANCE: Importance = "normal"

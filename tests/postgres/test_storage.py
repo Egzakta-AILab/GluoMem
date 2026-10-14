@@ -109,3 +109,12 @@ def test_unmigrated_postgres_is_rejected(mind_db: MindDB, pg_dsn: str, version: 
         mind_db.execute("UPDATE alembic_version SET version_num=?", (version,))
     with pytest.raises(IncompatibleSchemaError, match="gluomem migrate upgrade"):
         PostgresBackend(pg_dsn, postgres_schema=schema)
+
+
+def test_fts_match_any_ranks_partial_matches(mind_db: MindDB, frame_store: FrameStore) -> None:
+    both = frame_store.create_i_frame("gop", "Главни трезор у Београду")
+    one = frame_store.create_i_frame("gop", "Rezervni trezor u Nisu")
+    frame_store.create_i_frame("gop", "unrelated note")
+    query = sanitize("glavni trezor beograd")
+    assert mind_db.fts.search(query, 10) == [both.id]
+    assert mind_db.fts.search(query, 10, match_any=True) == [both.id, one.id]

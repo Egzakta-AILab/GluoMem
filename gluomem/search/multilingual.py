@@ -143,17 +143,33 @@ def fold_multilingual_text(text: str) -> str:
     )
 
 
-def fold_query_text(query: str) -> str:
-    """Build a literal PostgreSQL ``to_tsquery('simple', ...)`` expression."""
+def canonical_terms(text: str) -> list[str]:
+    """Return one script-, diacritic- and case-folded, lightly stemmed form per word."""
+    return [
+        _serbian_stem(word) or word
+        for match in _WORD_RE.finditer(fold_to_ascii(text))
+        for word in match.group().replace(".", "-").split("-")
+        if word
+    ]
+
+
+def fold_query_text(query: str, *, match_any: bool = False) -> str:
+    """Build a literal PostgreSQL ``to_tsquery('simple', ...)`` expression.
+
+    Terms are AND-ed unless ``match_any`` is set, which OR-s them.
+    """
     groups = []
     for match in _WORD_RE.finditer(query):
         forms = _variants(match.group())
         groups.append("(" + " | ".join("'" + form.replace("'", "''") + "'" for form in forms) + ")")
-    return " & ".join(groups)
+    return (" | " if match_any else " & ").join(groups)
 
 
-def expand_fts5_query(sanitized_query: str) -> str:
-    """Expand each literal FTS5 term with symmetric script and stem variants."""
+def expand_fts5_query(sanitized_query: str, *, match_any: bool = False) -> str:
+    """Expand each literal FTS5 term with symmetric script and stem variants.
+
+    Terms are AND-ed unless ``match_any`` is set, which OR-s them.
+    """
     groups = []
     for match in _QUOTED_PHRASE_RE.finditer(sanitized_query):
         token = (match.group(1) or match.group(2) or "").replace('"', "").strip()
@@ -162,10 +178,11 @@ def expand_fts5_query(sanitized_query: str) -> str:
         forms = _variants(token)
         expression = " OR ".join('"' + form + '"' for form in forms)
         groups.append("(" + expression + ")" if len(forms) > 1 else expression)
-    return " AND ".join(groups)
+    return (" OR " if match_any else " AND ").join(groups)
 
 
 __all__ = [
+    "canonical_terms",
     "cyrillic_to_latin",
     "expand_fts5_query",
     "fold_diacritics",

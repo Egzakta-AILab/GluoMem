@@ -366,18 +366,25 @@ class PgTsVectorStore:
         *,
         scope: MemoryScope | None = None,
         now_iso: str | None = None,
+        match_any: bool = False,
     ) -> list[int]:
         if not sanitized_query or limit <= 0:
             return []
         plain_terms = sanitized_query.replace('"', " ").strip()
         if not plain_terms:
             return []
-        folded_terms = fold_query_text(plain_terms)
+        folded_terms = fold_query_text(plain_terms, match_any=match_any)
         if not folded_terms:
             return []
         eff_scope = resolve_scope(scope)
         eff_now = format_now_iso(now_iso)
-        tsq_expr = "(to_tsquery('simple', ?) || plainto_tsquery('english', ?))"
+        # plainto_tsquery always AND-s its terms, so the any-term form uses only the folded query.
+        if match_any:
+            tsq_expr = "to_tsquery('simple', ?)"
+            tsq_params: tuple[str, ...] = (folded_terms,)
+        else:
+            tsq_expr = "(to_tsquery('simple', ?) || plainto_tsquery('english', ?))"
+            tsq_params = (folded_terms, plain_terms)
         rows = self._backend.fetchall(
             f"SELECT f.rowid AS rowid FROM memory_frames_fts f "
             f"JOIN memory_frames m ON m.id = f.rowid "
@@ -386,12 +393,10 @@ class PgTsVectorStore:
             f"ORDER BY ts_rank_cd(f.tsv, {tsq_expr}) DESC, f.rowid ASC "
             f"LIMIT ?",
             (
-                folded_terms,
-                plain_terms,
+                *tsq_params,
                 *eff_scope.as_tuple(),
                 eff_now,
-                folded_terms,
-                plain_terms,
+                *tsq_params,
                 int(limit),
             ),
         )

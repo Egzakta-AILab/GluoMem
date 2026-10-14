@@ -112,6 +112,7 @@ class FtsStore(Protocol):
         *,
         scope: MemoryScope | None = None,
         now_iso: str | None = None,
+        match_any: bool = False,
     ) -> list[int]: ...
 
     def search_like(

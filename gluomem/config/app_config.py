@@ -15,6 +15,8 @@ from pydantic_settings import (
     SettingsConfigDict,
 )
 
+from gluomem.storage.scope import FrameSource  # noqa: TC001 - pydantic resolves it at runtime
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -392,10 +394,32 @@ class ScannerConfig(BaseModel):
     )
 
 
+_REVIEWED_SOURCES: list[FrameSource] = ["import"]
+
+
+class ConflictReviewConfig(BaseModel):
+    """Hold untrusted writes that restate a trusted active fact with a different value.
+
+    A write from one of ``sources`` is compared with the ``neighbors`` best
+    any-term full-text matches among recall-eligible frames in its scope whose
+    own source is not in ``sources``. It conflicts with one when they share at
+    least ``min_shared_terms`` content words, the shared words are at least
+    ``min_overlap`` of the shorter one's, and each has a word the other lacks
+    (a pure elaboration is not a conflict).
+    """
+
+    enabled: bool = True
+    sources: list[FrameSource] = Field(default_factory=lambda: _REVIEWED_SOURCES.copy())
+    neighbors: int = Field(default=10, ge=1)
+    min_shared_terms: int = Field(default=3, ge=1)
+    min_overlap: float = Field(default=0.5, gt=0.0, le=1.0)
+
+
 class SafetyConfig(BaseModel):
     block_threshold: float = 0.7
     fail_mode: str = "quarantine"
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
+    conflict_review: ConflictReviewConfig = Field(default_factory=ConflictReviewConfig)
 
 
 class CompactionConfig(BaseModel):
