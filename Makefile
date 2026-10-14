@@ -8,7 +8,7 @@ install:
 
 # Smallest environment that runs `make check` (no torch / sentence-transformers).
 install-offline:
-	uv sync --locked --extra llm
+	uv sync --locked --extra llm --extra tune --extra service --extra postgres
 
 # One-time per clone: commit gate (hygiene + lint + typecheck) and push gate (tests)
 hooks:
