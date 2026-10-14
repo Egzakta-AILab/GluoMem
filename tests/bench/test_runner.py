@@ -73,7 +73,7 @@ def test_predictions_are_self_contained(run_cfg: AppConfig, tmp_path: Path) -> N
         # Everything rescore needs is embedded.
         for key in (
             "sample_id", "category", "category_name", "question", "gold",
-            "evidence", "answer", "abstained", "retrieved",
+            "evidence", "answer", "abstained", "retrieved", "abstention",
         ):
             assert key in row, key
 
@@ -203,6 +203,20 @@ def test_gluomem_manifest_records_effective_rerank_and_forces_abstain_off(
     }
     # Runner forces abstain off for gluomem; the dumped config reflects reality.
     assert manifest["config"]["search"]["abstain"]["enabled"] is False
+    assert info["abstain"] == {
+        "enabled": False,
+        "score": "fusion",
+        "threshold": 0.0,
+        "calibration": "uncalibrated",
+    }
+    # Every prediction row carries its abstention decision and score contract,
+    # and rescore reads it back.
+    rows = [json.loads(line) for line in paths.predictions.read_text().splitlines()]
+    assert rows and all(r["abstention"]["score"] == "fusion" for r in rows)
+    assert {r["abstention"]["reason"] for r in rows} <= {"disabled", "no_hits"}
+    from gluomem.bench.rescore import _prediction_from_row
+
+    assert _prediction_from_row(rows[0]).abstention == rows[0]["abstention"]
 
 
 def test_single_family_run_has_no_trio_entry(

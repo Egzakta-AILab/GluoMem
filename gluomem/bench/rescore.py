@@ -47,6 +47,7 @@ def _prediction_from_row(row: dict[str, Any]) -> Prediction:
         prompt_tokens=row["prompt_tokens"],
         completion_tokens=row["completion_tokens"],
         latency_ms=row["latency_ms"],
+        abstention=row.get("abstention"),
     )
 
 

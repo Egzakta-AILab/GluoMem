@@ -357,6 +357,7 @@ def _prediction_row(s: Sample, p: Prediction) -> dict[str, Any]:
         "prompt_tokens": p.prompt_tokens,
         "completion_tokens": p.completion_tokens,
         "latency_ms": p.latency_ms,
+        "abstention": p.abstention,
     }
 
 
@@ -374,13 +375,11 @@ def run_benchmark(
     reranker: Reranker | None = None,
 ) -> RunPaths:
     # Bench methodology: LoCoMo's usable categories carry no abstention gold, so
-    # abstaining is always scored wrong — never beneficial. gluomem is the only
-    # retriever whose HybridSearch path can abstain, and with the cross-encoder
-    # reranker on, ``hits[0].final`` becomes a raw logit (scale ≈ [-11, +11],
-    # often negative) while ``abstain.threshold`` is calibrated for rrf*relevance
-    # — leaving abstain enabled would spuriously drop answerable questions.
-    # Disable it here (scoped to gluomem) so the manifest's recorded config matches
-    # what actually ran.
+    # abstaining is always scored wrong — never beneficial — and no threshold
+    # has been calibrated on frozen development data yet. Disable the gate here
+    # (scoped to gluomem) so the manifest's recorded config matches what ran.
+    # Questions with no eligible evidence still produce an abstained prediction
+    # with ``abstention.reason == "no_hits"``.
     if retriever == "gluomem":
         cfg = cfg.with_overrides({"search.abstain.enabled": False})
     adapter = make_adapter(dataset, cfg)

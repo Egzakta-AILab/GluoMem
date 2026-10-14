@@ -209,10 +209,9 @@ def test_injected_reranker_takes_precedence_over_config(
 def test_negative_logit_does_not_abstain_when_abstain_off(
     bench_cfg, ingested_db_dir, fixture_adapter, answer_fn
 ) -> None:
-    """The bench run disables abstain for gluomem precisely because rerank puts a
-    raw logit (often negative) into ``hits[0].final`` while abstain.threshold is
-    0.0. With abstain off, a negative-logit top hit is still ANSWERED, not
-    dropped — proving the runner's override protects answerable questions."""
+    """Rerank puts a raw logit (often negative) into ``hits[0].final``. With
+    abstain off (the bench setting for gluomem), a negative-logit top hit is
+    still ANSWERED, not dropped."""
     from gluomem.embedding.reranker import StubReranker
 
     cfg = bench_cfg.with_overrides(
@@ -253,7 +252,12 @@ def test_manifest_extra_reports_effective_config(
         "pool": cfg.search.rerank.pool,
         "active": True,  # a reranker was actually resolved, not just requested
     }
-    assert extra["abstain"] == {"enabled": cfg.search.abstain.enabled}
+    assert extra["abstain"] == {
+        "enabled": cfg.search.abstain.enabled,
+        "score": "fusion",
+        "threshold": cfg.search.abstain.threshold,
+        "calibration": "uncalibrated",
+    }
 
 
 def test_missing_db_names_bench_ingest(

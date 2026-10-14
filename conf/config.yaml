@@ -32,7 +32,10 @@ search:
   lane_fetch_mult: 2
   lane_fetch_time_mult: 10
   rerank: {enabled: true, model: reranker, pool: 100}  # pool 100 pairs with benchmark.answer.context_k=50
-  abstain: {enabled: true, threshold: 0.0}     # tune per corpus
+  # Sufficiency gate, separate from ranking. score: fusion (top rrf*relevance, rerank-independent)
+  # | rerank (top cross-encoder logit; needs calibration == reranker provider_model[@revision]).
+  # 0.0 on fusion is uncalibrated and abstains only when no eligible hit exists.
+  abstain: {enabled: true, threshold: 0.0, score: fusion, calibration: null}
   default_profile: balanced
 
 scoring:

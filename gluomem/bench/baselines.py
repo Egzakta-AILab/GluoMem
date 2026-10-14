@@ -150,6 +150,7 @@ class Bm25Retriever:
                 answer=self._cfg.benchmark.answer.abstain_text,
                 abstained=True,
                 latency_ms=(time.perf_counter() - start) * 1000.0,
+                abstention={"reason": "no_hits", "candidates": 0},
             )
         out = self._answer_fn(s.question, "\n".join(lines))
         return Prediction(

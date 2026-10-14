@@ -162,10 +162,12 @@ rrf[id]  += 1/(cfg.search.rrf_k + rank)                 # per lane, rrf_k = 60
 frames    = load + event_time since/until filter
 gdist     = kg.contextual(query, recent_entities)
 final     = rrf · Σ w_x·feature_x
-sort; rerank top cfg.search.rerank_pool (replace score w/ logit);
-abstain if top_final < cfg.search.abstain_threshold     # gates recall
+sort; rerank top cfg.search.rerank.pool (ranking score := logit; fusion kept)
+abstain if top(score) < cfg.search.abstain.threshold    # score = fusion | rerank, never `final`
 ```
 `final = rrf × relevance` keeps IR-quality separate from personalization — the property that enables the offline tuning in §9.
+
+Ranking and sufficiency are separate contracts. Each hit carries `fusion` (`rrf × relevance`), `rerank` (logit or `None`) and `final` (the ranking score). The abstention gate reads the score `search.abstain.score` names: `fusion` is computed before reranking, so the same evidence gets the same decision with reranking on or off; `rerank` is accepted only when `search.abstain.calibration` equals the reranker's `provider_model[@revision]` (config load fails otherwise) and a reranker is wired. Each `SearchResult.abstention` records `reason` (`no_hits`, `below_threshold`, `sufficient`, `disabled`), `score_identity`, `top_score`, `threshold`, `calibration` and the candidate count; bench predictions persist it so no-evidence questions stay visible. Thresholds are uncalibrated until chosen on frozen development data.
 
 ---
 
