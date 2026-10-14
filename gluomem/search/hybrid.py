@@ -23,6 +23,12 @@ lanes together with:
   below ``abstain.threshold`` (or there are no hits), an abstained result (empty
   hits + ``abstained=True``) is returned instead of ranked frames.
 
+- **eligibility** — recall-ineligible frames (quarantined; see
+  :mod:`gluomem.frames.eligibility`) are dropped inside each lane and again at
+  frame load, so they never take a lane rank, receive a KG contextual score,
+  enter the rerank pool or reach the caller. Inspect them by id through
+  ``FrameStore.get_frame``.
+
 When no ``KnowledgeGraph`` is wired, the contextual distance defaults to the
 no-link value (distance beyond ``bfs_depth`` -> ``contextual == 0.0``).
 
@@ -41,6 +47,11 @@ from gluomem.config.app_config import AppConfig, ProfileWeights
 from gluomem.embedding.base import Embedder
 from gluomem.embedding.providers import MockEmbedder
 from gluomem.embedding.reranker import Reranker
+from gluomem.frames.eligibility import (
+    INELIGIBLE_PARAMS,
+    INELIGIBLE_PLACEHOLDERS,
+    is_recall_eligible,
+)
 from gluomem.frames.store import Frame, FrameStore
 from gluomem.kg.graph import KnowledgeGraph
 from gluomem.search.sanitize import sanitize
@@ -243,6 +254,8 @@ class HybridSearch:
             except KeyError:
                 # Stale id (frame deleted since indexing). Skip it.
                 continue
+            if not is_recall_eligible(frame.trust):
+                continue
             if not _event_time_in_range(frame.event_time, since, until):
                 continue
             # (7) relevance with the active profile's weights. The contextual
@@ -318,14 +331,17 @@ class HybridSearch:
             )
             cur = self._conn.execute(
                 "SELECT id FROM memory_frames WHERE content LIKE ? ESCAPE '\\' "
+                f"AND trust NOT IN ({INELIGIBLE_PLACEHOLDERS}) "
                 "ORDER BY id ASC LIMIT ?",
-                (f"%{escaped}%", int(lane_fetch)),
+                (f"%{escaped}%", *INELIGIBLE_PARAMS, int(lane_fetch)),
             )
             return [int(r[0]) for r in cur.fetchall()]
         cur = self._conn.execute(
-            "SELECT rowid FROM memory_frames_fts WHERE memory_frames_fts MATCH ? "
-            "ORDER BY rank LIMIT ?",
-            (sanitized, int(lane_fetch)),
+            "SELECT f.rowid FROM memory_frames_fts f "
+            "JOIN memory_frames m ON m.id = f.rowid "
+            f"WHERE memory_frames_fts MATCH ? AND m.trust NOT IN ({INELIGIBLE_PLACEHOLDERS}) "
+            "ORDER BY f.rank LIMIT ?",
+            (sanitized, *INELIGIBLE_PARAMS, int(lane_fetch)),
         )
         return [int(r[0]) for r in cur.fetchall()]
 
@@ -354,10 +370,23 @@ class HybridSearch:
                     seen.add(fid)
                     ids.append(fid)
             if ids:
-                return ids
+                return self._eligible(ids)
         # Fallback: whole-frame KNN.
         frame_hits = self._frames_vec.search(qvec, int(lane_fetch))
-        return [int(fid) for fid, _dist in frame_hits]
+        return self._eligible([int(fid) for fid, _dist in frame_hits])
+
+    def _eligible(self, ids: list[int]) -> list[int]:
+        """Drop recall-ineligible frame ids, preserving lane order."""
+        if not ids:
+            return ids
+        marks = ",".join("?" * len(ids))
+        rows = self._conn.execute(
+            f"SELECT id FROM memory_frames WHERE id IN ({marks}) "
+            f"AND trust NOT IN ({INELIGIBLE_PLACEHOLDERS})",
+            (*ids, *INELIGIBLE_PARAMS),
+        ).fetchall()
+        keep = {int(r[0]) for r in rows}
+        return [i for i in ids if i in keep]
 
     # --- rerank -------------------------------------------------------------
 

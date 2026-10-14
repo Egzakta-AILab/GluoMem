@@ -250,3 +250,22 @@ def test_reconstruct_state_p_before_latest_i_excluded(tmp_path: Path) -> None:
     assert [p.id for p in ps] == []
     assert p_old.id < i2.id
     db.close()
+
+
+def test_reconstruct_state_skips_quarantined_unless_inspecting(tmp_path: Path) -> None:
+    """A quarantined latest I or P is not "current state"; inspection opts in."""
+    db, store = _store(tmp_path)
+    ok = store.create_i_frame("gop-1", "base fact")
+    p_ok = store.create_p_frame("gop-1", "delta ok", base_id=ok.id)
+    p_bad = store.create_p_frame("gop-1", "delta bad", base_id=ok.id, trust="quarantined")
+    i_bad = store.create_i_frame("gop-1", "flagged fact", trust="quarantined")
+
+    latest_i, ps = store.reconstruct_state("gop-1")
+    assert latest_i is not None and latest_i.id == ok.id
+    assert [p.id for p in ps] == [p_ok.id]
+
+    latest_i, ps = store.reconstruct_state("gop-1", include_ineligible=True)
+    assert latest_i is not None and latest_i.id == i_bad.id
+    assert ps == []
+    assert store.get_frame(p_bad.id).trust == "quarantined"
+    db.close()

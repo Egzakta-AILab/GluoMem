@@ -32,6 +32,7 @@ from gluomem.embedding.base import Embedder
 from gluomem.embedding.chunker import Chunk, chunk
 from gluomem.embedding.providers import MockEmbedder
 from gluomem.frames.content_hash import content_hash
+from gluomem.frames.eligibility import INELIGIBLE_PARAMS, INELIGIBLE_PLACEHOLDERS
 from gluomem.frames.sessions import get_or_create_session
 from gluomem.storage.db import MindDB
 from gluomem.storage.sqlite_vec import SqliteVecStore
@@ -377,18 +378,28 @@ class FrameStore:
 
     # --- state reconstruction ---------------------------------------------
 
-    def reconstruct_state(self, gop: str) -> tuple[Frame | None, list[Frame]]:
+    def reconstruct_state(
+        self, gop: str, *, include_ineligible: bool = False
+    ) -> tuple[Frame | None, list[Frame]]:
         """Return ``(latest_I_frame | None, [P-frames written after that I])``.
 
         The latest I-frame is the I-frame with the greatest id in ``gop``. The
         P-frames are every P-frame in ``gop`` whose id is greater than the
         latest I's id (i.e. written after it), ordered by id ascending. If the
         GOP has no I-frames, returns ``(None, [])``.
+
+        Recall-ineligible (quarantined) frames are skipped unless
+        ``include_ineligible`` is set for administrative inspection.
         """
+        trust_clause = "" if include_ineligible else (
+            f" AND trust NOT IN ({INELIGIBLE_PLACEHOLDERS})"
+        )
+        trust_params = () if include_ineligible else INELIGIBLE_PARAMS
         latest_i_row = self._conn.execute(
             f"SELECT {', '.join(_COLUMNS)} FROM memory_frames "
-            "WHERE gop_id=? AND frame_type='I' ORDER BY id DESC LIMIT 1",
-            (gop,),
+            f"WHERE gop_id=? AND frame_type='I'{trust_clause} "
+            "ORDER BY id DESC LIMIT 1",
+            (gop, *trust_params),
         ).fetchone()
         if latest_i_row is None:
             return None, []
@@ -396,8 +407,9 @@ class FrameStore:
 
         p_rows = self._conn.execute(
             f"SELECT {', '.join(_COLUMNS)} FROM memory_frames "
-            "WHERE gop_id=? AND frame_type='P' AND id > ? ORDER BY id ASC",
-            (gop, latest_i.id),
+            f"WHERE gop_id=? AND frame_type='P' AND id > ?{trust_clause} "
+            "ORDER BY id ASC",
+            (gop, latest_i.id, *trust_params),
         ).fetchall()
         return latest_i, [self._row_to_frame(r) for r in p_rows]
 

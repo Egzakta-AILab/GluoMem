@@ -204,6 +204,8 @@ def admit(content, source, trust, *, scanner, store, kg, cfg) -> AdmitResult:
 ```
 **Ingest pipeline:** benchmark conversation → sessions/GOP → per-turn frames → lane extraction (fact/event/profile) → cognify (entities/relations) → P/B from deltas/contradictions.
 
+**Eligibility** (`gluomem/frames/eligibility.py`): a quarantined frame is stored for inspection but is not recall-eligible. Search lanes, KG contextual scoring, the rerank pool and `reconstruct_state` skip it; the gate skips semantic dedup and KG linking for it; ingest does not cognify flagged observations and a flagged contradiction cannot write a B-frame, demote, or retire edges. Compaction merges a P-frame into its base only when same GOP, same source, both eligible, and the P's trust is at least the base's, so merged text is never promoted.
+
 ---
 
 ## 8. DSPy LLM layer (DSPy 3.x)

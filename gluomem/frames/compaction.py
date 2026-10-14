@@ -9,6 +9,11 @@ FTS + chunk rows are replaced); and the merged P-frames are referentially
 deleted along with their FTS/vec/chunk index rows (chunks cascade on the frame
 delete; FTS and vec0 rows are not FK-cascaded and are removed explicitly).
 
+Only P-frames that :func:`gluomem.frames.eligibility.can_merge_into` accepts
+for the base are counted toward the trigger or merged: the merged I keeps the
+base's trust and source, so a quarantined, lower-trust, other-source or
+other-GOP delta is never folded into (and promoted by) the base.
+
 Every constant (trigger, keep_recent, separator) is read from the passed
 ``AppConfig`` — nothing is hardcoded. The defaults (trigger=10, keep_recent=5,
 separator=``"\\n---\\n"``) live in ``CompactionConfig``.
@@ -20,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from gluomem.config.app_config import AppConfig
 from gluomem.frames.content_hash import content_hash
+from gluomem.frames.eligibility import can_merge_into
 
 if TYPE_CHECKING:
     from gluomem.frames.store import FrameStore
@@ -55,23 +61,36 @@ def compact(store: FrameStore, gop: str, cfg: AppConfig) -> None:
             continue
         by_base.setdefault(base_id, []).append(int(pid))
 
+    if keep < 0:
+        raise ValueError(
+            f"write.compaction.keep_recent must be non-negative, got {keep}"
+        )
+
     for base_id, p_ids in by_base.items():
         if len(p_ids) <= trigger:
             continue
-        if keep < 0:
-            raise ValueError(
-                f"write.compaction.keep_recent must be non-negative, got {keep}"
-            )
-        # The most recent `keep` P-frames are retained; the rest are merged.
-        older = p_ids[: len(p_ids) - keep] if keep > 0 else list(p_ids)
-        if not older:
+        # The merged I keeps the base's trust/source, so only deltas that
+        # cannot be promoted by the merge are candidates; the rest stay as
+        # standalone P-frames with their own (possibly ineligible) trust.
+        base = store.get_frame(base_id)
+        compatible = [
+            p for p in (store.get_frame(pid) for pid in p_ids)
+            if can_merge_into(base, p)
+        ]
+        if len(compatible) <= trigger:
             continue
+        # The most recent `keep` P-frames are retained; the rest are merged.
+        older_frames = (
+            compatible[: len(compatible) - keep] if keep > 0 else compatible
+        )
+        if not older_frames:
+            continue
+        older = [p.id for p in older_frames]
 
         # Merge the older P-frame bodies INTO the base I-frame content, joined
         # by the separator. P-frame content is plain text (B-frames are not
         # compacted here — they are corrections, not deltas on the base I).
-        base = store.get_frame(base_id)
-        older_bodies = [store.get_frame(pid).content for pid in older]
+        older_bodies = [p.content for p in older_frames]
         merged_content = base.content + sep + sep.join(older_bodies)
 
         # Update the I-frame content + content_hash (the merged content is a new

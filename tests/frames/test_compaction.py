@@ -182,3 +182,96 @@ def test_compaction_respects_config_override(tmp_path: Path) -> None:
     older_bodies = [f"delta body {k}" for k in range(3)]
     assert sep.join(older_bodies) in i_back.content
     db.close()
+
+
+# --- trust / scope compatibility ----------------------------------------------
+
+
+def _p_rows(db: MindDB, gop: str) -> list[tuple[int, str]]:
+    return [
+        (int(r[0]), str(r[1]))
+        for r in db.conn.execute(
+            "SELECT id, trust FROM memory_frames WHERE frame_type='P' AND gop_id=? "
+            "ORDER BY id ASC",
+            (gop,),
+        ).fetchall()
+    ]
+
+
+def test_compaction_never_promotes_quarantined_pframes(tmp_path: Path) -> None:
+    """Quarantined P-frames on a trusted base are not merged: the base keeps
+    its content and trust; every quarantined P stays as its own row."""
+    db, store, cfg = _store(tmp_path)
+    i = store.create_i_frame("gop-1", "base fact", trust="trusted")
+    for k in range(11):
+        store.create_p_frame(
+            "gop-1", f"injected delta {k}", base_id=i.id, trust="quarantined"
+        )
+
+    store.compact("gop-1", cfg)
+
+    back = store.get_frame(i.id)
+    assert back.content == "base fact"
+    assert back.trust == "trusted"
+    rows = _p_rows(db, "gop-1")
+    assert len(rows) == 11 and {t for _, t in rows} == {"quarantined"}
+    db.close()
+
+
+def test_compaction_merges_only_compatible_pframes(tmp_path: Path) -> None:
+    """Mixed deltas: eligible same-source ones merge, quarantined, lower-trust
+    and other-source ones are left alone and do not count toward the trigger."""
+    db, store, cfg = _store(tmp_path)
+    i = store.create_i_frame("gop-1", "base fact", trust="normal")
+    ok_ids = []
+    for k in range(11):
+        ok_ids.append(store.create_p_frame("gop-1", f"delta body {k}", base_id=i.id).id)
+        if k % 4 == 0:
+            store.create_p_frame(
+                "gop-1", f"injected {k}", base_id=i.id, trust="quarantined"
+            )
+    store.create_p_frame("gop-1", "weak hint", base_id=i.id, trust="low")
+    store.create_p_frame("gop-1", "inferred note", base_id=i.id, source="agent_inferred")
+    store.create_p_frame("gop-1", "verified detail", base_id=i.id, trust="trusted")
+
+    store.compact("gop-1", cfg)
+
+    back = store.get_frame(i.id)
+    assert back.trust == "normal"
+    for k in range(6):
+        assert f"delta body {k}" in back.content
+    for absent in ("injected", "weak hint", "inferred note"):
+        assert absent not in back.content
+    remaining = {pid: t for pid, t in _p_rows(db, "gop-1")}
+    assert sum(1 for t in remaining.values() if t == "quarantined") == 3
+    assert "low" in remaining.values()
+    db.close()
+
+
+def test_compaction_without_enough_compatible_pframes_is_noop(tmp_path: Path) -> None:
+    """11 P-frames but only 10 compatible: below trigger, nothing merges."""
+    db, store, cfg = _store(tmp_path)
+    i = store.create_i_frame("gop-1", "base fact")
+    for k in range(10):
+        store.create_p_frame("gop-1", f"delta body {k}", base_id=i.id)
+    store.create_p_frame("gop-1", "injected", base_id=i.id, trust="quarantined")
+
+    store.compact("gop-1", cfg)
+
+    assert store.get_frame(i.id).content == "base fact"
+    assert len(_p_rows(db, "gop-1")) == 11
+    db.close()
+
+
+def test_compaction_rejects_cross_gop_base(tmp_path: Path) -> None:
+    """P-frames in one GOP pointing at a base in another GOP are not merged."""
+    db, store, cfg = _store(tmp_path)
+    i = store.create_i_frame("gop-a", "base fact")
+    for k in range(11):
+        store.create_p_frame("gop-b", f"delta body {k}", base_id=i.id)
+
+    store.compact("gop-b", cfg)
+
+    assert store.get_frame(i.id).content == "base fact"
+    assert len(_p_rows(db, "gop-b")) == 11
+    db.close()
