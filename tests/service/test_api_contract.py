@@ -1,153 +1,169 @@
-"""Tests for authenticated FastAPI service contract, auth enforcement, and scope isolation."""
+"""Authentication, validation, isolation, and request transaction contracts."""
 
-from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+from typing import Any
 
-from pathlib import Path
-
+import pytest
 from fastapi.testclient import TestClient
 
 from gluomem.config.app_config import AppConfig
-from gluomem.embedding.providers import MockEmbedder
 from gluomem.frames.store import FrameStore
+from gluomem.service import app as app_module
 from gluomem.service.app import create_app
-from gluomem.service.auth import (
-    HEADER_NAMESPACE,
-    HEADER_PRINCIPAL,
-    HEADER_TENANT,
-)
 from gluomem.storage.db import MindDB
-from gluomem.storage.scope import MemoryScope
+from gluomem.write import events as events_module
+
+HEADERS = {
+    "Authorization": "Bearer secret",
+    "X-GluoMem-Tenant": "egzakta",
+    "X-GluoMem-Principal": "alice",
+}
 
 
-def test_auth_and_header_scope_fail_closed(tmp_path: Path) -> None:
-    cfg = AppConfig()
-    db = MindDB(tmp_path / "api_auth.mind", vector_dim=32)
-    embedder = MockEmbedder(dim=32)
-    store = FrameStore(db, embedder=embedder)
-    app = create_app(db, store, cfg=cfg, service_key="top-secret-key")
-    client = TestClient(app)
-
-    # 1. Liveness/readiness probes succeed without auth
-    assert client.get("/healthz").status_code == 200
-    assert client.get("/readyz").json()["status"] == "ready"
-
-    # 2. Missing Authorization header -> 401
-    r_no_auth = client.post(
-        "/v1/memories:recall",
-        json={"query": "hello"},
-        headers={HEADER_TENANT: "egzakta", HEADER_PRINCIPAL: "mikhail"},
-    )
-    assert r_no_auth.status_code == 401
-
-    # 3. Wrong bearer token -> 403
-    r_bad_auth = client.post(
-        "/v1/memories:recall",
-        json={"query": "hello"},
-        headers={
-            "Authorization": "Bearer wrong-key",
-            HEADER_TENANT: "egzakta",
-            HEADER_PRINCIPAL: "mikhail",
-        },
-    )
-    assert r_bad_auth.status_code == 403
-
-    # 4. Missing X-GluoMem-Tenant or X-GluoMem-Principal -> 422
-    r_missing_scope = client.post(
-        "/v1/memories:recall",
-        json={"query": "hello"},
-        headers={"Authorization": "Bearer top-secret-key"},
-    )
-    assert r_missing_scope.status_code == 422
-
-    # 5. Request body attempting to smuggle tenant_id or principal_id -> 422
-    r_body_scope = client.post(
-        "/v1/events",
-        json={
-            "event_id": "evt-1",
-            "source_ref": "conv-1",
-            "content": "Attempted scope override",
-            "principal_id": "victim",
-        },
-        headers={
-            "Authorization": "Bearer top-secret-key",
-            HEADER_TENANT: "egzakta",
-            HEADER_PRINCIPAL: "mikhail",
-            HEADER_NAMESPACE: "personal",
-        },
-    )
-    assert r_body_scope.status_code == 422
-
-    db.close()
+@pytest.fixture
+def client(mind_db: MindDB, frame_store: FrameStore, cfg: AppConfig):
+    with TestClient(create_app(mind_db, frame_store, cfg=cfg, service_key="secret")) as client:
+        yield client
 
 
-def test_http_endpoints_isolate_scopes_end_to_end(tmp_path: Path) -> None:
-    cfg = AppConfig()
-    db = MindDB(tmp_path / "api_iso.mind", vector_dim=32)
-    embedder = MockEmbedder(dim=32)
-    store = FrameStore(db, embedder=embedder)
-    app = create_app(db, store, cfg=cfg, service_key="svc-secret")
-    client = TestClient(app)
+@pytest.mark.parametrize(
+    ("headers", "body", "status"),
+    [
+        ({"X-GluoMem-Tenant": "egzakta", "X-GluoMem-Principal": "alice"}, {}, 401),
+        ({**HEADERS, "Authorization": "Bearer wrong"}, {}, 401),
+        ({"Authorization": "Bearer secret"}, {}, 422),
+        (HEADERS, {"principal_id": "victim"}, 422),
+        (HEADERS, {}, 200),
+    ],
+)
+def test_auth_and_header_scope_fail_closed(
+    client: TestClient, headers: dict[str, str], body: dict[str, Any], status: int
+) -> None:
+    assert client.get("/healthz").json() == {"status": "ok"}
+    assert client.get("/readyz").json() == {"status": "ok"}
+    response = client.post("/v1/memories:recall", json={"query": "hello", **body}, headers=headers)
+    assert response.status_code == status
+    if status == 401:
+        assert response.headers["www-authenticate"] == "Bearer"
+    assert client.get("/v1/status").status_code == 401
 
-    headers_a = {
-        "Authorization": "Bearer svc-secret",
-        HEADER_TENANT: "egzakta",
-        HEADER_PRINCIPAL: "alice",
-        HEADER_NAMESPACE: "personal",
-    }
-    headers_b = {
-        "Authorization": "Bearer svc-secret",
-        HEADER_TENANT: "egzakta",
-        HEADER_PRINCIPAL: "bob",
-        HEADER_NAMESPACE: "personal",
-    }
 
-    # Alice writes a memory
-    resp_in = client.post(
-        "/v1/events",
-        json={
-            "event_id": "evt-a1",
-            "source_ref": "chat-a1",
-            "content": "My SSH bastion port is 22022.",
-        },
-        headers=headers_a,
-    )
-    assert resp_in.status_code == 200
-    alice_frame_id = resp_in.json()["frames"][0]["id"]
+@pytest.mark.parametrize(
+    ("path", "body", "headers"),
+    [
+        ("/v1/memories:recall", {"query": "hello", "profile": "unknown"}, HEADERS),
+        ("/v1/memories:recall", {"query": "q" * 4097}, HEADERS),
+        (
+            "/v1/events",
+            {"event_id": "bad", "source_ref": "doc", "event_time": "not-a-date"},
+            HEADERS,
+        ),
+        ("/v1/events", {"event_id": "big", "source_ref": "doc", "content": "c" * 100001}, HEADERS),
+        (
+            "/v1/events",
+            {
+                "event_id": "msg",
+                "source_ref": "doc",
+                "messages": [{"message_id": "m", "content": "c" * 100001}],
+            },
+            HEADERS,
+        ),
+        ("/v1/memories:recall", {"query": "hi"}, {**HEADERS, "X-GluoMem-Principal": "x" * 129}),
+        (
+            "/v1/memories:recall",
+            {"query": "hi"},
+            {**HEADERS, "X-GluoMem-Principal": "bad principal"},
+        ),
+    ],
+)
+def test_invalid_input_is_422(
+    client: TestClient, path: str, body: dict[str, Any], headers: dict[str, str]
+) -> None:
+    assert client.post(path, json=body, headers=headers).status_code == 422
 
-    # Bob cannot recall, view, correct, or delete Alice's memory
-    bob_recall = client.post(
-        "/v1/memories:recall",
-        json={"query": "SSH bastion port 22022"},
-        headers=headers_b,
-    )
-    assert bob_recall.status_code == 200
-    assert bob_recall.json()["hits"] == []
 
+def test_scope_isolation_and_pagination(client: TestClient) -> None:
+    event = {"event_id": "a1", "source_ref": "doc", "content": "SSH bastion port is 22022."}
+    frame_id = client.post("/v1/events", json=event, headers=HEADERS).json()["frames"][0]["id"]
+    event.update(event_id="a2", content="Our proxy port is 21000.")
+    client.post("/v1/events", json=event, headers=HEADERS)
+    bob = {**HEADERS, "X-GluoMem-Principal": "bob"}
     assert (
-        client.delete(
-            f"/v1/memories/{alice_frame_id}", headers=headers_b
-        ).status_code
-        == 404
+        client.post("/v1/memories:recall", json={"query": "SSH bastion"}, headers=bob).json()[
+            "hits"
+        ]
+        == []
     )
-    assert (
-        client.post(
-            f"/v1/memories/{alice_frame_id}:correct",
-            json={"new_content": "Hacked port 22."},
-            headers=headers_b,
-        ).status_code
-        == 404
-    )
+    missing = client.delete(f"/v1/memories/{frame_id}", headers=bob)
+    absent = client.delete("/v1/memories/9999", headers=HEADERS)
+    assert missing.status_code == absent.status_code == 404
+    assert missing.json() == absent.json() == {"detail": "Memory resource not found"}
+    page = client.get(
+        "/v1/memories", params={"limit": 1, "source_ref": "doc", "kind": "fact"}, headers=HEADERS
+    ).json()
+    assert page["by_source_ref"] == {"doc": [frame_id]}
+    assert page["next_cursor"] == frame_id
+    following = client.get("/v1/memories", params={"cursor": frame_id}, headers=HEADERS).json()
+    assert len(following["active_frames"]) == 1
+    assert following["next_cursor"] is None
 
-    # Alice's memory is still intact for Alice
-    alice_recall = client.post(
-        "/v1/memories:recall",
-        json={"query": "SSH bastion port 22022"},
-        headers=headers_a,
-    )
-    assert len(alice_recall.json()["hits"]) == 1
-    assert (
-        alice_recall.json()["hits"][0]["frame"]["scope"]
-        == MemoryScope("egzakta", "alice", "personal").as_dict()
-    )
 
-    db.close()
+@pytest.mark.parametrize(
+    "async_mode",
+    [
+        True,
+        pytest.param(
+            False,
+            marks=pytest.mark.xfail(
+                condition=not hasattr(events_module, "EventConflictError"),
+                strict=True,
+                reason="Requires lifecycle EventConflictError for sync payload conflicts",
+            ),
+        ),
+    ],
+)
+def test_payload_conflict(client: TestClient, async_mode: bool) -> None:
+    body = {"event_id": "event", "source_ref": "doc", "content": "one", "async_mode": async_mode}
+    first = client.post("/v1/events", json=body, headers=HEADERS)
+    assert first.status_code == (202 if async_mode else 200)
+    duplicate = client.post("/v1/events", json=body, headers=HEADERS)
+    key = "id" if async_mode else "source_event_row_id"
+    assert duplicate.json()[key] == first.json()[key]
+    body["content"] = "two"
+    assert client.post("/v1/events", json=body, headers=HEADERS).status_code == 409
+
+
+def test_failed_request_cannot_rollback_concurrent_write(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered, written = Event(), Event()
+    ingest = app_module.ingest_source_event
+
+    def interleave(event: Any, *, store: FrameStore, **kwargs: Any):
+        if event.event_id == "fails":
+            with store.db.transaction():
+                entered.set()
+                assert written.wait(5)
+                raise ValueError("request rejected")
+        assert entered.wait(5)
+        try:
+            return ingest(event, store=store, **kwargs)
+        finally:
+            written.set()
+
+    monkeypatch.setattr(app_module, "ingest_source_event", interleave)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                client.post,
+                "/v1/events",
+                headers=HEADERS,
+                json={"event_id": name, "source_ref": name, "content": "Persist this decision."},
+            )
+            for name in ("fails", "succeeds")
+        ]
+        assert [future.result().status_code for future in futures] == [422, 200]
+    frames = client.get("/v1/memories", headers=HEADERS).json()["active_frames"]
+    assert len(frames) == 1
+    assert frames[0]["provenance"][0]["source_ref"] == "succeeds"

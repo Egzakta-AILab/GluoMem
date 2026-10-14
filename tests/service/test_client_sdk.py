@@ -1,118 +1,133 @@
-"""End-to-end tests for GluoMemClient and AsyncGluoMemClient across all 10 service endpoints."""
-
-from __future__ import annotations
+"""Both SDK transports exercise the same complete HTTP lifecycle."""
 
 import asyncio
-from pathlib import Path
+import inspect
+import subprocess
+import sys
+from typing import Any
 
 import httpx
+import pytest
+from fastapi.testclient import TestClient
 
-from gluomem.client.sdk import AsyncGluoMemClient, GluoMemClient
+from gluomem.client.sdk import AsyncGluoMemClient, GluoMemApiError, GluoMemClient
 from gluomem.config.app_config import AppConfig
-from gluomem.embedding.providers import MockEmbedder
 from gluomem.frames.store import FrameStore
 from gluomem.service.app import create_app
 from gluomem.service.worker import MemoryWorker
 from gluomem.storage.db import MindDB
-from gluomem.storage.scope import MemoryScope
 
 
-def test_sync_and_async_client_sdk_full_lifecycle(tmp_path: Path) -> None:
-    cfg = AppConfig()
-    db = MindDB(tmp_path / "sdk.mind", vector_dim=32)
-    embedder = MockEmbedder(dim=32)
-    scope = MemoryScope("egzakta", "mikhail", "personal")
-    store = FrameStore(db, embedder=embedder, scope=scope)
-    app = create_app(db, store, cfg=cfg, service_key="sdk-secret")
-    worker = MemoryWorker(db, store, cfg=cfg)
+class _SyncASGITransport(httpx.BaseTransport):
+    def __init__(self, app: Any) -> None:
+        self.transport = httpx.ASGITransport(app=app)
 
-    async def _exercise_async_sdk() -> None:
-        transport = httpx.ASGITransport(app=app)
-        async with AsyncGluoMemClient(
-            "http://testserver",
-            service_key="sdk-secret",
-            default_scope=scope,
-            transport=transport,
-        ) as client:
-            assert (await client.healthz())["status"] == "ok"
-            assert (await client.readyz())["status"] == "ready"
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        async def send():
+            response = await self.transport.handle_async_request(request)
+            content = await response.aread()
+            await response.aclose()
+            return httpx.Response(response.status_code, headers=response.headers, content=content)
 
-            # 1. Synchronous ingest
-            ing = await client.ingest_event(
-                event_id="evt-sdk-1",
-                source_ref="chat-sdk-1",
-                content="We decided to use PostgreSQL 18 for GluoMem.",
+        return asyncio.run(send())
+
+
+class _Calls:
+    def __init__(self, client: Any) -> None:
+        self.client = client
+
+    def __getattr__(self, name: str):
+        def call(*args: Any, **kwargs: Any):
+            result = getattr(self.client, name)(*args, **kwargs)
+            if inspect.isawaitable(result):
+
+                async def await_result():
+                    return await result
+
+                return asyncio.run(await_result())
+            return result
+
+        return call
+
+
+@pytest.fixture(params=["sync", "async"])
+def sdk(request: pytest.FixtureRequest, mind_db: MindDB, frame_store: FrameStore, cfg: AppConfig):
+    app = create_app(mind_db, frame_store, cfg=cfg, service_key="secret")
+    with TestClient(app):
+        if request.param == "sync":
+            client = GluoMemClient(
+                service_key="secret",
+                default_scope=frame_store.scope,
+                transport=_SyncASGITransport(app),
             )
-            assert len(ing.frames) == 1
-            f1 = ing.frames[0]
-            assert f1.kind == "decision"
-
-            # 2. Candidate review queue ingest + accept
-            cand_ing = await client.ingest_event(
-                event_id="evt-sdk-cand",
-                source_ref="doc-sdk-1",
-                source_type="document",
-                content="We decided to use HNSW m=16 ef_construction=64.",
-                require_review=True,
+        else:
+            client = AsyncGluoMemClient(
+                service_key="secret",
+                default_scope=frame_store.scope,
+                transport=httpx.ASGITransport(app=app),
             )
-            cand_frame = cand_ing.frames[0]
-            assert cand_frame.status == "candidate"
+        try:
+            yield _Calls(client)
+        finally:
+            if isinstance(client, GluoMemClient):
+                client.close()
+            else:
+                asyncio.run(client.aclose())
 
-            listed = await client.list_memories()
-            assert len(listed.review_queue) == 1
-            rev = await client.review_memory(cand_frame.id, "accept")
-            assert rev.frame is not None and rev.frame.status == "active"
 
-            # 3. Recall
-            rec = await client.recall("PostgreSQL 18 GluoMem")
-            assert any(h.frame.id == f1.id for h in rec.hits)
-
-            # 4. Correct memory
-            corr = await client.correct_memory(
-                f1.id,
-                "We decided to use PostgreSQL 18 with pgvector for GluoMem.",
-            )
-            f2 = corr.replacement_frame
-            assert f2.supersedes == f1.id
-
-            # 5. Async job enqueue + get_job
-            job = await client.enqueue_event(
-                event_id="evt-sdk-async",
-                source_ref="chat-sdk-2",
-                content="I prefer dark mode in the KVARK editor.",
-            )
-            assert job.status == "queued"
-            worker.run_once()
-            done_job = await client.get_job(job.id)
-            assert done_job.status == "succeeded"
-
-            # 6. Export
-            exp = await client.export_memories()
-            assert exp["scope"] == scope.as_dict()
-            assert len(exp["active_memories"]) == 3
-
-            # 7. Retract source & forget
-            ret = await client.retract_source("doc-sdk-1")
-            assert ret.forgotten_frame_ids == [cand_frame.id]
-
-            f_res = await client.forget_memory(f2.id)
-            assert f_res.frame_id == f2.id
-
-    asyncio.run(_exercise_async_sdk())
-
-    # Also verify synchronous GluoMemClient healthz/readyz using FastAPI TestClient transport
-    from fastapi.testclient import TestClient
-
-    tc = TestClient(app)
-    sync_client = GluoMemClient(
-        "http://testserver",
-        service_key="sdk-secret",
-        default_scope=scope,
-        transport=tc._transport,  # type: ignore[arg-type]
+def test_sdk_full_lifecycle(
+    sdk: Any, mind_db: MindDB, frame_store: FrameStore, cfg: AppConfig
+) -> None:
+    assert sdk.healthz() == sdk.readyz() == {"status": "ok"}
+    assert sdk.status()["queue"]["pending"] == 0
+    ingested = sdk.ingest_event(
+        event_id="decision",
+        source_ref="chat",
+        content="We decided to use PostgreSQL 18 for GluoMem.",
     )
-    assert sync_client.healthz()["status"] == "ok"
-    listed_after = sync_client.list_memories()
-    assert len(listed_after.active_frames) == 1
-    assert "dark mode" in listed_after.active_frames[0].content
-    sync_client.close()
-    db.close()
+    original = ingested.frames[0]
+    assert original.kind == "decision"
+    candidate = sdk.ingest_event(
+        event_id="candidate",
+        source_ref="doc",
+        source_type="document",
+        content="Our HNSW m is 16.",
+        require_review=True,
+    ).frames[0]
+    listed = sdk.list_memories(limit=1)
+    assert listed.next_cursor == original.id
+    assert sdk.list_memories(cursor=listed.next_cursor).review_queue[0].id == candidate.id
+    assert sdk.review_memory(candidate.id, "accept").frame.status == "active"
+    assert any(hit.frame.id == original.id for hit in sdk.recall("PostgreSQL GluoMem").hits)
+    correction = sdk.correct_memory(original.id, "We decided to use PostgreSQL 18 with pgvector.")
+    replacement = correction.replacement_frame
+    assert replacement.supersedes == original.id
+    assert [frame.id for frame in sdk.get_lineage(replacement.id)] == [original.id, replacement.id]
+    job = sdk.enqueue_event(event_id="pending", source_ref="chat-2", content="I prefer dark mode.")
+    worker = MemoryWorker(mind_db, frame_store, cfg=cfg)
+    done = worker.run_once()
+    assert done is not None and done.status == "succeeded"
+    assert sdk.get_job(job.id).status == "succeeded"
+    assert len(sdk.export_memories()["active_memories"]) == 3
+    assert sdk.retract_source("doc").forgotten_frame_ids == [candidate.id]
+    assert sdk.forget_memory(replacement.id).frame_id == replacement.id
+    assert len(sdk.list_memories().active_frames) == 1
+    with pytest.raises(GluoMemApiError) as error:
+        sdk.get_lineage(99999)
+    assert error.value.status_code == 404
+
+
+def test_client_import_does_not_load_storage_or_server() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-X",
+            "importtime",
+            "-c",
+            "import sys, gluomem.client; "
+            "assert not {'numpy', 'sqlite_vec', 'fastapi'} & sys.modules.keys()",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

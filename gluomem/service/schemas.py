@@ -1,277 +1,88 @@
-"""Pydantic v2 request and response schemas for the GluoMem HTTP service."""
+"""Bounded request models and conversion to canonical source events."""
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from gluomem.frames.store import Frame
-from gluomem.storage.scope import FrameStatus, MemoryKind, MemoryScope
-from gluomem.write.events import ProvenanceRecord, SourceType
+from gluomem.client.models import MemoryKind, SourceType
+from gluomem.storage.scope import MemoryScope
+from gluomem.timeutil import parse_utc
+from gluomem.write.events import SourceEvent, SourceEventMessage
 
 
-class ScopeModel(BaseModel):
+class _Req(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    tenant_id: str
-    principal_id: str
-    namespace: str
 
-
-class ProvenanceModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    id: int
-    source_event_id: int | None
-    source_type: str
-    source_ref: str
-    message_id: str | None
-    verbatim_span: str | None
-    created_at: str
-
-    @classmethod
-    def from_record(cls, rec: ProvenanceRecord) -> ProvenanceModel:
-        return cls(
-            id=rec.id,
-            source_event_id=rec.source_event_id,
-            source_type=rec.source_type,
-            source_ref=rec.source_ref,
-            message_id=rec.message_id,
-            verbatim_span=rec.verbatim_span,
-            created_at=rec.created_at,
-        )
-
-
-class MemoryFrameModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    id: int
-    frame_type: Literal["I", "P", "B"]
-    gop_id: str
-    t: int
-    base_frame_id: int | None
-    content: str
-    importance: str
-    source: str
-    trust: str
-    access_count: int
-    created_at: str
-    event_time: str | None
-    last_accessed: str
-    scope: ScopeModel
-    kind: MemoryKind
-    status: FrameStatus
-    expires_at: str | None
-    pinned: bool
-    verified_by_user: bool
-    confidence: float
-    supersedes: int | None
-    superseded_by: int | None
-    provenance: list[ProvenanceModel] = Field(default_factory=list)
-
-    @classmethod
-    def from_frame(
-        cls,
-        frame: Frame,
-        provenance: list[ProvenanceRecord] | None = None,
-    ) -> MemoryFrameModel:
-        return cls(
-            id=frame.id,
-            frame_type=frame.frame_type,
-            gop_id=frame.gop_id,
-            t=frame.t,
-            base_frame_id=frame.base_frame_id,
-            content=frame.content,
-            importance=frame.importance,
-            source=frame.source,
-            trust=frame.trust,
-            access_count=frame.access_count,
-            created_at=frame.created_at,
-            event_time=frame.event_time,
-            last_accessed=frame.last_accessed,
-            scope=ScopeModel(
-                tenant_id=frame.scope.tenant_id,
-                principal_id=frame.scope.principal_id,
-                namespace=frame.scope.namespace,
-            ),
-            kind=frame.kind,
-            status=frame.status,
-            expires_at=frame.expires_at,
-            pinned=frame.pinned,
-            verified_by_user=frame.verified_by_user,
-            confidence=frame.confidence,
-            supersedes=frame.supersedes,
-            superseded_by=frame.superseded_by,
-            provenance=[
-                ProvenanceModel.from_record(p) for p in (provenance or [])
-            ],
-        )
-
-
-class EventMessageRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    message_id: str
-    role: str = "user"
-    content: str
-    timestamp: str | None = None
-
-
-class IngestEventRequest(BaseModel):
-    """Request body for ``POST /v1/events`` (strictly forbids body-supplied scope)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    event_id: str
+class IngestEventRequest(_Req):
+    event_id: str = Field(min_length=1, max_length=256)
     revision: int = Field(default=1, ge=1)
     source_type: SourceType = "chat_turn"
-    source_ref: str
-    messages: list[EventMessageRequest] = Field(default_factory=list)
-    content: str | None = None
+    source_ref: str = Field(min_length=1, max_length=1024)
+    messages: list[SourceEventMessage] = Field(default_factory=list, max_length=100)
+    content: str | None = Field(default=None, max_length=100_000)
     kind: MemoryKind | None = None
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     require_review: bool = False
     pinned: bool = False
-    event_time: str | None = None
-    created_at: str | None = None
+    event_time: str | None = Field(default=None, max_length=64)
+    created_at: str | None = Field(default=None, max_length=64)
     force_reassert: bool = False
     async_mode: bool = False
 
+    @field_validator("event_time", "created_at")
+    @classmethod
+    def valid_time(cls, value: str | None) -> str | None:
+        if value is not None:
+            parse_utc(value)
+        return value
 
-class IngestEventResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    @field_validator("messages")
+    @classmethod
+    def bounded_messages(cls, values: list[SourceEventMessage]) -> list[SourceEventMessage]:
+        for message in values:
+            if len(message.content) > 100_000 or len(message.message_id) > 256:
+                raise ValueError("message content or id exceeds limit")
+            if len(message.role) > 64:
+                raise ValueError("message role exceeds limit")
+            if message.timestamp is not None:
+                if len(message.timestamp) > 64:
+                    raise ValueError("message timestamp exceeds limit")
+                parse_utc(message.timestamp)
+        return values
 
-    source_event_row_id: int
-    event_id: str
-    revision: int
-    deduped_event: bool
-    frames: list[MemoryFrameModel]
-    suppressed_hashes: list[str]
+    def to_source_event(self, scope: MemoryScope) -> SourceEvent:
+        return SourceEvent.model_validate(
+            {**self.model_dump(exclude={"async_mode"}), "scope": scope}
+        )
 
 
-class RecallRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    query: str
+class RecallRequest(_Req):
+    query: str = Field(min_length=1, max_length=4096)
     k: int = Field(default=10, ge=1, le=100)
-    profile: str = "balanced"
-    since: str | None = None
-    until: str | None = None
-    now_iso: str | None = None
+    profile: str = Field(default="balanced", max_length=128)
+    since: str | None = Field(default=None, max_length=64)
+    until: str | None = Field(default=None, max_length=64)
+    now_iso: str | None = Field(default=None, max_length=64)
+
+    @field_validator("since", "until", "now_iso")
+    @classmethod
+    def valid_time(cls, value: str | None) -> str | None:
+        if value is not None:
+            parse_utc(value)
+        return value
 
 
-class RecallHitModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    frame: MemoryFrameModel
-    rrf: float
-    relevance: float
-    fusion: float
-    rerank: float | None
-    final: float
-
-
-class RecallResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    hits: list[RecallHitModel]
-    abstained: bool
-    abstention: dict[str, Any]
-    latency_ms: float
-
-
-class ListMemoriesResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    scope: ScopeModel
-    active_frames: list[MemoryFrameModel]
-    by_kind: dict[str, list[MemoryFrameModel]]
-    by_source_ref: dict[str, list[MemoryFrameModel]]
-    review_queue: list[MemoryFrameModel]
-
-
-class ReviewRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ReviewRequest(_Req):
     action: Literal["accept", "edit", "dismiss"]
-    edited_content: str | None = None
-    kind: MemoryKind | None = None
+    edited_content: str | None = Field(default=None, max_length=100_000)
 
 
-class ReviewResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    action: Literal["accept", "edit", "dismiss"]
-    frame: MemoryFrameModel | None
-    tombstoned_hash: str | None = None
+class CorrectRequest(_Req):
+    new_content: str = Field(min_length=1, max_length=100_000)
 
 
-class CorrectRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    new_content: str
-    kind: MemoryKind | None = None
-
-
-class CorrectResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    superseded_frame: MemoryFrameModel
-    replacement_frame: MemoryFrameModel
-    b_frame: MemoryFrameModel | None = None
-    scope_generation: int
-
-
-class ForgetResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    frame_id: int
-    content_hash: str
-    reason: Literal["forgotten", "retracted", "dismissed"]
-    retired_entity_ids: list[int]
-    retired_relation_ids: list[int]
-    scope_generation: int
-
-
-class RetractSourceRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    source_ref: str
-
-
-class RetractSourceResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    source_ref: str
-    forgotten_frame_ids: list[int]
-    retained_frame_ids: list[int]
-    scope_generation: int
-
-
-class JobResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    id: int
-    scope: ScopeModel
-    job_type: str
-    dedup_key: str
-    status: str
-    attempt_count: int
-    max_attempts: int
-    scope_generation: int
-    llm_calls_used: int
-    max_llm_calls: int
-    tokens_used: int
-    max_tokens: int
-    last_error: str | None
-    created_at: str
-    updated_at: str
-
-
-def scope_to_model(scope: MemoryScope) -> ScopeModel:
-    return ScopeModel(
-        tenant_id=scope.tenant_id,
-        principal_id=scope.principal_id,
-        namespace=scope.namespace,
-    )
+class RetractSourceRequest(_Req):
+    source_ref: str = Field(min_length=1, max_length=1024)

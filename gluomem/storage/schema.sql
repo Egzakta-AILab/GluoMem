@@ -246,20 +246,16 @@ CREATE TABLE IF NOT EXISTS memory_jobs (
     dedup_key         TEXT NOT NULL,
     payload           TEXT NOT NULL DEFAULT '{}',
     status            TEXT NOT NULL DEFAULT 'queued'
-        CHECK(status IN ('queued','leased','succeeded','failed','dead_letter','aborted_stale','fenced')),
+        CHECK(status IN ('queued','leased','succeeded','dead_letter')),
     attempt_count     INTEGER NOT NULL DEFAULT 0,
     max_attempts      INTEGER NOT NULL DEFAULT 3,
     scope_generation  INTEGER NOT NULL DEFAULT 0,
     worker_id         TEXT,
     lease_expires_at  TEXT,
-    available_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    llm_calls_used    INTEGER NOT NULL DEFAULT 0,
-    max_llm_calls     INTEGER NOT NULL DEFAULT 6,
-    tokens_used       INTEGER NOT NULL DEFAULT 0,
-    max_tokens        INTEGER NOT NULL DEFAULT 8000,
+    available_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
     last_error        TEXT,
-    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
     UNIQUE(tenant_id, principal_id, namespace, job_type, dedup_key)
 );
 
