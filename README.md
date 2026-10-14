@@ -1,54 +1,73 @@
 # GluoMem
 
-**The binding layer.** In particle physics, gluons bind quarks into stable matter. GluoMem binds an agent's scattered observations into stable, queryable memory — a minimal, fully-configurable agentic-memory core paired with a rigorous, reproducible benchmark harness for evaluating which memory mechanisms measurably improve retrieval and answer quality.
+**The binding layer.** In particle physics, gluons bind quarks into stable matter. GluoMem binds an agent's scattered observations into queryable memory. It is a configurable agentic-memory core paired with a benchmark harness for measuring which memory mechanisms improve retrieval and answer quality.
 
-GluoMem is a from-scratch Python system providing typed **I/P/B memory frames** (a video-codec model of memory: keyframe facts, delta refinements, bidirectional corrections), a **bitemporal knowledge graph**, **hybrid retrieval** (BM25 + vector fused with RRF) over a separable 4-signal relevance model, **DSPy** structured extraction, **offline tuning**, and a **protocol-honest** evaluation harness.
+GluoMem is a research-stage Python library (version 0.0.1). It runs locally against a single SQLite file per memory store. It is not a service: there is no HTTP API, no authentication, and no tenant, workspace or access-control model. The `source` values `personal`, `workspace` and `team_sync` are provenance labels on a frame, not authorization boundaries.
 
-**Build status:** complete and validated — deterministic core (config, SQLite + I/P/B frames, hybrid search + scoring, bitemporal KG), DSPy write path, benchmark harness (LoCoMo, LongMemEval-S/Oracle adapters, mem0 head-to-head), and offline tuning. 509 tests, all offline/deterministic by default. Measured results live in [RESULTS.md](./RESULTS.md), [LONGMEMEVAL_RESULTS.md](./LONGMEMEVAL_RESULTS.md), and [LOCOMO_RESULTS.md](./LOCOMO_RESULTS.md).
+## What is implemented
 
-## The memory model
+- **I/P/B memory frames** (a video-codec model of memory): I-frames hold self-contained facts and are content-hash deduplicated per GOP (group of pictures, a topic or session scope); P-frames hold refinements on a base I-frame; B-frames hold corrections written by the contradiction detector. Compaction merges a GOP's P-frames into its I-frame.
+- **Temporal knowledge graph** with `valid_from`/`valid_to` on relations and relation retirement.
+- **Hybrid retrieval**: SQLite FTS5 (BM25) and sqlite-vec exact KNN, fused with RRF, then a four-signal relevance model (temporal, popularity, contextual, importance) and an optional cross-encoder reranker.
+- **DSPy write path**: typed extraction behind an `Extractors` protocol, with deterministic fake extractors for offline tests, an admission gate (regex injection scanner, quarantine or reject), and an extraction cache.
+- **Benchmark harness**: LoCoMo and LongMemEval (S and oracle) adapters, full-context, BM25 and vector-RAG baselines, an optional mem0 comparison, judge panels, protocol tags, offline rescore of a run directory, and usage accounting.
+- **Configuration**: one typed config tree (pydantic-settings, `GLUOMEM_` prefix). Precedence is `defaults < conf/config.yaml < variant < env < with_overrides()`.
 
-Memory is encoded like video:
+## What is not implemented
 
-- **I-frames** — self-contained facts (keyframes), content-hash deduped per GOP (group-of-pictures = topic/session scope).
-- **P-frames** — deltas: refinements or new observations on a base I-frame.
-- **B-frames** — bidirectional corrections written by the contradiction detector, carrying `{description, references}` and inheriting the corrected frame's importance.
-- **Compaction** — GOPs periodically merge P-frames into their base I (re-embed + referential delete), like re-encoding a keyframe.
+- **Offline numeric tuning.** `gluomem/tune` is a placeholder, and `gluomem tune` and `gluomem ablate` exit with "not implemented". The tuning design in [DESIGN.md §9](./DESIGN.md#9-tuning-subsystem) is a plan.
+- **Prompt optimization quality metric.** `make optimize-prompts` runs DSPy MIPROv2 with a parse-or-exact-match metric; it spends real tokens and is never run automatically.
+- **Service features**: HTTP or MCP API, multi-user identity, tenants, workspaces, RBAC, durable jobs, deployment packaging.
 
-Every write funnels through a synchronous, failure-atomic index hook (FTS + whole-frame vector + chunk vectors in one transaction), so search never sees a half-indexed frame.
+## Known limitations at 0.0.1
+
+These are tracked for the first hardening iteration and are being fixed:
+
+- Quarantined frames can still be returned by search, and compaction can merge quarantined text into a trusted frame.
+- Frame insertion and its FTS/vector indexing are separate commits; an indexing failure can leave a stored but unsearchable frame that deduplication then hides on retry.
+- Reasserting a retired graph relation rewrites the original row's validity interval.
+- A timezone-aware `created_at` can raise `TypeError` during search recency scoring.
+- Embedding compatibility is checked by vector dimension only.
+- With reranking enabled, the abstention threshold is compared against reranker logits instead of fusion scores.
+
+## Evidence status
+
+The benchmark reports in [docs/research/](./docs/research/README.md) are historical. The `experiments/` run directories they cite were never published, so their numbers cannot currently be rescored. See the [evidence inventory](./docs/research/EVIDENCE_INVENTORY.md). Use them as research notes, not as product claims, until a new rescorable baseline is published.
 
 ## Quickstart
 
-Fully offline and deterministic by default. The only tests that touch a real model are marked `slow` and excluded (`addopts = "-m 'not slow'"`); live-integration tests skip without `OPENROUTER_API_KEY`.
+Requires Python 3.11 or newer and [uv](https://docs.astral.sh/uv/). Every command below runs offline and makes no paid model calls.
 
 ```bash
-uv sync                  # or: make install
-make hooks               # one-time: pre-commit gate (lint+typecheck) + pre-push gate (tests)
-
-uv run pytest            # or: make test       → 509 passed, offline
-uv run ruff check .      # or: make lint       → clean
-uv run pyrefly check     # or: make typecheck  → 0 errors
-
-make check               # lint + typecheck + test in one shot
-
-uv run gluomem --help    # CLI: ingest / bench run|rescore|gate|sample|fetch|ingest|verify
+uv sync --locked         # install exactly what uv.lock pins
+make check               # ruff lint + pyrefly type check + offline tests
+uv run gluomem --help    # CLI: ingest, bench run|rescore|gate|sample|fetch|ingest|verify
 ```
 
-## Documents (read in order)
+Deterministic ingest of a bundled synthetic fixture, using the fake extractors and mock embeddings:
 
-1. **[SPEC.md](./SPEC.md)** — purpose, scope, requirements, acceptance criteria.
-2. **[DESIGN.md](./DESIGN.md)** — architecture, schema, every layer, config system, DSPy layer, tuning engine, harness.
-3. **[PAPER.md](./PAPER.md)** — research questions, ablations, baselines, metrics, reproducibility, paper outline.
-4. **[RESULTS.md](./RESULTS.md)** — headline benchmark results and how to reproduce them.
+```bash
+uv run gluomem ingest tests/fixtures/locomo_tiny.json --db /tmp/demo.mind \
+  --override write.extraction_backend=fake --override embedding.model=mock
+```
 
-## At a glance
+Tests that download real models are marked `slow` and excluded by default (`addopts = "-m 'not slow'"`). Live provider tests skip unless `OPENROUTER_API_KEY` is set. The default configuration uses DSPy extraction through OpenRouter, so `gluomem ingest` and `gluomem bench run` without the overrides above call a paid provider when a key is present. Copy `.env.example` to `.env` only when you intend to make live calls.
 
-- **Memory model:** typed I/P/B frames over a bitemporal knowledge graph; the schema carries both `event_time` and an explicit trust/source column.
-- **Everything is config** (pydantic-settings, `GLUOMEM_` env prefix): profile weights are data, ablations are config flips; precedence `defaults < conf/config.yaml < variant < env < with_overrides()`.
-- **All LLM I/O via DSPy 3.x:** typed Pydantic outputs, optimized offline, version-pinned; all traffic rides OpenRouter behind a registry — a model swap is a config change.
-- **Defaults:** `sentence-transformers/all-MiniLM-L6-v2` embeddings (384 dims), sqlite-vec exact KNN (no ANN), single mind file.
-- **Tuning is offline:** cache candidate generations, re-rank thousands of configs against cached outputs, then validate the top-N with the LLM judge.
-- **Evaluation is reproducible:** committed run dirs rescore byte-identically offline (`gluomem bench rescore <run> --check`); metric-protocol discipline is enforced at runtime; fake backends bannered loudly.
+Optional: `make hooks` installs the pre-commit (lint and type check) and pre-push (tests) gates.
+
+## Repository boundary
+
+This repository holds the memory library, its CLI and the evaluation harness. It does not contain a service, client SDKs, assistant adapters or KVARK integration code. Those are planned as separate work that uses this library.
+
+## Documents
+
+1. **[SPEC.md](./SPEC.md)** — original research specification: purpose, scope, requirements, acceptance criteria.
+2. **[DESIGN.md](./DESIGN.md)** — architecture, schema, layers, config system, DSPy layer, planned tuning engine, harness.
+3. **[docs/research/](./docs/research/README.md)** — archived experimental plan and historical benchmark reports.
+
+## License
+
+Apache License 2.0. See [LICENSE](./LICENSE) and [NOTICE](./NOTICE). Benchmark datasets are not included and keep their own licenses; LoCoMo is CC BY-NC 4.0.
 
 ## References
 
