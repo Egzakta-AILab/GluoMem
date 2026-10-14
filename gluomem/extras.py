@@ -6,7 +6,10 @@ features live behind optional extras declared in ``pyproject.toml``:
 
 - ``llm`` — DSPy extraction, QA answering, LLM judge, offline optimization
 - ``embeddings`` — in-process MiniLM embeddings and cross-encoder reranking
-- ``postgres`` — PostgreSQL + pgvector storage backend
+- ``postgres`` — PostgreSQL + pgvector storage and Alembic migrations
+- ``tune`` — offline retrieval tuning with Optuna
+- ``service`` — FastAPI service and HTTP client
+- ``all`` — all optional features
 """
 
 from __future__ import annotations
@@ -23,8 +26,16 @@ EXTRAS: dict[str, tuple[tuple[str, ...], str]] = {
         "in-process MiniLM embeddings and cross-encoder reranking",
     ),
     "postgres": (
-        ("psycopg", "pgvector"),
+        ("psycopg", "pgvector", "alembic", "sqlalchemy"),
         "PostgreSQL + pgvector storage backend",
+    ),
+    "tune": (
+        ("optuna",),
+        "Offline retrieval parameter tuning with Optuna",
+    ),
+    "service": (
+        ("fastapi", "uvicorn", "httpx"),
+        "Authenticated FastAPI service and GluoMemClient SDK",
     ),
 }
 

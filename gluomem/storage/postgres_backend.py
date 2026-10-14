@@ -11,39 +11,73 @@ from typing import Any, Literal
 import numpy as np
 
 from gluomem.extras import require
-from gluomem.storage.backend import assert_dim
-
-_PG_SCHEMA_PATH: Path = Path(__file__).with_name("schema_postgres.sql")
-_ALLOWED_VEC_TABLES: frozenset[str] = frozenset(
-    {"memory_frames_vec", "memory_frame_chunks_vec"}
+from gluomem.migrations.runner import get_heads, validate_schema_name
+from gluomem.search.multilingual import (
+    fold_multilingual_text,
+    fold_query_text,
 )
-_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+from gluomem.storage.backend import IncompatibleSchemaError, assert_dim
+from gluomem.storage.like import search_like
+from gluomem.storage.scope import (
+    MemoryScope,
+    eligible_sql,
+    resolve_scope,
+    scope_sql,
+)
+from gluomem.timeutil import now_iso as format_now_iso
+
+_ALLOWED_VEC_TABLES: frozenset[str] = frozenset({"memory_frames_vec", "memory_frame_chunks_vec"})
 
 
 def _adapt_qmark_to_pyformat(sql: str) -> str:
-    """Convert SQLite ``?`` parameter placeholders to psycopg ``%s`` outside string literals."""
-    if "?" not in sql and "%" not in sql:
-        return sql
+    """Adapt qmarks outside SQL literals/comments and escape all psycopg percent signs."""
     out: list[str] = []
-    in_quote = False
     i = 0
-    n = len(sql)
-    while i < n:
-        ch = sql[i]
-        if ch == "'":
-            out.append(ch)
-            if in_quote and i + 1 < n and sql[i + 1] == "'":
-                out.append("'")
-                i += 2
-                continue
-            in_quote = not in_quote
-        elif ch == "?" and not in_quote:
-            out.append("%s")
-        elif ch == "%" and not in_quote:
-            out.append("%%")
+    while i < len(sql):
+        start = i
+        if sql.startswith("--", i):
+            end = sql.find("\n", i)
+            i = len(sql) if end < 0 else end
+        elif sql.startswith("/*", i):
+            depth = 1
+            i += 2
+            while i < len(sql) and depth:
+                if sql.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif sql.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+        elif sql[i] in ("'", '"'):
+            quote = sql[i]
+            escaped = (
+                quote == "'"
+                and i > 0
+                and sql[i - 1] in "eE"
+                and (i < 2 or not (sql[i - 2].isalnum() or sql[i - 2] == "_"))
+            )
+            i += 1
+            while i < len(sql):
+                if escaped and sql[i] == "\\":
+                    i += 2
+                elif sql[i] == quote:
+                    i += 1
+                    if i >= len(sql) or sql[i] != quote:
+                        break
+                    i += 1
+                else:
+                    i += 1
+        elif sql[i] == "$" and (match := re.match(r"\$(?:[a-zA-Z_]\w*)?\$", sql[i:])):
+            delimiter = match.group()
+            end = sql.find(delimiter, i + len(delimiter))
+            i = len(sql) if end < 0 else end + len(delimiter)
         else:
-            out.append(ch)
-        i += 1
+            out.append("%s" if sql[i] == "?" else "%%" if sql[i] == "%" else sql[i])
+            i += 1
+            continue
+        out.append(sql[start:i].replace("%", "%%"))
     return "".join(out)
 
 
@@ -76,7 +110,7 @@ class _PgRow:
 
 
 class PostgresBackend:
-    """PostgreSQL database backend with ``pgvector`` and schema isolation."""
+    """Schema-isolated PostgreSQL backend; each thread must own its connection."""
 
     dialect: Literal["sqlite", "postgres"] = "postgres"
 
@@ -91,8 +125,7 @@ class PostgresBackend:
             raise ValueError(f"vector dim must be positive, got {dim}")
         if not dsn or not dsn.strip():
             raise ValueError("PostgresBackend requires a non-empty dsn")
-        if not _IDENT_RE.match(postgres_schema):
-            raise ValueError(f"Invalid postgres_schema identifier: {postgres_schema!r}")
+        validate_schema_name(postgres_schema)
 
         require("postgres", "PostgresBackend")
         import psycopg
@@ -105,19 +138,40 @@ class PostgresBackend:
         self.path: Path = Path(f"postgres://{postgres_schema}")
         self._tx_depth: int = 0
 
-        self.conn: Any = psycopg.connect(dsn, row_factory=dict_row)
-        self._apply_schema(register_vector)
+        self.conn: Any = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+        try:
+            self.conn.execute(f"SET search_path TO {postgres_schema}, public")
+            self._verify_schema()
+            self.conn.execute("SET hnsw.iterative_scan = strict_order")
+            self.conn.execute("SET hnsw.max_scan_tuples = 20000")
+            self.conn.execute("SET hnsw.scan_mem_multiplier = 4")
+            register_vector(self.conn)
+        except Exception:
+            self.conn.close()
+            raise
 
-    def _apply_schema(self, register_vector_fn: Any) -> None:
-        with self.conn.cursor() as cur:
-            cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.postgres_schema}"')
-            cur.execute(f'SET search_path TO "{self.postgres_schema}", public')
-            ddl = _PG_SCHEMA_PATH.read_text(encoding="utf-8").replace(
-                "__VECTOR_DIM__", str(self.dim)
+    def _verify_schema(self) -> None:
+        version_table = f"{self.postgres_schema}.alembic_version"
+        exists = self.conn.execute("SELECT to_regclass(%s)", (version_table,)).fetchone()
+        if exists is None or exists["to_regclass"] is None:
+            raise IncompatibleSchemaError(
+                "PostgreSQL schema is not versioned; recreate the database if it is legacy, "
+                "then run gluomem migrate upgrade --dsn ... --schema " + self.postgres_schema
             )
-            cur.execute(ddl)
-        self.conn.commit()
-        register_vector_fn(self.conn)
+        revisions = self.conn.execute(f"SELECT version_num FROM {version_table}").fetchall()
+        if {row["version_num"] for row in revisions} != set(get_heads()):
+            raise IncompatibleSchemaError(
+                "Unsupported PostgreSQL schema revision; recreate legacy databases, "
+                "or run gluomem migrate upgrade --dsn ... --schema " + self.postgres_schema
+            )
+        for table in _ALLOWED_VEC_TABLES:
+            row = self.conn.execute(
+                "SELECT atttypmod FROM pg_attribute WHERE attrelid = %s::regclass "
+                "AND attname = 'embedding'",
+                (f"{self.postgres_schema}.{table}",),
+            ).fetchone()
+            if row is None or row["atttypmod"] != self.dim:
+                raise IncompatibleSchemaError("Vector dimension differs; recreate the database")
 
     @property
     def in_transaction(self) -> bool:
@@ -138,22 +192,16 @@ class PostgresBackend:
             raise RuntimeError("INSERT RETURNING did not return a row")
         return int(row[0])
 
-    def executemany(
-        self, sql: str, seq_of_params: Iterable[Sequence[Any]]
-    ) -> None:
+    def executemany(self, sql: str, seq_of_params: Iterable[Sequence[Any]]) -> None:
         adapted = _adapt_qmark_to_pyformat(sql)
         with self.conn.cursor() as cur:
             cur.executemany(adapted, [tuple(p) for p in seq_of_params])
 
-    def fetchone(
-        self, sql: str, params: Sequence[Any] = ()
-    ) -> Any:
+    def fetchone(self, sql: str, params: Sequence[Any] = ()) -> Any:
         row = self.execute(sql, params).fetchone()
         return _PgRow(row) if row is not None else None
 
-    def fetchall(
-        self, sql: str, params: Sequence[Any] = ()
-    ) -> list[Any]:
+    def fetchall(self, sql: str, params: Sequence[Any] = ()) -> list[Any]:
         rows = self.execute(sql, params).fetchall()
         return [_PgRow(r) for r in rows]
 
@@ -208,9 +256,7 @@ class PgVectorStore:
         if commit:
             self._backend.commit()
 
-    def add_batch(
-        self, items: list[tuple[int, np.ndarray]], *, commit: bool = True
-    ) -> None:
+    def add_batch(self, items: list[tuple[int, np.ndarray]], *, commit: bool = True) -> None:
         if not items:
             return
         prepared = [(int(rowid), assert_dim(vec, self.dim)) for rowid, vec in items]
@@ -222,21 +268,37 @@ class PgVectorStore:
         if commit:
             self._backend.commit()
 
-    def search(self, query: np.ndarray, k: int) -> list[tuple[int, float]]:
+    def search(
+        self,
+        query: np.ndarray,
+        k: int,
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+    ) -> list[tuple[int, float]]:
         if k <= 0:
             return []
         f32 = assert_dim(query, self.dim)
-        rows = self._backend.fetchall(
-            f"SELECT rowid, (embedding <-> ?) AS distance FROM {self.table} "
-            f"ORDER BY embedding <-> ? ASC, rowid ASC LIMIT ?",
-            (f32, f32, int(k)),
+        eff_scope = resolve_scope(scope)
+        eff_now = format_now_iso(now_iso)
+        if self.table == "memory_frames_vec":
+            join = "FROM memory_frames_vec v JOIN memory_frames m ON m.id = v.rowid"
+        else:
+            join = (
+                "FROM memory_frame_chunks_vec v "
+                "JOIN memory_frame_chunks c ON c.id = v.rowid "
+                "JOIN memory_frames m ON m.id = c.frame_id"
+            )
+        sql = (
+            f"SELECT v.rowid AS rowid, (v.embedding <-> ?) AS distance {join} "
+            f"WHERE {scope_sql('m')} AND {eligible_sql('m')} "
+            "ORDER BY v.embedding <-> ? ASC, v.rowid ASC LIMIT ?"
         )
+        rows = self._backend.fetchall(sql, (f32, *eff_scope.as_tuple(), eff_now, f32, int(k)))
         return [(int(r["rowid"]), float(r["distance"])) for r in rows]
 
     def delete(self, rowid: int, *, commit: bool = True) -> None:
-        self._backend.execute(
-            f"DELETE FROM {self.table} WHERE rowid = ?", (int(rowid),)
-        )
+        self._backend.execute(f"DELETE FROM {self.table} WHERE rowid = ?", (int(rowid),))
         if commit:
             self._backend.commit()
 
@@ -276,78 +338,85 @@ class PgTsVectorStore:
     def __init__(self, backend: PostgresBackend) -> None:
         self._backend: PostgresBackend = backend
 
-    def upsert(
-        self, rowid: int, content: str, *, commit: bool = False
-    ) -> None:
+    def upsert(self, rowid: int, content: str, *, commit: bool = False) -> None:
+        folded = fold_multilingual_text(content)
         self._backend.execute(
-            "INSERT INTO memory_frames_fts(rowid, content) VALUES (?, ?) "
-            "ON CONFLICT (rowid) DO UPDATE SET content = EXCLUDED.content",
-            (int(rowid), content),
+            "UPDATE memory_frames SET folded_content = ? WHERE id = ?",
+            (folded, int(rowid)),
+        )
+        self._backend.execute(
+            "INSERT INTO memory_frames_fts(rowid, content, folded_content) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT (rowid) DO UPDATE SET "
+            "content = EXCLUDED.content, folded_content = EXCLUDED.folded_content",
+            (int(rowid), content, folded),
         )
         if commit:
             self._backend.commit()
 
     def delete(self, rowid: int, *, commit: bool = False) -> None:
-        self._backend.execute(
-            "DELETE FROM memory_frames_fts WHERE rowid = ?", (int(rowid),)
-        )
+        self._backend.execute("DELETE FROM memory_frames_fts WHERE rowid = ?", (int(rowid),))
         if commit:
             self._backend.commit()
 
-    def search(self, sanitized_query: str, limit: int) -> list[int]:
+    def search(
+        self,
+        sanitized_query: str,
+        limit: int,
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+        match_any: bool = False,
+    ) -> list[int]:
         if not sanitized_query or limit <= 0:
             return []
         plain_terms = sanitized_query.replace('"', " ").strip()
         if not plain_terms:
             return []
+        folded_terms = fold_query_text(plain_terms, match_any=match_any)
+        if not folded_terms:
+            return []
+        eff_scope = resolve_scope(scope)
+        eff_now = format_now_iso(now_iso)
+        # plainto_tsquery always AND-s its terms, so the any-term form uses only the folded query.
+        if match_any:
+            tsq_expr = "to_tsquery('simple', ?)"
+            tsq_params: tuple[str, ...] = (folded_terms,)
+        else:
+            tsq_expr = "(to_tsquery('simple', ?) || plainto_tsquery('english', ?))"
+            tsq_params = (folded_terms, plain_terms)
         rows = self._backend.fetchall(
-            "SELECT f.rowid AS rowid FROM memory_frames_fts f "
-            "JOIN memory_frames m ON m.id = f.rowid "
-            "WHERE f.tsv @@ websearch_to_tsquery('english', ?) "
-            "AND m.trust != 'quarantined' "
-            "ORDER BY ts_rank_cd(f.tsv, websearch_to_tsquery('english', ?)) DESC, f.rowid ASC "
-            "LIMIT ?",
-            (plain_terms, plain_terms, int(limit)),
+            f"SELECT f.rowid AS rowid FROM memory_frames_fts f "
+            f"JOIN memory_frames m ON m.id = f.rowid "
+            f"WHERE f.tsv @@ {tsq_expr} "
+            f"AND {scope_sql('m')} AND {eligible_sql('m')} "
+            f"ORDER BY ts_rank_cd(f.tsv, {tsq_expr}) DESC, f.rowid ASC "
+            f"LIMIT ?",
+            (
+                *tsq_params,
+                *eff_scope.as_tuple(),
+                eff_now,
+                *tsq_params,
+                int(limit),
+            ),
         )
         return [int(r["rowid"]) for r in rows]
 
-    def search_like(self, query: str | list[str], limit: int) -> list[int]:
-        if limit <= 0:
-            return []
-        tokens = [query] if isinstance(query, str) else query
-        if not tokens:
-            return []
-        clauses = " AND ".join(
-            "content LIKE ? ESCAPE '\\'" for _ in tokens
-        )
-        params: list[Any] = [
-            "%" + t.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_") + "%"
-            for t in tokens
-        ]
-        params.append(int(limit))
-        rows = self._backend.fetchall(
-            f"SELECT id FROM memory_frames "
-            f"WHERE {clauses} AND trust != 'quarantined' "
-            f"ORDER BY id ASC LIMIT ?",
-            params,
-        )
-        return [int(r["id"]) for r in rows]
-
-    def get_content(self, rowid: int) -> str | None:
-        val = self._backend.scalar(
-            "SELECT content FROM memory_frames_fts WHERE rowid = ?",
-            (int(rowid),),
-        )
-        return str(val) if val is not None else None
+    def search_like(
+        self,
+        query: str | list[str],
+        limit: int,
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+    ) -> list[int]:
+        return search_like(self._backend, query, limit, scope=scope, now=now_iso)
 
     def get_text(self, rowid: int) -> str | None:
-        return self.get_content(rowid)
-
-    def id_to_content(self) -> dict[int, str]:
-        rows = self._backend.fetchall(
-            "SELECT rowid, content FROM memory_frames_fts"
+        val = self._backend.scalar(
+            "SELECT content FROM memory_frames_fts WHERE rowid = ?", (int(rowid),)
         )
-        return {int(r["rowid"]): str(r["content"]) for r in rows}
+        return str(val) if val is not None else None
 
     def clear(self, *, commit: bool = False) -> None:
         self._backend.execute("DELETE FROM memory_frames_fts")

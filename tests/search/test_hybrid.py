@@ -202,11 +202,11 @@ def test_like_fallback_escapes_metacharacters(tmp_path: Path) -> None:
     try:
         with_pct = store.create_i_frame("gop-1", "confidence was 100% today")
         store.create_i_frame("gop-1", "confidence was one hundred today")
-        assert search._fts_lane("%", lane_fetch=10) == [with_pct.id]
+        assert search._fts_lane("%", lane_fetch=10, scope=search.scope) == [with_pct.id]
 
         with_us = store.create_i_frame("gop-1", "var snake_case here")
         store.create_i_frame("gop-1", "var snakeXcase here")
-        assert search._fts_lane("_", lane_fetch=10) == [with_us.id]
+        assert search._fts_lane("_", lane_fetch=10, scope=search.scope) == [with_us.id]
     finally:
         db.close()
 
@@ -232,8 +232,8 @@ def test_quarantine_exclusion_across_lanes_rerank_and_kg(tmp_path: Path) -> None
         assert [h.frame.id for h in res.hits] == [ok2.id, ok1.id]
         assert q.id not in {h.frame.id for h in res.hits}
         assert "alpha three 100%" not in reranker.seen
-        assert search._fts_lane("%", lane_fetch=10) == []
-        assert q.id not in search._vec_lane("alpha", lane_fetch=10)
+        assert search._fts_lane("%", lane_fetch=10, scope=search.scope) == []
+        assert q.id not in search._vec_lane("alpha", lane_fetch=10, scope=search.scope)
         assert store.get_frame(q.id).trust == "quarantined"
     finally:
         db.close()

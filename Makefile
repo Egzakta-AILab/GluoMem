@@ -2,13 +2,13 @@
 
 PYTHON ?= 3.12
 
-# Full development environment: core + llm + embeddings extras, dev tools.
+# Full development environment: all extras and dev tools.
 install:
 	uv sync --locked --extra all
 
-# Smallest environment that runs `make check` (no torch / sentence-transformers).
+# Offline checks: llm, tune, service, postgres and dev tools, without model packages.
 install-offline:
-	uv sync --locked --extra llm
+	uv sync --locked --extra llm --extra tune --extra service --extra postgres
 
 # One-time per clone: commit gate (hygiene + lint + typecheck) and push gate (tests)
 hooks:
@@ -29,7 +29,7 @@ check: lint typecheck test
 # environment outside the checkout, and run the installed-wheel boundary check
 # from that directory.
 wheel-check:
-	@set -eu; tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	@set -eu; tmp=$$(mktemp -d /tmp/gluomem-wheel.XXXXXX); trap 'rm -rf "$$tmp"' EXIT; \
 	uv build --wheel --out-dir "$$tmp/dist"; \
 	uv export --locked --no-dev --no-emit-project --format requirements-txt -o "$$tmp/core.txt" > /dev/null; \
 	uv venv --python $(PYTHON) "$$tmp/venv"; \

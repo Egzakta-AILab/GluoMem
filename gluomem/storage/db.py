@@ -32,9 +32,7 @@ class MindDB:
         chunk_vec: VectorStore | None = None,
         fts: FtsStore | None = None,
     ) -> None:
-        resolved_dim = (
-            dim if dim is not None else (vector_dim if vector_dim is not None else 384)
-        )
+        resolved_dim = dim if dim is not None else (vector_dim if vector_dim is not None else 384)
         if resolved_dim <= 0:
             raise ValueError(f"vector dim must be positive, got {resolved_dim}")
 
@@ -52,9 +50,7 @@ class MindDB:
 
             if not dsn:
                 raise ValueError("MindDB(backend_type='postgres') requires dsn")
-            pg_backend = PostgresBackend(
-                dsn, dim=resolved_dim, postgres_schema=postgres_schema
-            )
+            pg_backend = PostgresBackend(dsn, dim=resolved_dim, postgres_schema=postgres_schema)
             self.backend = pg_backend
             self.path = pg_backend.path
             frame_vec = frame_vec or PgVectorStore(
@@ -121,19 +117,13 @@ class MindDB:
     def execute(self, sql: str, params: Sequence[Any] = ()) -> Any:
         return self.backend.execute(sql, params)
 
-    def executemany(
-        self, sql: str, seq_of_params: Iterable[Sequence[Any]]
-    ) -> None:
+    def executemany(self, sql: str, seq_of_params: Iterable[Sequence[Any]]) -> None:
         self.backend.executemany(sql, seq_of_params)
 
-    def fetchone(
-        self, sql: str, params: Sequence[Any] = ()
-    ) -> Mapping[str, Any] | None:
+    def fetchone(self, sql: str, params: Sequence[Any] = ()) -> Mapping[str, Any] | None:
         return self.backend.fetchone(sql, params)
 
-    def fetchall(
-        self, sql: str, params: Sequence[Any] = ()
-    ) -> list[Mapping[str, Any]]:
+    def fetchall(self, sql: str, params: Sequence[Any] = ()) -> list[Mapping[str, Any]]:
         return self.backend.fetchall(sql, params)
 
     def scalar(self, sql: str, params: Sequence[Any] = ()) -> Any:

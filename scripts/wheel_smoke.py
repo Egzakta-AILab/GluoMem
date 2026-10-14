@@ -15,6 +15,7 @@ No network access and no model downloads.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import platform
 import sys
@@ -43,9 +44,22 @@ def main() -> int:
     if not (package_dir / "storage" / "schema.sql").is_file():
         print("FAIL: storage/schema.sql is not packaged", file=sys.stderr)
         return 1
-    if not (package_dir / "storage" / "schema_postgres.sql").is_file():
-        print("FAIL: storage/schema_postgres.sql is not packaged", file=sys.stderr)
-        return 1
+    for relative in (
+        "migrations/script.py.mako",
+        "migrations/versions/0001_initial_scoped_schema.py",
+    ):
+        if not (package_dir / relative).is_file():
+            print(f"FAIL: {relative} is not packaged", file=sys.stderr)
+            return 1
+    for subpackage in ("service", "client", "tune", "migrations"):
+        importlib.import_module(f"gluomem.{subpackage}")
+    if args.expect_core_only:
+        loaded = {
+            name for name in ("fastapi", "optuna", "alembic", "sqlalchemy") if name in sys.modules
+        }
+        if loaded:
+            print(f"FAIL: core subpackage import loaded {sorted(loaded)}", file=sys.stderr)
+            return 1
 
     cfg = load_config()
     dim = int(cfg.storage.vector_dim)
@@ -69,7 +83,7 @@ def main() -> int:
 
     extra_status = extras.status()
     if args.expect_core_only:
-        if extra_status["llm"] or extra_status["embeddings"] or extra_status["postgres"]:
+        if any(extra_status.values()):
             print(f"FAIL: expected a core-only install, got {extra_status}", file=sys.stderr)
             return 1
         try:

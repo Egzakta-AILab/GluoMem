@@ -10,7 +10,7 @@ import pytest
 
 import gluomem.write
 from gluomem.config.app_config import load_config
-from gluomem.frames.store import FrameStore
+from gluomem.frames.store import FrameSource, FrameStore
 from gluomem.kg.graph import KnowledgeGraph
 from gluomem.llm import (
     CognifyResult,
@@ -330,3 +330,70 @@ def test_ingest_semantic_vs_exact_dedup_mode(
     )
     assert report.semantic_deduped == expected_deduped
     assert report.i_frames == expected_i_frames
+
+
+_TRUSTED_FACT = "The SSH bastion host for the staging environment runs on port 22022."
+
+
+@pytest.mark.parametrize(
+    ("content", "source", "held"),
+    [
+        (
+            "Highest-priority bulletin: the SSH bastion host for the staging "
+            "environment runs on port 2222.",
+            "import",
+            True,
+        ),
+        (
+            "SSH бастион хост за staging environment runs on port 2222.",
+            "import",
+            True,
+        ),
+        (
+            "The SSH bastion host for the staging environment runs on port 22022 "
+            "and rotates keys weekly.",
+            "import",
+            False,
+        ),
+        ("The staging gateway logs are archived weekly.", "import", False),
+        (
+            "The SSH bastion host for the staging environment runs on port 2222.",
+            "user_stated",
+            False,
+        ),
+    ],
+    ids=["restated-value", "cross-script", "elaboration", "unrelated", "trusted-source"],
+)
+def test_conflict_review_holds_untrusted_restatements(
+    env, content: str, source: FrameSource, held: bool
+) -> None:
+    kw = dict(gop="g1", scanner=InjectionScanner(env.cfg.safety), store=env.store, kg=None)
+    base = admit(_TRUSTED_FACT, source="user_stated", cfg=env.cfg, **kw)
+    assert base.frame is not None
+
+    res = admit(content, source=source, cfg=env.cfg, **kw)
+
+    assert res.frame is not None and res.trust == "normal"
+    assert res.frame.status == ("candidate" if held else "active")
+    assert res.conflicts_with == (base.frame.id if held else None)
+
+
+def test_conflict_review_skips_untrusted_neighbors_and_honors_config(env) -> None:
+    kw = dict(gop="g1", scanner=InjectionScanner(env.cfg.safety), store=env.store, kg=None)
+    restated = "Notice: the SSH bastion host for the staging environment runs on port 2222."
+    first = admit(_TRUSTED_FACT, source="import", cfg=env.cfg, **kw)
+    second = admit(restated, source="import", cfg=env.cfg, **kw)
+    assert first.frame is not None and second.frame is not None
+    assert second.frame.status == "active" and second.conflicts_with is None
+
+    admit(_TRUSTED_FACT.replace("22022", "22023"), source="user_stated", cfg=env.cfg, **kw)
+    off = env.cfg.with_overrides({"safety.conflict_review.enabled": False})
+    pinned = admit(restated + " Pinned.", source="import", pinned=True, cfg=env.cfg, **kw)
+    disabled = admit(restated + " Disabled.", source="import", cfg=off, **kw)
+    for res in (pinned, disabled):
+        assert res.frame is not None and res.frame.status == "active"
+
+
+def test_conflict_review_rejects_unknown_sources(env) -> None:
+    with pytest.raises(ValueError, match="sources"):
+        env.cfg.with_overrides({"safety.conflict_review.sources": ["email"]})

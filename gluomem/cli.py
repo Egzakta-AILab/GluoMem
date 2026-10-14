@@ -2,7 +2,7 @@
 
 ``gluomem ingest``, ``gluomem bench``, ``gluomem components`` (effective
 component readiness) and ``gluomem index`` (explicit embedding rebuild/adopt)
-are live; ``tune``/``ablate`` remain stubs. The module top stays dspy-free —
+are live; ``tune``/``ablate`` rescore cached candidates offline. The module top stays dspy-free —
 LLM backends are resolved lazily inside handlers (``make_extractors`` for
 ingest, the runner's backend dispatch for bench), so fake/none backends run fully offline, and the
 ``bench rescore``/``gate``/``sample``/``fetch`` handlers never touch dspy at
@@ -550,6 +550,365 @@ def _add_bench_parsers(sub: argparse._SubParsersAction) -> None:
     )
 
 
+def _resolve_tune_cache(args: argparse.Namespace, cfg: AppConfig):  # noqa: ANN202
+    from pathlib import Path
+
+    from gluomem.tune.candidate_cache import CandidateCache, build_cache_for_benchmark
+
+    cache_dir = Path(args.cache) if getattr(args, "cache", None) else None
+    rebuild = bool(getattr(args, "rebuild_cache", False))
+    if cache_dir is not None and (cache_dir / "manifest.json").is_file() and not rebuild:
+        return CandidateCache.load(cache_dir)
+    if getattr(args, "db_dir", None):
+        cache = build_cache_for_benchmark(
+            cfg,
+            db_dir=args.db_dir,
+            dataset_name=getattr(args, "dataset", "locomo") or "locomo",
+            sample_manifest=getattr(args, "sample_manifest", None),
+            lane_fetch=getattr(args, "lane_fetch", None),
+            limit=int(getattr(args, "limit", 10)),
+        )
+        if cache_dir is not None:
+            cache.save(cache_dir)
+        return cache
+    if cache_dir is not None:
+        return CandidateCache.load(cache_dir)
+    raise ValueError(
+        "provide --cache <dir> (existing candidate cache) or --db-dir <dir> to build one"
+    )
+
+
+def _cmd_tune(args: argparse.Namespace) -> int:
+    from gluomem import extras
+    from gluomem.tune.objective import TuneConfig, run_optuna_tune
+
+    extras.require("tune", "Offline retrieval parameter tuning")
+    cfg = _config_from(args)
+    try:
+        cache = _resolve_tune_cache(args, cfg)
+        tune_cfg = TuneConfig(
+            n_trials=int(args.trials),
+            k=int(args.k),
+            metric=str(args.metric),
+            profile=str(args.profile or cfg.search.default_profile),
+            seed=int(args.seed),
+            held_out_fraction=float(args.held_out_fraction),
+        )
+        result = run_optuna_tune(
+            cache,
+            cfg,
+            tune_cfg=tune_cfg,
+            out_dir=args.out,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"gluomem tune: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"tuned {result.n_trials} trial(s) on {len(cache.query_ids())} query(s): "
+        f"incumbent {result.metric}@{result.k}={result.incumbent_score:.4f} -> "
+        f"best={result.best_score:.4f} (+{result.improvement:.4f}, "
+        f"trial #{result.best_trial_number}, model_calls=0)"
+    )
+    return 0
+
+
+def _cmd_ablate(args: argparse.Namespace) -> int:
+    import json
+
+    from gluomem.tune.ablate import format_ablation_table, run_ablation
+
+    cfg = _config_from(args)
+    try:
+        cache = _resolve_tune_cache(args, cfg)
+        report = run_ablation(
+            cache,
+            cfg,
+            profile=args.profile,
+            k=int(args.k),
+            out_dir=args.out,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"gluomem ablate: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(format_ablation_table(report))
+    return 0
+
+
+def _add_tune_and_ablate_parsers(sub: argparse._SubParsersAction) -> None:
+    tune = sub.add_parser(
+        "tune", help="offline Tier-1 retrieval parameter tuning (seeded Optuna TPE)"
+    )
+    tune.add_argument("--cache", default=None, help="candidate cache directory")
+    tune.add_argument("--db-dir", default=None, help="per-conversation .mind dir to build cache")
+    tune.add_argument("--dataset", default="locomo", help="dataset name when building cache")
+    tune.add_argument("--sample-manifest", default=None, help="optional sample manifest JSON")
+    tune.add_argument(
+        "--lane-fetch", type=int, default=None,
+        help="per-lane pool (default: limit × multiplier)",
+    )
+    tune.add_argument("--rebuild-cache", action="store_true", help="force cache rebuild")
+    tune.add_argument("--out", default=None, help="output dir for manifest/trials/best_params")
+    tune.add_argument("--trials", type=int, default=200, help="number of Optuna trials")
+    tune.add_argument("--k", type=int, default=10, help="cutoff k for metric@k")
+    tune.add_argument(
+        "--metric",
+        choices=["ndcg", "recall", "hit"],
+        default="ndcg",
+        help="optimization objective metric",
+    )
+    tune.add_argument("--profile", default=None, help="scoring profile to tune")
+    tune.add_argument("--seed", type=int, default=42, help="deterministic RNG seed")
+    tune.add_argument(
+        "--held-out-fraction", type=float, default=0.3, help="held-out query fraction"
+    )
+    tune.add_argument("--limit", type=int, default=10, help="cache retrieval limit")
+    _add_config_args(tune)
+
+    ablate = sub.add_parser(
+        "ablate", help="run deterministic retrieval signal and lane ablations over a cache"
+    )
+    ablate.add_argument("--cache", default=None, help="candidate cache directory")
+    ablate.add_argument("--db-dir", default=None, help="per-conversation .mind dir to build cache")
+    ablate.add_argument("--dataset", default="locomo", help="dataset name when building cache")
+    ablate.add_argument("--sample-manifest", default=None, help="optional sample manifest JSON")
+    ablate.add_argument(
+        "--lane-fetch", type=int, default=None,
+        help="per-lane pool (default: limit × multiplier)",
+    )
+    ablate.add_argument("--limit", type=int, default=10, help="cache retrieval limit")
+    ablate.add_argument("--rebuild-cache", action="store_true", help="force cache rebuild")
+    ablate.add_argument("--out", default=None, help="output dir for ablation_report.json")
+    ablate.add_argument("--k", type=int, default=10, help="cutoff k for metrics@k")
+    ablate.add_argument("--profile", default=None, help="scoring profile to ablate")
+    ablate.add_argument("--json", action="store_true", help="emit JSON instead of table")
+    _add_config_args(ablate)
+
+
+def _cmd_migrate(args: argparse.Namespace) -> int:
+    from gluomem.migrations import get_current, get_heads, run_revision
+    from gluomem.migrations.runner import run_migration
+
+    subcmd = args.migrate_command
+    if subcmd == "heads":
+        print("\n".join(get_heads()))
+        return 0
+    if subcmd not in ("upgrade", "downgrade", "revision", "current"):
+        print(
+            "gluomem migrate: pick upgrade, downgrade, revision, heads or current", file=sys.stderr
+        )
+        return 1
+    cfg = _config_from(args)
+    schema = args.schema or cfg.storage.postgres_schema
+    vector_dim = args.vector_dim if args.vector_dim is not None else cfg.storage.vector_dim
+    sql = getattr(args, "sql", False)
+    dsn = args.dsn or cfg.storage.dsn or ("postgresql+psycopg://localhost/gluomem" if sql else None)
+    if not dsn:
+        print("gluomem migrate: pass --dsn or set storage.dsn", file=sys.stderr)
+        return 1
+    try:
+        if subcmd == "current":
+            print("\n".join(get_current(dsn, schema=schema)))
+        elif subcmd == "revision":
+            revision = run_revision(
+                dsn,
+                args.message,
+                schema=schema,
+                vector_dim=vector_dim,
+                autogenerate=args.autogenerate,
+            )
+            print(revision.path)
+        else:
+            out = run_migration(
+                dsn,
+                args.revision,
+                direction=subcmd,
+                schema=schema,
+                vector_dim=vector_dim,
+                sql=sql,
+            )
+            if sql:
+                print(out.rstrip())
+            else:
+                print(
+                    f"migrate {subcmd}: schema={schema} revision={args.revision} dim={vector_dim}"
+                )
+    except (ValueError, RuntimeError) as exc:
+        print(f"gluomem migrate {subcmd}: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _add_migrate_parsers(sub: argparse._SubParsersAction) -> None:
+    migrate = sub.add_parser("migrate", help="run Alembic PostgreSQL schema migrations")
+    commands = migrate.add_subparsers(dest="migrate_command")
+    commands.add_parser("heads", help="print Alembic head revisions")
+    for name in ("upgrade", "downgrade", "revision", "current"):
+        parser = commands.add_parser(name, help=f"Alembic {name}")
+        parser.add_argument("--dsn", default=None, help="PostgreSQL DSN (default: storage.dsn)")
+        parser.add_argument("--schema", default=None, help="PostgreSQL schema")
+        parser.add_argument("--vector-dim", type=int, default=None, help="vector dimension")
+        if name in ("upgrade", "downgrade"):
+            parser.add_argument(
+                "revision", nargs="?", default="head" if name == "upgrade" else "base"
+            )
+            parser.add_argument("--sql", action="store_true", help="render offline SQL")
+        elif name == "revision":
+            parser.add_argument("--autogenerate", action="store_true")
+            parser.add_argument("-m", "--message", required=True)
+        _add_config_args(parser)
+
+
+def _cmd_worker(args: argparse.Namespace) -> int:
+    from gluomem.embedding.providers import make_embedder
+    from gluomem.frames.store import FrameStore
+    from gluomem.kg.graph import KnowledgeGraph
+    from gluomem.service.jobs import JobQueue
+    from gluomem.service.worker import MemoryWorker
+    from gluomem.storage.db import MindDB
+
+    cfg = _config_from(args)
+    embedder = make_embedder(cfg)
+    db = MindDB.from_config(cfg, path_override=args.db)
+    try:
+        store = FrameStore(
+            db, embedder=embedder, chunking=cfg.chunking, lifecycle=cfg.lifecycle
+        )
+        kg = KnowledgeGraph(db)
+        queue = JobQueue(
+            db.backend,
+            default_max_attempts=args.max_attempts,
+        )
+        worker = MemoryWorker(
+            db,
+            store,
+            cfg=cfg,
+            kg=kg,
+            queue=queue,
+            worker_id=args.worker_id,
+            lease_seconds=args.lease_seconds,
+        )
+        if args.once:
+            jobs = worker.run_until_empty(max_jobs=args.max_jobs)
+            print(f"processed {len(jobs)} job(s)")
+            return 0
+        count = worker.run_forever(
+            poll_interval=args.poll_interval,
+            max_iterations=args.max_iterations,
+        )
+        print(f"processed {count} job(s)")
+        return 0
+    finally:
+        db.close()
+
+
+def _add_worker_parser(sub: argparse._SubParsersAction) -> None:
+    worker = sub.add_parser(
+        "worker", help="run durable memory_jobs background worker"
+    )
+    worker.add_argument("--db", default=None, help="mind db path (default: config)")
+    worker.add_argument(
+        "--worker-id", default=None, help="worker identifier (default: hostname-pid)"
+    )
+    worker.add_argument(
+        "--lease-seconds",
+        type=float,
+        default=60.0,
+        help="lease duration in seconds (default: 60)",
+    )
+    worker.add_argument(
+        "--poll-interval",
+        type=float,
+        default=1.0,
+        help="idle poll interval in seconds (default: 1.0)",
+    )
+    worker.add_argument(
+        "--once",
+        action="store_true",
+        help="drain currently queued jobs and exit",
+    )
+    worker.add_argument(
+        "--max-jobs",
+        type=int,
+        default=100,
+        help="maximum jobs to drain when --once is set",
+    )
+    worker.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        help="optional max poll iterations before exiting",
+    )
+    worker.add_argument(
+        "--max-attempts",
+        type=int,
+        default=3,
+        help="default max attempts per job (default: 3)",
+    )
+    _add_config_args(worker)
+
+
+def _cmd_serve(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from gluomem.embedding.providers import make_embedder
+    from gluomem.extras import require
+    from gluomem.frames.store import FrameStore
+    from gluomem.kg.graph import KnowledgeGraph
+    from gluomem.service.app import create_app
+    from gluomem.service.jobs import JobQueue
+    from gluomem.storage.db import MindDB
+
+    require("service", "gluomem serve")
+    import uvicorn
+
+    cfg = _config_from(args)
+    embedder = make_embedder(cfg)
+    db = MindDB.from_config(cfg, path_override=args.db)
+    try:
+        store = FrameStore(
+            db, embedder=embedder, chunking=cfg.chunking, lifecycle=cfg.lifecycle
+        )
+        kg = KnowledgeGraph(db)
+        queue = JobQueue(db.backend, max_pending_per_scope=args.max_pending_per_scope)
+        app = create_app(
+            db,
+            store,
+            cfg=cfg,
+            service_key=(
+                Path(args.service_key_file).read_text().strip()
+                if args.service_key_file else None
+            ),
+            kg=kg,
+            queue=queue,
+        )
+        uvicorn.run(app, host=args.host, port=args.port)
+        return 0
+    finally:
+        db.close()
+
+
+def _add_serve_parser(sub: argparse._SubParsersAction) -> None:
+    serve = sub.add_parser("serve", help="run authenticated GluoMem HTTP service")
+    serve.add_argument("--db", default=None, help="mind db path (default: config)")
+    serve.add_argument("--host", default="127.0.0.1", help="bind host")
+    serve.add_argument("--port", type=int, default=8080, help="bind port")
+    serve.add_argument(
+        "--service-key-file",
+        default=None,
+        help="file containing bearer secret (default: GLUOMEM_SERVICE_KEY)",
+    )
+    serve.add_argument(
+        "--max-pending-per-scope", type=int, default=50,
+        help="per-scope pending job cap (default: 50)",
+    )
+    _add_config_args(serve)
+
+
 _BENCH_HANDLERS = {
     "replay": _cmd_bench_replay,
     "registry": _cmd_bench_registry,
@@ -601,9 +960,10 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--db", required=True, help="mind db path")
         _add_config_args(p)
 
-    # Stub subcommands; not implemented yet.
-    sub.add_parser("tune", help="offline parameter tuning")
-    sub.add_parser("ablate", help="run ablation experiments")
+    _add_tune_and_ablate_parsers(sub)
+    _add_migrate_parsers(sub)
+    _add_worker_parser(sub)
+    _add_serve_parser(sub)
 
     args = parser.parse_args(argv)
     from gluomem.components import FakeComponentError, ProviderUnavailableError
@@ -632,6 +992,16 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_components(args)
     if args.command == "index":
         return _cmd_index(args)
+    if args.command == "tune":
+        return _cmd_tune(args)
+    if args.command == "ablate":
+        return _cmd_ablate(args)
+    if args.command == "migrate":
+        return _cmd_migrate(args)
+    if args.command == "worker":
+        return _cmd_worker(args)
+    if args.command == "serve":
+        return _cmd_serve(args)
     if args.command == "bench":
         handler = _BENCH_HANDLERS.get(args.bench_command or "")
         if handler is None:

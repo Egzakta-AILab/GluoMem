@@ -4,13 +4,20 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from gluomem.storage.scope import MemoryScope
 
 
 class VectorDimMismatchError(ValueError):
     """Raised when a vector's shape does not match the store's ``dim``."""
+
+
+class IncompatibleSchemaError(RuntimeError):
+    """Raised when a database does not have the supported schema version."""
 
 
 def assert_dim(vec: np.ndarray, dim: int) -> np.ndarray:
@@ -41,17 +48,11 @@ class DatabaseBackend(Protocol):
         self, sql: str, params: Sequence[Any] = (), *, id_col: str = "id"
     ) -> int: ...
 
-    def executemany(
-        self, sql: str, seq_of_params: Iterable[Sequence[Any]]
-    ) -> None: ...
+    def executemany(self, sql: str, seq_of_params: Iterable[Sequence[Any]]) -> None: ...
 
-    def fetchone(
-        self, sql: str, params: Sequence[Any] = ()
-    ) -> Mapping[str, Any] | None: ...
+    def fetchone(self, sql: str, params: Sequence[Any] = ()) -> Mapping[str, Any] | None: ...
 
-    def fetchall(
-        self, sql: str, params: Sequence[Any] = ()
-    ) -> list[Mapping[str, Any]]: ...
+    def fetchall(self, sql: str, params: Sequence[Any] = ()) -> list[Mapping[str, Any]]: ...
 
     def scalar(self, sql: str, params: Sequence[Any] = ()) -> Any: ...
 
@@ -70,15 +71,18 @@ class VectorStore(Protocol):
 
     dim: int
 
-    def add(
-        self, rowid: int, vec: np.ndarray, *, commit: bool = True
-    ) -> None: ...
+    def add(self, rowid: int, vec: np.ndarray, *, commit: bool = True) -> None: ...
 
-    def add_batch(
-        self, items: list[tuple[int, np.ndarray]], *, commit: bool = True
-    ) -> None: ...
+    def add_batch(self, items: list[tuple[int, np.ndarray]], *, commit: bool = True) -> None: ...
 
-    def search(self, query: np.ndarray, k: int) -> list[tuple[int, float]]: ...
+    def search(
+        self,
+        query: np.ndarray,
+        k: int,
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+    ) -> list[tuple[int, float]]: ...
 
     def delete(self, rowid: int, *, commit: bool = True) -> None: ...
 
@@ -97,21 +101,30 @@ class VectorStore(Protocol):
 class FtsStore(Protocol):
     """Full-text search index protocol (`FTS5` on SQLite, `tsvector` on Postgres)."""
 
-    def upsert(
-        self, rowid: int, content: str, *, commit: bool = False
-    ) -> None: ...
+    def upsert(self, rowid: int, content: str, *, commit: bool = False) -> None: ...
 
     def delete(self, rowid: int, *, commit: bool = False) -> None: ...
 
-    def search(self, sanitized_query: str, limit: int) -> list[int]: ...
+    def search(
+        self,
+        sanitized_query: str,
+        limit: int,
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+        match_any: bool = False,
+    ) -> list[int]: ...
 
-    def search_like(self, query: str | list[str], limit: int) -> list[int]: ...
-
-    def get_content(self, rowid: int) -> str | None: ...
+    def search_like(
+        self,
+        query: str | list[str],
+        limit: int,
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+    ) -> list[int]: ...
 
     def get_text(self, rowid: int) -> str | None: ...
-
-    def id_to_content(self) -> dict[int, str]: ...
 
     def clear(self, *, commit: bool = False) -> None: ...
 

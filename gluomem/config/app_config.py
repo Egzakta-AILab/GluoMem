@@ -15,6 +15,8 @@ from pydantic_settings import (
     SettingsConfigDict,
 )
 
+from gluomem.storage.scope import FrameSource  # noqa: TC001 - pydantic resolves it at runtime
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -246,8 +248,8 @@ def _default_scoring_profiles() -> dict[str, ScoringProfile]:
 
 
 class ScoringConfig(BaseModel):
-    half_life_days: int = 30
-    flat_boost_days: int = 7
+    half_life_days: float = 30
+    flat_boost_days: float = 7
     log_coef: float = 0.1
     bfs_steps: list[float] = Field(
         default_factory=lambda: [1.0, 0.7, 0.4, 0.2, 0.0]
@@ -358,20 +360,33 @@ class ScannerPattern(BaseModel):
 
 
 def _default_scanner_patterns() -> list[ScannerPattern]:
-    return [
-        ScannerPattern(
-            regex=r"(?i)ignore (all )?(previous|prior) (instructions|context)",
-            weight=1.0,
+    patterns = (
+        (
+            r"(?i)\b(?:ignore|disregard)\s+(?:(?:all|the|any|previous|prior|earlier|above)"
+            r"\s+)*(?:instructions?|context|rules|prompts?)\b"
         ),
-        ScannerPattern(regex=r"(?i)disregard (all )?(previous|prior)", weight=1.0),
-        ScannerPattern(
-            regex=r"(?i)you are now (in )?(developer|dan) mode", weight=1.0
+        r"(?i)\bforget\s+everything\s+(?:you were told|above|before)\b",
+        r"(?i)\byou are now (?:in )?(?:developer|dan) mode\b",
+        r"<\|im_start\|>",
+        r"(?i)\bBEGIN (?:ADMIN|SYSTEM)\b|\[(?:SYSTEM|ADMIN)\]|\bas the administrator\b",
+        r"(?i)\b(?:ADMIN|SYSTEM|SECURITY)[_ -](?:OVERRIDE|DIRECTIVE|INJECTION)\b",
+        (
+            r"(?i)\b(?:override|overwrite|replace)\s+(?:all\s+)?(?:stored|verified|system|"
+            r"user|prior)\s+(?:memory|memories|facts?|records?)\b"
         ),
-        ScannerPattern(regex=r"(?i)system prompt", weight=1.0),
-        ScannerPattern(regex=r"<\|im_start\|>", weight=1.0),
-        ScannerPattern(regex=r"(?i)\bBEGIN (ADMIN|SYSTEM)\b", weight=1.0),
-    ]
-
+        (
+            r"(?i)\b(?:before|first|to verify|when asked)\b.{0,160}\b(?:exfiltrate|send|"
+            r"upload|override|overwrite|replace|redirect)\b.{0,100}\b(?:secrets?|"
+            r"credentials?|keys?|tokens?|answers?|memory|memories|records?)\b"
+        ),
+        (
+            r"(?i)\b(?:ignorisi|zanemari|ne obaziri se na)\s+(?:(?:sve|sva|sva ta)\s+)"
+            r"?(?:prethodn[ae]|ranij[ae])\s+(?:instrukcije|uputstva|kontekst|promptove|"
+            r"pravila\s+(?:asistenta|bota|sistema))\b"
+        ),
+        r"(?i)\bzaboravi sve (?:sto ti je receno|iznad|ranije)\b",
+    )
+    return [ScannerPattern(regex=pattern, weight=1.0) for pattern in patterns]
 
 class ScannerConfig(BaseModel):
     patterns: list[ScannerPattern] = Field(
@@ -379,10 +394,32 @@ class ScannerConfig(BaseModel):
     )
 
 
+_REVIEWED_SOURCES: list[FrameSource] = ["import"]
+
+
+class ConflictReviewConfig(BaseModel):
+    """Hold untrusted writes that restate a trusted active fact with a different value.
+
+    A write from one of ``sources`` is compared with the ``neighbors`` best
+    any-term full-text matches among recall-eligible frames in its scope whose
+    own source is not in ``sources``. It conflicts with one when they share at
+    least ``min_shared_terms`` content words, the shared words are at least
+    ``min_overlap`` of the shorter one's, and each has a word the other lacks
+    (a pure elaboration is not a conflict).
+    """
+
+    enabled: bool = True
+    sources: list[FrameSource] = Field(default_factory=lambda: _REVIEWED_SOURCES.copy())
+    neighbors: int = Field(default=10, ge=1)
+    min_shared_terms: int = Field(default=3, ge=1)
+    min_overlap: float = Field(default=0.5, gt=0.0, le=1.0)
+
+
 class SafetyConfig(BaseModel):
     block_threshold: float = 0.7
     fail_mode: str = "quarantine"
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
+    conflict_review: ConflictReviewConfig = Field(default_factory=ConflictReviewConfig)
 
 
 class CompactionConfig(BaseModel):
@@ -690,6 +727,11 @@ _PYDANTIC_DEFAULTS: dict[str, Any] = {
 }
 
 
+class LifecycleConfig(BaseModel):
+    episode_ttl_days: int = Field(default=90, ge=1)
+    review_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
+
+
 class AppConfig(BaseSettings):
     """Root typed config tree (pydantic-settings v2)."""
 
@@ -705,6 +747,7 @@ class AppConfig(BaseSettings):
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     components: ComponentsConfig = Field(default_factory=ComponentsConfig)
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
+    lifecycle: LifecycleConfig = Field(default_factory=LifecycleConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     kg: KgConfig = Field(default_factory=KgConfig)

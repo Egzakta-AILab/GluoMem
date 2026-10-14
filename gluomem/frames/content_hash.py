@@ -13,3 +13,14 @@ def content_hash(text: str) -> str:
     """
     normalized = " ".join(text.split())
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def suppression_key(text: str) -> str:
+    """Hash case/punctuation variants; paraphrases are not suppressed."""
+    import unicodedata
+
+    from gluomem.search.multilingual import fold_to_ascii
+
+    folded = fold_to_ascii(text).casefold()
+    folded = "".join(c for c in folded if not unicodedata.category(c).startswith("P"))
+    return content_hash(folded)

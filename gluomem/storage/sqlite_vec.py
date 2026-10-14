@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Sequence
+from contextlib import nullcontext
 
 import numpy as np
 
@@ -12,10 +13,15 @@ from gluomem.storage.backend import (
     VectorStore,
     assert_dim,
 )
-
-_ALLOWED_TABLES: frozenset[str] = frozenset(
-    {"memory_frames_vec", "memory_frame_chunks_vec"}
+from gluomem.storage.scope import (
+    MemoryScope,
+    eligible_sql,
+    resolve_scope,
+    scope_sql,
 )
+from gluomem.timeutil import now_iso as format_now_iso
+
+_ALLOWED_TABLES: frozenset[str] = frozenset({"memory_frames_vec", "memory_frame_chunks_vec"})
 
 
 class SqliteVecStore:
@@ -33,59 +39,47 @@ class SqliteVecStore:
         self.dim: int = dim
 
     def add(self, rowid: int, vec: np.ndarray, *, commit: bool = True) -> None:
-        rid = int(rowid)
-        f32 = assert_dim(vec, self.dim)
-        blob = f32.tobytes()
-        if commit:
-            with self._conn:
-                self._conn.execute(f"DELETE FROM {self.table} WHERE rowid = {rid}")
-                self._conn.execute(
-                    f"INSERT INTO {self.table}(rowid, embedding) VALUES ({rid}, ?)",
-                    (blob,),
-                )
-        else:
-            self._conn.execute(f"DELETE FROM {self.table} WHERE rowid = {rid}")
-            self._conn.execute(
-                f"INSERT INTO {self.table}(rowid, embedding) VALUES ({rid}, ?)",
-                (blob,),
-            )
+        self.add_batch([(rowid, vec)], commit=commit)
 
-    def add_batch(
-        self, items: list[tuple[int, np.ndarray]], *, commit: bool = True
-    ) -> None:
+    def add_batch(self, items: list[tuple[int, np.ndarray]], *, commit: bool = True) -> None:
         if not items:
             return
-        prepared: list[tuple[int, bytes]] = []
-        for rowid, vec in items:
-            rid = int(rowid)
-            f32 = assert_dim(vec, self.dim)
-            prepared.append((rid, f32.tobytes()))
-        if commit:
-            with self._conn:
-                for rid, blob in prepared:
-                    self._conn.execute(f"DELETE FROM {self.table} WHERE rowid = {rid}")
-                    self._conn.execute(
-                        f"INSERT INTO {self.table}(rowid, embedding) VALUES ({rid}, ?)",
-                        (blob,),
-                    )
-        else:
+        prepared = [(int(rowid), assert_dim(vec, self.dim).tobytes()) for rowid, vec in items]
+        with self._conn if commit else nullcontext():
             for rid, blob in prepared:
                 self._conn.execute(f"DELETE FROM {self.table} WHERE rowid = {rid}")
                 self._conn.execute(
-                    f"INSERT INTO {self.table}(rowid, embedding) VALUES ({rid}, ?)",
-                    (blob,),
+                    f"INSERT INTO {self.table}(rowid, embedding) VALUES ({rid}, ?)", (blob,)
                 )
 
-    def search(self, query: np.ndarray, k: int) -> list[tuple[int, float]]:
+    def search(
+        self,
+        query: np.ndarray,
+        k: int,
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+    ) -> list[tuple[int, float]]:
         if k <= 0:
             return []
         f32 = assert_dim(query, self.dim)
         blob = f32.tobytes()
-        rows = self._conn.execute(
-            f"SELECT rowid, distance FROM {self.table} "
-            f"WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-            (blob, int(k)),
-        ).fetchall()
+        eff_scope = resolve_scope(scope)
+        eff_now = format_now_iso(now_iso)
+        if self.table == "memory_frames_vec":
+            join = "JOIN memory_frames_vec v ON v.rowid = m.id"
+        else:
+            join = (
+                "JOIN memory_frame_chunks c ON c.frame_id = m.id "
+                "JOIN memory_frame_chunks_vec v ON v.rowid = c.id"
+            )
+        sql = (
+            "SELECT v.rowid AS rowid, vec_distance_L2(v.embedding, ?) AS distance "
+            f"FROM memory_frames m {join} "
+            f"WHERE {scope_sql('m')} AND {eligible_sql('m')} "
+            "ORDER BY distance ASC, v.rowid ASC LIMIT ?"
+        )
+        rows = self._conn.execute(sql, (blob, *eff_scope.as_tuple(), eff_now, int(k))).fetchall()
         return [(int(r[0]), float(r[1])) for r in rows]
 
     def delete(self, rowid: int, *, commit: bool = True) -> None:

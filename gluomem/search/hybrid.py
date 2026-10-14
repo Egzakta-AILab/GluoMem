@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from gluomem.config.app_config import (
     AppConfig,
-    ProfileWeights,
     reranker_calibration_id,
 )
 from gluomem.embedding.base import Embedder
@@ -18,12 +16,20 @@ from gluomem.frames.eligibility import is_recall_eligible
 from gluomem.frames.store import Frame, FrameStore
 from gluomem.kg.graph import KnowledgeGraph
 from gluomem.search.sanitize import sanitize
-from gluomem.search.scoring import relevance
+from gluomem.search.scoring import relevance, rrf
 from gluomem.storage.backend import FtsStore, VectorStore
 from gluomem.storage.db import MindDB
-from gluomem.timeutil import Clock, parse_utc, utc_key, utc_now
+from gluomem.storage.scope import MemoryScope, resolve_scope
+from gluomem.timeutil import Clock, now_iso, parse_utc, utc_key, utc_now
 
-__all__ = ["AbstentionDecision", "HybridSearch", "SearchHit", "SearchResult"]
+__all__ = [
+    "AbstentionDecision",
+    "CandidatePool",
+    "HybridSearch",
+    "SearchCandidate",
+    "SearchHit",
+    "SearchResult",
+]
 
 
 @dataclass
@@ -69,6 +75,28 @@ class SearchResult:
     abstention: AbstentionDecision | None = None
 
 
+@dataclass(frozen=True)
+class SearchCandidate:
+    """Eligible frame and raw features from the runtime retrieval lanes."""
+
+    frame: Frame
+    fts_rank: int | None
+    vec_rank: int | None
+    days_since_created: float
+    access_count: int
+    bfs_distance: int
+    importance_level: str
+
+
+@dataclass
+class CandidatePool:
+    """Raw candidates and lane diagnostics before fusion or reranking."""
+
+    rows: list[SearchCandidate]
+    lane_fetch: int
+    kg_lane_errors: int
+
+
 class HybridSearch:
     """Config-driven hybrid BM25 + vector search."""
 
@@ -82,12 +110,13 @@ class HybridSearch:
         reranker: Reranker | None = None,
         kg: KnowledgeGraph | None = None,
         clock: Clock | None = None,
+        scope: MemoryScope | None = None,
     ) -> None:
         self._db: MindDB = db
         self._clock: Clock = clock or utc_now
-        self._conn: sqlite3.Connection = db.conn
         self._store: FrameStore = store
         self._cfg: AppConfig = cfg
+        self._scope: MemoryScope = resolve_scope(scope) if scope is not None else store.scope
         if embedder is None:
             embedder = store.embedder
         elif embedder is not store.embedder:
@@ -105,6 +134,10 @@ class HybridSearch:
         self._frames_vec: VectorStore = db.frame_vec
         self._chunks_vec: VectorStore = db.chunk_vec
 
+    @property
+    def scope(self) -> MemoryScope:
+        return self._scope
+
     def search(
         self,
         query: str,
@@ -113,74 +146,44 @@ class HybridSearch:
         limit: int = 10,
         since: str | None = None,
         until: str | None = None,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
     ) -> SearchResult:
         """Run a hybrid BM25 + vector search and return a :class:`SearchResult`."""
         cfg = self._cfg
+        s = resolve_scope(scope, default=self._scope)
         prof_name = profile or cfg.search.default_profile
         weights = cfg.scoring.profiles[prof_name].weights
 
-        time_filter = since is not None or until is not None
-        mult = (
-            cfg.search.lane_fetch_time_mult
-            if time_filter
-            else cfg.search.lane_fetch_mult
+        now = parse_utc(now_iso) if now_iso is not None else self._clock()
+        pool = self.candidates(
+            query,
+            scope=s,
+            now=now,
+            limit=limit,
+            since=since,
+            until=until,
         )
-        lane_fetch = max(1, limit) * int(mult)
-
-        fts_ids = self._fts_lane(query, lane_fetch)
-        vec_ids = self._vec_lane(query, lane_fetch)
-
-        rrf_k = int(cfg.search.rrf_k)
-        rrf: dict[int, float] = {}
-        for rank, fid in enumerate(fts_ids):
-            rrf[fid] = rrf.get(fid, 0.0) + 1.0 / (rrf_k + rank)
-        for rank, fid in enumerate(vec_ids):
-            rrf[fid] = rrf.get(fid, 0.0) + 1.0 / (rrf_k + rank)
-
-        kg_lane_errors = 0
-        ctx_map: dict[int, int] = {}
-        if self._kg is not None:
-            try:
-                ctx_map = self._kg.contextual(
-                    query, cfg.kg, depth=cfg.scoring.bfs_depth
-                )
-            except Exception:
-                kg_lane_errors += 1
-                ctx_map = {}
-
-        beyond_depth = cfg.scoring.bfs_depth + 1
-        now = self._clock()
-
-        frames_by_id = self._store.get_frames(list(rrf.keys()))
         hits: list[SearchHit] = []
-        for fid, rrf_score in rrf.items():
-            frame = frames_by_id.get(fid)
-            if frame is None:
-                continue
-            if not is_recall_eligible(frame.trust):
-                continue
-            if not _event_time_in_range(frame.event_time, since, until):
-                continue
-            bfs_distance = ctx_map.get(fid, beyond_depth)
+        for row in pool.rows:
+            rrf_score = rrf(row.fts_rank, row.vec_rank, cfg.search.rrf_k)
             rel = relevance(
-                days_since_created=_days_since_created(frame.created_at, now),
-                access_count=frame.access_count,
-                bfs_distance=bfs_distance,
-                importance_level=frame.importance,
+                days_since_created=row.days_since_created,
+                access_count=row.access_count,
+                bfs_distance=row.bfs_distance,
+                importance_level=row.importance_level,
                 scoring=cfg.scoring,
                 weights=weights,
             )
             fused = rrf_score * rel
             hits.append(
-                SearchHit(
-                    frame=frame, rrf=rrf_score, relevance=rel, final=fused, fusion=fused
-                )
+                SearchHit(frame=row.frame, rrf=rrf_score, relevance=rel, final=fused, fusion=fused)
             )
 
         hits.sort(key=lambda h: (h.final, -h.frame.id), reverse=True)
 
         if cfg.search.rerank.enabled and self._reranker is not None and hits:
-            hits = self._rerank_pool(query, hits, weights)
+            hits = self._rerank_pool(query, hits)
 
         for i, h in enumerate(hits):
             h.rank = i
@@ -195,11 +198,64 @@ class HybridSearch:
         return SearchResult(
             hits=hits,
             abstained=abstained,
-            lane_fetch=lane_fetch,
+            lane_fetch=pool.lane_fetch,
             profile=prof_name,
-            kg_lane_errors=kg_lane_errors,
+            kg_lane_errors=pool.kg_lane_errors,
             abstention=decision,
         )
+
+    def candidates(
+        self,
+        query: str,
+        *,
+        scope: MemoryScope,
+        now: datetime,
+        lane_fetch: int | None = None,
+        limit: int = 10,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> CandidatePool:
+        """Retrieve raw features using runtime scope, eligibility and logical time."""
+        cfg = self._cfg
+        mult = (
+            cfg.search.lane_fetch_time_mult
+            if since is not None or until is not None
+            else cfg.search.lane_fetch_mult
+        )
+        fetch = lane_fetch if lane_fetch is not None else max(1, limit) * int(mult)
+        now_str = now_iso(now)
+        fts_ids = self._fts_lane(query, fetch, scope=scope, now_iso=now_str)
+        vec_ids = self._vec_lane(query, fetch, scope=scope, now_iso=now_str)
+        fts_ranks = {fid: rank for rank, fid in enumerate(fts_ids)}
+        vec_ranks = {fid: rank for rank, fid in enumerate(vec_ids)}
+        ids = list(dict.fromkeys([*fts_ids, *vec_ids]))
+        errors = 0
+        ctx: dict[int, int] = {}
+        if self._kg is not None:
+            try:
+                ctx = self._kg.contextual(query, cfg.kg, depth=cfg.scoring.bfs_depth, scope=scope)
+            except Exception:
+                errors += 1
+        frames = self._store.get_frames(ids, scope=scope)
+        rows = []
+        for fid in ids:
+            frame = frames.get(fid)
+            if frame is None or not is_recall_eligible(frame, now=now):
+                continue
+            if not _event_time_in_range(frame.event_time, since, until):
+                continue
+            rows.append(
+                SearchCandidate(
+                    frame,
+                    fts_ranks.get(fid),
+                    vec_ranks.get(fid),
+                    _days_since_created(frame.created_at, now),
+                    frame.access_count,
+                    ctx.get(fid, cfg.scoring.bfs_depth + 1),
+                    frame.importance,
+                )
+            )
+        return CandidatePool(rows, fetch, errors)
 
     def _abstention(self, hits: list[SearchHit], profile: str) -> AbstentionDecision:
         cfg = self._cfg
@@ -231,20 +287,36 @@ class HybridSearch:
             candidates=len(hits),
         )
 
-    def _fts_lane(self, query: str, lane_fetch: int) -> list[int]:
+    def _fts_lane(
+        self,
+        query: str,
+        lane_fetch: int,
+        *,
+        scope: MemoryScope,
+        now_iso: str | None = None,
+    ) -> list[int]:
         """BM25 lane: sanitize query and run FTS MATCH (with LIKE fallback)."""
+        s = resolve_scope(scope, default=self._scope)
         sanitized = sanitize(query)
         if not sanitized:
-            return self._fts.search_like(query, int(lane_fetch))
-        return self._fts.search(sanitized, int(lane_fetch))
+            return self._fts.search_like(query, int(lane_fetch), scope=s, now_iso=now_iso)
+        return self._fts.search(sanitized, int(lane_fetch), scope=s, now_iso=now_iso)
 
-    def _vec_lane(self, query: str, lane_fetch: int) -> list[int]:
+    def _vec_lane(
+        self,
+        query: str,
+        lane_fetch: int,
+        *,
+        scope: MemoryScope,
+        now_iso: str | None = None,
+    ) -> list[int]:
         """Vector lane: chunk-level KNN primary, whole-frame KNN fallback."""
+        s = resolve_scope(scope, default=self._scope)
         qvec = self._embedder.embed(query)
-        chunk_hits = self._chunks_vec.search(qvec, int(lane_fetch))
+        chunk_hits = self._chunks_vec.search(qvec, int(lane_fetch), scope=s, now_iso=now_iso)
         if chunk_hits:
             chunk_ids = [int(cid) for cid, _dist in chunk_hits]
-            chunk_to_frame = self._store.resolve_chunk_frames(chunk_ids)
+            chunk_to_frame = self._store.resolve_chunk_frames(chunk_ids, scope=s)
             ids: list[int] = []
             seen: set[int] = set()
             for cid in chunk_ids:
@@ -253,20 +325,25 @@ class HybridSearch:
                     seen.add(fid)
                     ids.append(fid)
             if ids:
-                return self._eligible(ids)
-        frame_hits = self._frames_vec.search(qvec, int(lane_fetch))
-        return self._eligible([int(fid) for fid, _dist in frame_hits])
+                return self._eligible(ids, scope=s, now_iso=now_iso)
+        frame_hits = self._frames_vec.search(qvec, int(lane_fetch), scope=s, now_iso=now_iso)
+        return self._eligible([int(fid) for fid, _dist in frame_hits], scope=s, now_iso=now_iso)
 
-    def _eligible(self, ids: list[int]) -> list[int]:
+    def _eligible(
+        self,
+        ids: list[int],
+        *,
+        scope: MemoryScope,
+        now_iso: str | None = None,
+    ) -> list[int]:
         """Drop recall-ineligible frame ids, preserving lane order."""
-        eligible = self._store.filter_eligible_ids(ids)
+        eligible = self._store.filter_eligible_ids(ids, scope=scope, now_iso=now_iso)
         return [fid for fid in ids if fid in eligible]
 
     def _rerank_pool(
         self,
         query: str,
         hits: list[SearchHit],
-        _weights: ProfileWeights,
     ) -> list[SearchHit]:
         """Rerank the top ``rerank.pool`` hits with the cross-encoder."""
         pool_size = int(self._cfg.search.rerank.pool)
@@ -294,9 +371,7 @@ def _days_since_created(created_at: str, now: datetime) -> float:
     return max(0.0, delta)
 
 
-def _event_time_in_range(
-    event_time: str | None, since: str | None, until: str | None
-) -> bool:
+def _event_time_in_range(event_time: str | None, since: str | None, until: str | None) -> bool:
     if since is None and until is None:
         return True
     if event_time is None:
