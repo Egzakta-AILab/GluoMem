@@ -17,7 +17,12 @@ from gluomem.search.multilingual import (
     fold_to_ascii,
 )
 from gluomem.storage.backend import assert_dim
-from gluomem.storage.scope import MemoryScope, resolve_scope
+from gluomem.storage.scope import (
+    MemoryScope,
+    eligible_sql,
+    resolve_scope,
+    scope_sql,
+)
 from gluomem.timeutil import now_utc_iso, utc_key
 
 _PG_SCHEMA_PATH: Path = Path(__file__).with_name("schema_postgres.sql")
@@ -243,37 +248,20 @@ class PgVectorStore:
         eff_scope = resolve_scope(scope)
         eff_now = utc_key(now_iso) if now_iso is not None else now_utc_iso()
         if self.table == "memory_frames_vec":
-            sql = (
-                "SELECT v.rowid AS rowid, (v.embedding <-> ?) AS distance "
-                "FROM memory_frames_vec v "
-                "JOIN memory_frames m ON m.id = v.rowid "
-                "WHERE m.tenant_id = ? AND m.principal_id = ? AND m.namespace = ? "
-                "AND m.status = 'active' AND m.trust != 'quarantined' "
-                "AND (m.pinned = 1 OR m.expires_at IS NULL OR REPLACE(m.expires_at, ' ', 'T') > ?) "
-                "ORDER BY v.embedding <-> ? ASC, v.rowid ASC LIMIT ?"
-            )
+            join = "FROM memory_frames_vec v JOIN memory_frames m ON m.id = v.rowid"
         else:
-            sql = (
-                "SELECT v.rowid AS rowid, (v.embedding <-> ?) AS distance "
+            join = (
                 "FROM memory_frame_chunks_vec v "
                 "JOIN memory_frame_chunks c ON c.id = v.rowid "
-                "JOIN memory_frames m ON m.id = c.frame_id "
-                "WHERE m.tenant_id = ? AND m.principal_id = ? AND m.namespace = ? "
-                "AND m.status = 'active' AND m.trust != 'quarantined' "
-                "AND (m.pinned = 1 OR m.expires_at IS NULL OR REPLACE(m.expires_at, ' ', 'T') > ?) "
-                "ORDER BY v.embedding <-> ? ASC, v.rowid ASC LIMIT ?"
+                "JOIN memory_frames m ON m.id = c.frame_id"
             )
+        sql = (
+            f"SELECT v.rowid AS rowid, (v.embedding <-> ?) AS distance {join} "
+            f"WHERE {scope_sql('m')} AND {eligible_sql('m')} "
+            "ORDER BY v.embedding <-> ? ASC, v.rowid ASC LIMIT ?"
+        )
         rows = self._backend.fetchall(
-            sql,
-            (
-                f32,
-                eff_scope.tenant_id,
-                eff_scope.principal_id,
-                eff_scope.namespace,
-                eff_now,
-                f32,
-                int(k),
-            ),
+            sql, (f32, *eff_scope.as_tuple(), eff_now, f32, int(k))
         )
         return [(int(r["rowid"]), float(r["distance"])) for r in rows]
 
@@ -368,17 +356,13 @@ class PgTsVectorStore:
             f"SELECT f.rowid AS rowid FROM memory_frames_fts f "
             f"JOIN memory_frames m ON m.id = f.rowid "
             f"WHERE f.tsv @@ {tsq_expr} "
-            f"AND m.tenant_id = ? AND m.principal_id = ? AND m.namespace = ? "
-            f"AND m.status = 'active' AND m.trust != 'quarantined' "
-            f"AND (m.pinned = 1 OR m.expires_at IS NULL OR REPLACE(m.expires_at, ' ', 'T') > ?) "
+            f"AND {scope_sql('m')} AND {eligible_sql('m')} "
             f"ORDER BY ts_rank_cd(f.tsv, {tsq_expr}) DESC, f.rowid ASC "
             f"LIMIT ?",
             (
                 folded_terms,
                 plain_terms,
-                eff_scope.tenant_id,
-                eff_scope.principal_id,
-                eff_scope.namespace,
+                *eff_scope.as_tuple(),
                 eff_now,
                 folded_terms,
                 plain_terms,
@@ -421,22 +405,10 @@ class PgTsVectorStore:
             params.extend([raw_pat, folded_pat])
 
         clauses = " AND ".join(clause_parts)
-        params.extend(
-            [
-                eff_scope.tenant_id,
-                eff_scope.principal_id,
-                eff_scope.namespace,
-                eff_now,
-                int(limit),
-            ]
-        )
+        params.extend([*eff_scope.as_tuple(), eff_now, int(limit)])
         rows = self._backend.fetchall(
-            f"SELECT id FROM memory_frames "
-            f"WHERE {clauses} "
-            f"AND tenant_id = ? AND principal_id = ? AND namespace = ? "
-            f"AND status = 'active' AND trust != 'quarantined' "
-            f"AND (pinned = 1 OR expires_at IS NULL OR REPLACE(expires_at, ' ', 'T') > ?) "
-            f"ORDER BY id ASC LIMIT ?",
+            f"SELECT id FROM memory_frames WHERE {clauses} "
+            f"AND {scope_sql()} AND {eligible_sql()} ORDER BY id ASC LIMIT ?",
             params,
         )
         return [int(r["id"]) for r in rows]

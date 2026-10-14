@@ -15,7 +15,12 @@ from gluomem.search.multilingual import (
     fold_multilingual_text,
     fold_to_ascii,
 )
-from gluomem.storage.scope import MemoryScope, resolve_scope
+from gluomem.storage.scope import (
+    MemoryScope,
+    eligible_sql,
+    resolve_scope,
+    scope_sql,
+)
 from gluomem.timeutil import now_utc_iso, utc_key
 
 _SCHEMA_PATH: Path = Path(__file__).with_name("schema.sql")
@@ -273,19 +278,10 @@ class SqliteFts5Store:
             rows = self._backend.fetchall(
                 "SELECT f.rowid AS rowid FROM memory_frames_fts f "
                 "JOIN memory_frames m ON m.id = f.rowid "
-                "WHERE memory_frames_fts MATCH ? "
-                "AND m.tenant_id = ? AND m.principal_id = ? AND m.namespace = ? "
-                "AND m.status = 'active' AND m.trust != 'quarantined' "
-                "AND (m.pinned = 1 OR m.expires_at IS NULL OR REPLACE(m.expires_at, ' ', 'T') > ?) "
+                f"WHERE memory_frames_fts MATCH ? AND {scope_sql('m')} "
+                f"AND {eligible_sql('m')} "
                 "ORDER BY f.rank, f.rowid ASC LIMIT ?",
-                (
-                    match_expr,
-                    eff_scope.tenant_id,
-                    eff_scope.principal_id,
-                    eff_scope.namespace,
-                    eff_now,
-                    int(limit),
-                ),
+                (match_expr, *eff_scope.as_tuple(), eff_now, int(limit)),
             )
         except sqlite3.OperationalError:
             return []
@@ -325,22 +321,10 @@ class SqliteFts5Store:
             params.extend([raw_pat, folded_pat])
 
         clauses = " AND ".join(clause_parts)
-        params.extend(
-            [
-                eff_scope.tenant_id,
-                eff_scope.principal_id,
-                eff_scope.namespace,
-                eff_now,
-                int(limit),
-            ]
-        )
+        params.extend([*eff_scope.as_tuple(), eff_now, int(limit)])
         rows = self._backend.fetchall(
-            f"SELECT id FROM memory_frames "
-            f"WHERE {clauses} "
-            f"AND tenant_id = ? AND principal_id = ? AND namespace = ? "
-            f"AND status = 'active' AND trust != 'quarantined' "
-            f"AND (pinned = 1 OR expires_at IS NULL OR REPLACE(expires_at, ' ', 'T') > ?) "
-            f"ORDER BY id ASC LIMIT ?",
+            f"SELECT id FROM memory_frames WHERE {clauses} "
+            f"AND {scope_sql()} AND {eligible_sql()} ORDER BY id ASC LIMIT ?",
             params,
         )
         return [int(r["id"]) for r in rows]

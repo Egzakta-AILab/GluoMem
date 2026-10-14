@@ -60,6 +60,22 @@ class MemoryScope:
 DEFAULT_SCOPE = MemoryScope("local", "default", "personal")
 
 
+def scope_sql(alias: str = "") -> str:
+    """Predicate matching one scope; bind with ``*scope.as_tuple()``."""
+    p = f"{alias}." if alias else ""
+    return f"{p}tenant_id = ? AND {p}principal_id = ? AND {p}namespace = ?"
+
+
+def eligible_sql(alias: str = "") -> str:
+    """SQL form of ``is_recall_eligible``; binds one ``utc_key`` "now" parameter."""
+    p = f"{alias}." if alias else ""
+    return (
+        f"{p}status = 'active' AND {p}trust != 'quarantined' "
+        f"AND ({p}pinned = 1 OR {p}expires_at IS NULL "
+        f"OR REPLACE({p}expires_at, ' ', 'T') > ?)"
+    )
+
+
 def resolve_scope(
     scope: MemoryScope | None = None,
     *,

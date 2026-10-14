@@ -12,7 +12,12 @@ from gluomem.storage.backend import (
     VectorStore,
     assert_dim,
 )
-from gluomem.storage.scope import MemoryScope, resolve_scope
+from gluomem.storage.scope import (
+    MemoryScope,
+    eligible_sql,
+    resolve_scope,
+    scope_sql,
+)
 from gluomem.timeutil import now_utc_iso, utc_key
 
 _ALLOWED_TABLES: frozenset[str] = frozenset(
@@ -110,36 +115,20 @@ class SqliteVecStore:
         eff_scope = resolve_scope(scope)
         eff_now = utc_key(now_iso) if now_iso is not None else now_utc_iso()
         if self.table == "memory_frames_vec":
-            sql = (
-                "SELECT v.rowid AS rowid, vec_distance_L2(v.embedding, ?) AS distance "
-                "FROM memory_frames m "
-                "JOIN memory_frames_vec v ON v.rowid = m.id "
-                "WHERE m.tenant_id = ? AND m.principal_id = ? AND m.namespace = ? "
-                "AND m.status = 'active' AND m.trust != 'quarantined' "
-                "AND (m.pinned = 1 OR m.expires_at IS NULL OR REPLACE(m.expires_at, ' ', 'T') > ?) "
-                "ORDER BY distance ASC, v.rowid ASC LIMIT ?"
-            )
+            join = "JOIN memory_frames_vec v ON v.rowid = m.id"
         else:
-            sql = (
-                "SELECT v.rowid AS rowid, vec_distance_L2(v.embedding, ?) AS distance "
-                "FROM memory_frames m "
+            join = (
                 "JOIN memory_frame_chunks c ON c.frame_id = m.id "
-                "JOIN memory_frame_chunks_vec v ON v.rowid = c.id "
-                "WHERE m.tenant_id = ? AND m.principal_id = ? AND m.namespace = ? "
-                "AND m.status = 'active' AND m.trust != 'quarantined' "
-                "AND (m.pinned = 1 OR m.expires_at IS NULL OR REPLACE(m.expires_at, ' ', 'T') > ?) "
-                "ORDER BY distance ASC, v.rowid ASC LIMIT ?"
+                "JOIN memory_frame_chunks_vec v ON v.rowid = c.id"
             )
+        sql = (
+            "SELECT v.rowid AS rowid, vec_distance_L2(v.embedding, ?) AS distance "
+            f"FROM memory_frames m {join} "
+            f"WHERE {scope_sql('m')} AND {eligible_sql('m')} "
+            "ORDER BY distance ASC, v.rowid ASC LIMIT ?"
+        )
         rows = self._conn.execute(
-            sql,
-            (
-                blob,
-                eff_scope.tenant_id,
-                eff_scope.principal_id,
-                eff_scope.namespace,
-                eff_now,
-                int(k),
-            ),
+            sql, (blob, *eff_scope.as_tuple(), eff_now, int(k))
         ).fetchall()
         return [(int(r[0]), float(r[1])) for r in rows]
 

@@ -15,7 +15,6 @@ from gluomem.embedding.chunker import Chunk, chunk
 from gluomem.embedding.compat import bind_embedder, write_fingerprint
 from gluomem.embedding.fingerprint import EmbedderFingerprint, fingerprint_of
 from gluomem.frames.content_hash import content_hash
-from gluomem.frames.eligibility import ELIGIBLE_TRUST
 from gluomem.frames.sessions import get_or_create_session
 from gluomem.storage.db import MindDB
 from gluomem.storage.scope import (
@@ -23,6 +22,8 @@ from gluomem.storage.scope import (
     FrameStatus,
     MemoryKind,
     MemoryScope,
+    eligible_sql,
+    scope_sql,
 )
 from gluomem.timeutil import now_utc_iso, to_storage, utc_key
 
@@ -615,22 +616,10 @@ class FrameStore:
         eff_scope = self._eff_scope(scope)
         eff_now = utc_key(now_iso) if now_iso is not None else now_utc_iso()
         id_marks = ",".join("?" * len(ids))
-        trust_marks = ",".join("?" * len(ELIGIBLE_TRUST))
         rows = self._backend.fetchall(
-            f"SELECT id FROM memory_frames "
-            f"WHERE id IN ({id_marks}) "
-            f"AND tenant_id = ? AND principal_id = ? AND namespace = ? "
-            f"AND status = 'active' "
-            f"AND trust IN ({trust_marks}) "
-            f"AND (expires_at IS NULL OR REPLACE(expires_at, ' ', 'T') > ?)",
-            [
-                *ids,
-                eff_scope.tenant_id,
-                eff_scope.principal_id,
-                eff_scope.namespace,
-                *ELIGIBLE_TRUST,
-                eff_now,
-            ],
+            f"SELECT id FROM memory_frames WHERE id IN ({id_marks}) "
+            f"AND {scope_sql()} AND {eligible_sql()}",
+            [*ids, *eff_scope.as_tuple(), eff_now],
         )
         return {int(r["id"]) for r in rows}
 
@@ -769,18 +758,8 @@ class FrameStore:
         """Return ``(latest_i_frame, p_frames_since_latest_i)`` for ``(scope, gop)``."""
         eff_scope = self._eff_scope(scope)
         eff_now = utc_key(now_iso) if now_iso is not None else now_utc_iso()
-        elig_clause = (
-            ""
-            if include_ineligible
-            else (
-                f" AND status = 'active'"
-                f" AND trust IN ({','.join('?' * len(ELIGIBLE_TRUST))})"
-                f" AND (pinned = 1 OR expires_at IS NULL OR REPLACE(expires_at, ' ', 'T') > ?)"
-            )
-        )
-        elig_params: tuple[str, ...] = (
-            () if include_ineligible else (*ELIGIBLE_TRUST, eff_now)
-        )
+        elig_clause = "" if include_ineligible else f" AND {eligible_sql()}"
+        elig_params: tuple[str, ...] = () if include_ineligible else (eff_now,)
         i_row = self._backend.fetchone(
             f"SELECT {_COLUMNS} FROM memory_frames "
             f"WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "

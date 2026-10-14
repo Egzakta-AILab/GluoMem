@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from gluomem.storage.scope import eligible_sql
 from gluomem.timeutil import now_utc_iso, utc_key
 
 if TYPE_CHECKING:
@@ -19,6 +20,7 @@ __all__ = [
     "RECALL_INELIGIBLE_TRUST",
     "TRUST_RANK",
     "can_merge_into",
+    "eligible_sql",
     "is_recall_eligible",
 ]
 
