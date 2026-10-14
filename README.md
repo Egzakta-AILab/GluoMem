@@ -2,7 +2,7 @@
 
 **The binding layer.** In particle physics, gluons bind quarks into stable matter. GluoMem binds an agent's scattered observations into queryable memory. It is a configurable agentic-memory core paired with a benchmark harness for measuring which memory mechanisms improve retrieval and answer quality.
 
-GluoMem is a research-stage Python library (version 0.0.1). It runs locally against a single SQLite file per memory store. It is not a service: there is no HTTP API, no authentication, and no tenant, workspace or access-control model. The `source` values `personal`, `workspace` and `team_sync` are provenance labels on a frame, not authorization boundaries.
+GluoMem is a research-stage Python library (version 0.0.1). Embedded use runs against a single SQLite file per memory store. An optional HTTP service and worker run against SQLite or PostgreSQL 18 with pgvector. Every stored row belongs to a `MemoryScope` (`tenant_id`, `principal_id`, `namespace`); the service authenticates callers with one shared bearer key and takes the scope from request headers. It has no per-user identity or RBAC, so the host application is responsible for deciding which scope a caller may use. The `source` values `personal`, `workspace` and `team_sync` are provenance labels on a frame, not authorization boundaries.
 
 ## What is implemented
 
@@ -13,13 +13,17 @@ GluoMem is a research-stage Python library (version 0.0.1). It runs locally agai
 - **DSPy write path**: typed extraction behind an `Extractors` protocol, with deterministic fake extractors for offline tests, an admission gate (regex injection scanner, quarantine or reject), and an extraction cache. Quarantined frames are kept for inspection by id but excluded from search, current-state reads, graph linking and compaction ([eligibility rule](./gluomem/frames/eligibility.py)).
 - **Benchmark harness**: LoCoMo and LongMemEval (S and oracle) adapters, full-context, BM25 and vector-RAG baselines, an optional mem0 comparison, judge panels, protocol tags, offline rescore of a run directory, and usage accounting. A versioned [benchmark registry](./gluomem/bench/registry.py) records each protocol's source ancestry, native or adapted scorer, logical clock, split grouping, rights and readiness; scores from different protocols never aggregate, and overlapping sources (MemoryAgentBench reuses LongMemEval) are flagged. Every run writes `denominators.json`: an answerable sample with nothing retrieved scores zero, failures and timeouts stay in the denominator, and samples where retrieval does not apply are counted separately. `gluomem bench replay` replays a generated MemoryAgentBench-shaped fixture in event order into isolated stores and writes a reproducible receipt; it is a protocol test, not an official MemoryAgentBench result.
 - **Fail-closed components**: each embedder, reranker and LLM backend is built from the provider its config names, or construction raises; nothing falls back to the mock embedder. Test doubles (`provider: fake` embedders, `fake` backends) need `components.allow_fake: true`. A `.mind` file records the fingerprint of the embedder that wrote its vectors (implementation, model, revision, dim, preprocessing, index schema) and rejects any other embedder before reading or writing a vector. `gluomem components` prints the effective components and their readiness without secrets; `gluomem index rebuild` and `gluomem index adopt` are the explicit ways to change or record a file's embedder.
+- **Scoped storage**: scope and recall eligibility are pushed into every vector, full-text and LIKE query before `LIMIT`, so one scope's rows never fill another scope's top-k. PostgreSQL uses HNSW with iterative scans so filtered searches still return k rows. The Postgres schema is SQLAlchemy metadata in [pg_schema.py](./gluomem/storage/pg_schema.py) with Alembic revisions generated from it (`gluomem migrate upgrade|downgrade|current|heads|revision --autogenerate`); a backend refuses to open a database that is not at the head revision.
+- **Memory lifecycle**: frames carry a kind (`fact`, `profile`, `preference`, `decision`, `procedure`, `episode`, `correction`, `summary`) and a status (`candidate`, `active`, `superseded`, `expired`, `forgotten`, `tombstoned`). Source events are idempotent per `(event_id, revision)`, and a reused key with a different payload is a conflict. Low-confidence writes become review candidates (`lifecycle.review_threshold`), and episodes expire after `lifecycle.episode_ttl_days`. Correct, forget and retract-source scrub the old plaintext from frames, indexes, stored event payloads, queued jobs and orphaned graph rows, then record a suppression key so a replay of the same content stays forgotten. Each of these bumps the scope generation.
+- **Service and worker** (`gluomem[service]`): `gluomem serve` exposes `/v1/events`, `/v1/memories:recall`, memory listing, lineage, review, correct, forget, source retraction, export, job status and `/v1/status`; `/healthz` and `/readyz` are unauthenticated and minimal. `gluomem worker` processes durable jobs with leases, retries and dead-lettering. A job leased before a forget or correction is re-run at the new scope generation instead of writing stale data. `gluomem[client]` provides `GluoMemClient` and `AsyncGluoMemClient`.
+- **Offline tuning** (`gluomem[tune]`): `gluomem tune` builds a candidate cache once and searches scoring parameters with seeded Optuna TPE, scoring only on a held-out query split (`--held-out-fraction`). `gluomem ablate` reports per-signal and per-lane ablations over the same cache. Neither makes model calls after the cache is built.
 - **Configuration**: one typed config tree (`pydantic-settings`, `GLUOMEM_` prefix). Precedence is `Pydantic defaults < env < with_overrides()`.
 
 ## What is not implemented
 
-- **Offline numeric tuning.** The tuning design in [DESIGN.md §9](./DESIGN.md#9-tuning-subsystem) is a plan; `gluomem tune` and `gluomem ablate` exit with "not implemented".
+- **Tier-2 tuning.** Tuning ranks by retrieval metrics only. Promoting the best configurations to an end-to-end judged QA run ([DESIGN.md §9](./DESIGN.md#9-tuning-subsystem)) is not implemented.
 - **Prompt optimization runs.** Fact and event extraction now have a frozen, source-backed objective ([extraction_eval](./gluomem/llm/extraction_eval.py)): unsupported facts score zero, and wrong subject, lost negation, a plan recorded as done and a superseded state presented as current are reported as separate errors with feedback. Its fixture is nine authored cases, which is enough to test the scorer, not to measure model quality. `make optimize-prompts` (MIPROv2) spends real tokens, is never run automatically, and refuses extraction trainsets that do not reference annotated, non-sealed cases. The [campaign contract](./gluomem/llm/fixtures/campaign_v1.json) for baseline, MIPROv2 and GEPA comparisons is defined but unrun and unauthorized; other tasks still use a parse-or-exact-match metric.
-- **Service features**: HTTP or MCP API, multi-user identity, tenants, workspaces, RBAC, durable jobs, deployment packaging.
+- **Service features**: MCP API, per-user identity, RBAC, deployment packaging.
 
 ## Evidence status
 
@@ -34,8 +38,11 @@ The core package is small. Model-backed components are optional extras. When a c
 | `gluomem` (core) | Config, SQLite storage, I/P/B frames, hybrid search, KG, fake extractors, mock embedder | Works offline; real embedding, reranking and DSPy extraction raise `MissingExtraError` |
 | `gluomem[llm]` | DSPy >= 3.4.1: extraction, answerer, judges, prompt optimization | Needs `OPENROUTER_API_KEY` at call time; calls are paid |
 | `gluomem[embeddings]` | sentence-transformers MiniLM embedder and cross-encoder reranker | Downloads models from Hugging Face on first use |
-| `gluomem[postgres]` | `psycopg` and `pgvector` for PostgreSQL/pgvector storage backend | Connects via `storage.backend: postgres` and `storage.dsn` |
-| `gluomem[all]` | `llm`, `embeddings`, and `postgres` | All of the above |
+| `gluomem[postgres]` | `psycopg`, `pgvector`, Alembic and SQLAlchemy for the PostgreSQL backend | Connects via `storage.backend: postgres` and `storage.dsn`; run `gluomem migrate upgrade` first |
+| `gluomem[tune]` | Optuna for `gluomem tune` | Offline; no model calls after the candidate cache is built |
+| `gluomem[service]` | FastAPI, uvicorn and httpx for `gluomem serve` and `gluomem worker` | Needs a service key in `GLUOMEM_SERVICE_KEY` or `--service-key-file` |
+| `gluomem[client]` | httpx for the `gluomem.client` SDK | Talks to a running service |
+| `gluomem[all]` | `postgres`, `llm`, `embeddings`, `tune` and `service` | All of the above |
 
 `gluomem.extras.status()` reports which extras are installed without importing or downloading anything.
 
@@ -48,10 +55,10 @@ make install             # uv sync --locked --extra all (full development enviro
 # or: make install-offline  (uv sync --locked --extra llm; enough for make check, no torch)
 make check               # ruff lint + pyrefly type check + offline tests
 make wheel-check         # build the wheel, install it core-only outside the checkout, write and read
-uv run gluomem --help    # CLI: ingest, components, index rebuild|adopt, bench run|rescore|gate|sample|fetch|ingest|verify|replay|registry
+uv run gluomem --help    # CLI: ingest, components, index, bench, tune, ablate, migrate, serve, worker
 ```
 
-CI (`.github/workflows/ci.yml`) runs `make check` on Python 3.11, 3.12 and 3.13 and `make wheel-check` on every pull request. Slow tests that download models run only when the workflow is dispatched manually with `run_model_tests`.
+CI (`.github/workflows/ci.yml`) runs `make check` and `make wheel-check` on Python 3.11, 3.12 and 3.13 on every pull request, plus the live PostgreSQL tests (`pytest -m postgres`) against a pgvector PG18 service container. Locally those tests skip unless `GLUOMEM_TEST_PG_DSN` points at a database where they may create and drop schemas. Slow tests that download models run only when the workflow is dispatched manually with `run_model_tests`.
 
 Deterministic ingest of a bundled synthetic fixture, using the fake extractors and mock embeddings (test doubles, so they need an explicit opt-in):
 
@@ -71,13 +78,14 @@ Optional: `make hooks` installs the pre-commit (lint and type check) and pre-pus
 
 ## Repository boundary
 
-This repository holds the memory library, its CLI and the evaluation harness. It does not contain a service, client SDKs, assistant adapters or KVARK integration code. Those are planned as separate work that uses this library.
+This repository holds the memory library, its CLI, the HTTP service and worker, the Python client SDK and the evaluation harness. It does not contain assistant adapters or KVARK integration code. Those are planned as separate work that uses this library.
 
 ## Documents
 
 1. **[SPEC.md](./SPEC.md)** — original research specification: purpose, scope, requirements, acceptance criteria.
-2. **[DESIGN.md](./DESIGN.md)** — architecture, schema, layers, config system, DSPy layer, planned tuning engine, harness.
-3. **[docs/research/](./docs/research/README.md)** — archived experimental plan and historical benchmark reports.
+2. **[DESIGN.md](./DESIGN.md)** — architecture, schema, layers, config system, DSPy layer, tuning engine, harness.
+3. **[CONTEXT.md](./CONTEXT.md)** — domain terms, code mapping and architectural decisions.
+4. **[docs/research/](./docs/research/README.md)** — archived experimental plan and historical benchmark reports.
 
 ## License
 

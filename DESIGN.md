@@ -2,7 +2,7 @@
 
 > Companion to `SPEC.md` and [`docs/research/PAPER.md`](./docs/research/PAPER.md). Scope is the memory package plus evaluation; production surfaces are out of scope (§11).
 
-> **Implementation status (2026-10-13, version 0.0.1).** The tuning engine (§9, `tune/` in the layout below, the `tune` and `ablate` commands) is designed but not implemented. `storage/vector_store.py` and `search/abstain.py` do not exist as separate modules; the only vector store is `SqliteVecStore` in `storage/sqlite_vec.py`, and abstention lives in `search/hybrid.py`. The `experiments/` run directories were never published. The README lists current scope and known limitations.
+> **Implementation status (2026-10-14, version 0.0.1).** Tier-1 tuning (§9) and the `tune` and `ablate` commands are implemented; Tier-2 promotion and LambdaMART are not. Abstention lives in `search/hybrid.py`. Vector stores are `SqliteVecStore` (`storage/sqlite_vec.py`) and the pgvector HNSW store (`storage/postgres_backend.py`). The multi-principal service, worker and lifecycle (scope isolation, correct, forget, retract, review) are described in the README and `CONTEXT.md`. The `experiments/` run directories were never published. The README lists current scope and known limitations.
 
 ---
 
@@ -30,19 +30,25 @@
 ```
 gluomem/
   config/    app_config.py  registry.py
-  storage/   schema.sql  schema_postgres.sql  db.py  backend.py  vector_store.py  fts_store.py  sqlite_vec.py  postgres.py
-  frames/    store.py  sessions.py  content_hash.py  compaction.py        # I/P/B
+  storage/   schema.sql  pg_schema.py  db.py  backend.py  scope.py  like.py  sqlite_backend.py  sqlite_vec.py
+             postgres_backend.py
+  migrations/ env.py  runner.py  script.py.mako  versions/                 # Alembic, PostgreSQL only
+  frames/    store.py  sessions.py  content_hash.py  compaction.py  eligibility.py  lifecycle.py
+             review.py  provenance.py  expiry.py  generation.py           # I/P/B + lifecycle
   embedding/ base.py  providers.py  chunker.py  reranker.py  fingerprint.py  compat.py
-  search/    hybrid.py  scoring.py  sanitize.py
+  search/    hybrid.py  scoring.py  sanitize.py  multilingual.py
   kg/        graph.py  normalizer.py  temporal.py
-  write/     gate.py  ingest.py  lanes.py  cognify.py                      # benchmark ingest only
+  write/     gate.py  events.py  classify.py  dedup.py  ingest.py  lanes.py  cognify.py
   llm/       signatures.py  modules.py  router.py  judge.py  bootstrap.py  optimize.py
   bench/     adapters/  fixtures/  registry.py  replay.py  retriever.py  judge.py  metrics.py
              rescore.py  report.py  baselines.py
+  tune/      candidate_cache.py  rescore.py  objective.py  ablate.py
+  service/   app.py  auth.py  jobs.py  schemas.py  worker.py
+  client/    models.py  sdk.py
   cli.py  components.py  extras.py  timeutil.py
 artifacts/  benchmarks_data/  tests/
 ```
-Out of scope: MCP server, lifecycle hooks, wiki compiler, enrichment/synth queue, identity/awareness layers, harvest adapters.
+Out of scope: MCP server, assistant lifecycle hooks, wiki compiler, enrichment/synth queue, identity/awareness layers, harvest adapters.
 
 ---
 
@@ -104,7 +110,7 @@ CREATE TABLE kg_entity_frames (entity_id INTEGER REFERENCES knowledge_entities(i
   frame_id INTEGER REFERENCES memory_frames(id) ON DELETE CASCADE, PRIMARY KEY(entity_id, frame_id));
 ```
 
-**VectorStore protocol** (only `sqlite-vec` implemented; exact KNN; the protocol keeps the door open for ANN as future work):
+**VectorStore protocol** (`sqlite-vec` exact KNN for SQLite; pgvector HNSW with `hnsw.iterative_scan = strict_order` for PostgreSQL, so scope and eligibility filters still return k rows):
 ```python
 class VectorStore(Protocol):
     dim: int
@@ -142,7 +148,7 @@ class FrameStore:
 
 Importance multipliers, compaction trigger/keep-window, and the merge separator are all config. The compaction trigger fires at 10 accumulated P-frames and keeps the most recent 5.
 
-**Write atomicity.** Every `create_*` embeds first, then commits the frame row with its FTS, vector and chunk rows in one transaction. `FrameStore.index_state(id)` reports whether a frame's projections match its current text; dedup hits call `ensure_indexed`, and `repair_indexes()` is the recovery path for existing files. Compaction embeds the merged text first, then commits the content update, re-index, `memory_frame_lineage` rows (constituent id, type, hash, source, trust, timestamps; not text), KG-link carry-over and P-frame deletes together. `memory_frame_lineage` is created by `schema.sql` with `IF NOT EXISTS`, so older files gain it on open.
+**Write atomicity.** Every `create_*` embeds first, then commits the frame row with its FTS, vector and chunk rows in one transaction. `FrameStore.index_state(id)` reports whether a frame's projections match its current text; dedup hits call `ensure_indexed`, and `repair_indexes()` is the recovery path for existing files. Compaction embeds the merged text first, then commits the content update, re-index, `memory_frame_lineage` rows (constituent id, type, hash, source, trust, timestamps; not text), KG-link carry-over and P-frame deletes together. SQLite files carry a schema version in `PRAGMA user_version`; a file from another version is rejected rather than upgraded in place. PostgreSQL schemas are created only by Alembic (`gluomem migrate upgrade`), and the backend refuses a database that is not at head.
 
 ---
 
@@ -258,7 +264,7 @@ class LMRouter:
 
 ## 9. Tuning subsystem
 
-> **Not implemented.** This section is the design only; `gluomem/tune/__init__.py` is a placeholder.
+> **Status.** Tier-1 is implemented in `gluomem/tune/`: `HybridSearch.candidates` produces the cached pools, so the tuner and runtime share one candidate path. Queries are split deterministically into development and held-out sets (`tune.held_out_fraction`); trials score on development queries, and a candidate is promoted only if it beats the incumbent on development and does not lose on held-out. Pruning is not used. Tier-2 promotion and the LambdaMART ranker below are not implemented.
 
 `final = rrf × relevance` factors into an expensive retrieve and a cheap rescore. Retrieve each eval query's pool once; cache the raw per-feature inputs plus per-retriever ranks; then re-rank thousands of parameter vectors with zero model calls, scored by nDCG/Recall@k against benchmark-derived gold labels (reusing answer spans / MCQ keys, requiring no additional labeling).
 
@@ -320,12 +326,12 @@ class MetricRegistry:
 ---
 
 ## 11. Out of scope
-MCP server · lifecycle hooks · wiki compiler · enrichment/synth queue · identity/awareness layers · harvest adapters · LanceDB/ANN scale · multi-user/RBAC. The protocols leave the door open for these as future work, but nothing is implemented.
+MCP server · lifecycle hooks · wiki compiler · enrichment/synth queue · identity/awareness layers · harvest adapters · LanceDB scale · per-user identity/RBAC (the service trusts the host to choose a caller's scope). The protocols leave the door open for these as future work, but nothing is implemented.
 
 ---
 
 ## 12. Config & stack
-`pydantic-settings v2` `AppConfig` (precedence: Pydantic defaults < env < override); a **ModelRegistry** of by-name models; a **ScoringProfile** validated as a simplex; a cross-validator asserting `storage.vector_dim == embedder.dim`. Stack: Python 3.11+, `sqlite3` + `sqlite-vec` (plus optional `psycopg` + `pgvector`), `sentence-transformers`, **DSPy 3.x**, `pytest`, `uv`. All default configuration values live in typed Pydantic models in `gluomem/config/app_config.py`.
+`pydantic-settings v2` `AppConfig` (precedence: Pydantic defaults < env < override); a **ModelRegistry** of by-name models; a **ScoringProfile** validated as a simplex; a cross-validator asserting `storage.vector_dim == embedder.dim`. Stack: Python 3.11+, `sqlite3` + `sqlite-vec` (plus optional `psycopg` + `pgvector`, with SQLAlchemy metadata and Alembic for the Postgres schema), `sentence-transformers`, **DSPy 3.x**, `pytest`, `uv`. All default configuration values live in typed Pydantic models in `gluomem/config/app_config.py`.
 
 ---
 
