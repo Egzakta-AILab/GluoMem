@@ -815,7 +815,6 @@ def _cmd_worker(args: argparse.Namespace) -> int:
         kg = KnowledgeGraph(db)
         queue = JobQueue(
             db.backend,
-            max_pending_per_scope=args.max_pending_per_scope,
             default_max_attempts=args.max_attempts,
         )
         worker = MemoryWorker(
@@ -847,7 +846,7 @@ def _add_worker_parser(sub: argparse._SubParsersAction) -> None:
     )
     worker.add_argument("--db", default=None, help="mind db path (default: config)")
     worker.add_argument(
-        "--worker-id", default="gluomem-worker-1", help="worker identifier"
+        "--worker-id", default=None, help="worker identifier (default: hostname-pid)"
     )
     worker.add_argument(
         "--lease-seconds",
@@ -879,12 +878,6 @@ def _add_worker_parser(sub: argparse._SubParsersAction) -> None:
         help="optional max poll iterations before exiting",
     )
     worker.add_argument(
-        "--max-pending-per-scope",
-        type=int,
-        default=50,
-        help="per-scope pending job cap (default: 50)",
-    )
-    worker.add_argument(
         "--max-attempts",
         type=int,
         default=3,
@@ -894,6 +887,8 @@ def _add_worker_parser(sub: argparse._SubParsersAction) -> None:
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
     from gluomem.embedding.providers import make_embedder
     from gluomem.extras import require
     from gluomem.frames.store import FrameStore
@@ -911,12 +906,15 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     try:
         store = FrameStore(db, embedder=embedder, chunking=cfg.chunking)
         kg = KnowledgeGraph(db)
-        queue = JobQueue(db.backend)
+        queue = JobQueue(db.backend, max_pending_per_scope=args.max_pending_per_scope)
         app = create_app(
             db,
             store,
             cfg=cfg,
-            service_key=args.service_key,
+            service_key=(
+                Path(args.service_key_file).read_text().strip()
+                if args.service_key_file else None
+            ),
             kg=kg,
             queue=queue,
         )
@@ -932,9 +930,13 @@ def _add_serve_parser(sub: argparse._SubParsersAction) -> None:
     serve.add_argument("--host", default="127.0.0.1", help="bind host")
     serve.add_argument("--port", type=int, default=8080, help="bind port")
     serve.add_argument(
-        "--service-key",
+        "--service-key-file",
         default=None,
-        help="service bearer secret (default: GLUOMEM_SERVICE_KEY)",
+        help="file containing bearer secret (default: GLUOMEM_SERVICE_KEY)",
+    )
+    serve.add_argument(
+        "--max-pending-per-scope", type=int, default=50,
+        help="per-scope pending job cap (default: 50)",
     )
     _add_config_args(serve)
 
