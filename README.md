@@ -18,7 +18,7 @@ GluoMem is a research-stage Python library (version 0.0.1). It runs locally agai
 ## What is not implemented
 
 - **Offline numeric tuning.** `gluomem/tune` is a placeholder, and `gluomem tune` and `gluomem ablate` exit with "not implemented". The tuning design in [DESIGN.md §9](./DESIGN.md#9-tuning-subsystem) is a plan.
-- **Prompt optimization quality metric.** `make optimize-prompts` runs DSPy MIPROv2 with a parse-or-exact-match metric; it spends real tokens and is never run automatically.
+- **Prompt optimization runs.** Fact and event extraction now have a frozen, source-backed objective ([extraction_eval](./gluomem/llm/extraction_eval.py)): unsupported facts score zero, and wrong subject, lost negation, a plan recorded as done and a superseded state presented as current are reported as separate errors with feedback. Its fixture is nine authored cases, which is enough to test the scorer, not to measure model quality. `make optimize-prompts` (MIPROv2) spends real tokens, is never run automatically, and refuses extraction trainsets that do not reference annotated, non-sealed cases. The [campaign contract](./gluomem/llm/fixtures/campaign_v1.json) for baseline, MIPROv2 and GEPA comparisons is defined but unrun and unauthorized; other tasks still use a parse-or-exact-match metric.
 - **Service features**: HTTP or MCP API, multi-user identity, tenants, workspaces, RBAC, durable jobs, deployment packaging.
 
 ## Evidence status

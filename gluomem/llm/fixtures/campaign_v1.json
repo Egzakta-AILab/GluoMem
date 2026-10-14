@@ -1,0 +1,110 @@
+{
+  "campaign": "gluomem-extraction-optimization",
+  "version": 1,
+  "note": "Contract for a future campaign. Every stage is unrun and unauthorized; running one needs a separate decision that sets authorized: true in a new contract version. Calls and tokens include retries. Dollars are hard caps, not forecasts.",
+  "ceiling_usd": 200,
+  "daily_cap_usd": 10,
+  "evaluator": {
+    "module": "gluomem.llm.extraction_eval",
+    "fingerprint": "85bb7e3b1ad782ef28c2c5da2b1ed20d6bc8b6dbc8ac39c63ada4565a7e0623d"
+  },
+  "model_roles": {
+    "extraction": {"models": ["deepseek-flash"], "fixed": true, "optimized": "prompt", "note": "candidate prompts change; the model does not"},
+    "proposal": {"models": ["sonnet"], "fixed": true, "optimized": "never", "note": "MIPROv2 instruction proposer and GEPA reflector; sees development feedback only"},
+    "reader": {"models": ["deepseek-flash"], "fixed": true, "optimized": "never", "note": "fixed answer model, so gains are attributable to memory"},
+    "judge": {"models": ["haiku", "gpt5-mini", "qwen3"], "fixed": true, "optimized": "never"},
+    "embedding": {"models": ["minilm"], "fixed": true, "optimized": "never", "note": "local; no provider dollars"}
+  },
+  "capabilities": {
+    "support": 0.15,
+    "subject": 0.15,
+    "negation": 0.15,
+    "modality": 0.15,
+    "update": 0.15,
+    "temporal": 0.1,
+    "abstention": 0.15
+  },
+  "capability_max_regression": 0.05,
+  "families": [
+    {"family": "extraction_v1", "kind": "extraction_fixture", "weight": 0.4, "floor": 0.6, "max_regression": 0.05},
+    {"family": "locomo", "kind": "registry", "weight": 0.2, "floor": 0.0, "max_regression": 0.03},
+    {"family": "longmemeval_s", "kind": "registry", "weight": 0.2, "floor": 0.0, "max_regression": 0.03},
+    {"family": "mab_fixture", "kind": "registry", "weight": 0.2, "floor": 0.5, "max_regression": 0.05}
+  ],
+  "stages": [
+    {
+      "stage": "reviewed_baseline",
+      "optimizer": "none",
+      "status": "unrun",
+      "authorized": false,
+      "families": ["extraction_v1", "locomo", "longmemeval_s", "mab_fixture"],
+      "reservations": {
+        "extraction": {"calls": 2000, "tokens": 6000000, "usd": 5},
+        "reader": {"calls": 1500, "tokens": 9000000, "usd": 6},
+        "judge": {"calls": 4500, "tokens": 4500000, "usd": 7},
+        "embedding": {"calls": 20000, "tokens": 10000000, "usd": 0}
+      }
+    },
+    {
+      "stage": "miprov2",
+      "optimizer": "miprov2",
+      "status": "unrun",
+      "authorized": false,
+      "families": ["extraction_v1"],
+      "reservations": {
+        "extraction": {"calls": 5000, "tokens": 12000000, "usd": 12},
+        "proposal": {"calls": 300, "tokens": 900000, "usd": 8}
+      }
+    },
+    {
+      "stage": "gepa_focused",
+      "optimizer": "gepa",
+      "status": "unrun",
+      "authorized": false,
+      "families": ["extraction_v1"],
+      "reservations": {
+        "extraction": {"calls": 6000, "tokens": 15000000, "usd": 15},
+        "proposal": {"calls": 500, "tokens": 1500000, "usd": 15}
+      }
+    },
+    {
+      "stage": "gepa_joint",
+      "optimizer": "gepa",
+      "status": "unrun",
+      "authorized": false,
+      "families": ["extraction_v1", "locomo", "longmemeval_s", "mab_fixture"],
+      "reservations": {
+        "extraction": {"calls": 6000, "tokens": 18000000, "usd": 20},
+        "proposal": {"calls": 500, "tokens": 1500000, "usd": 15},
+        "reader": {"calls": 3000, "tokens": 18000000, "usd": 15},
+        "judge": {"calls": 9000, "tokens": 9000000, "usd": 15},
+        "embedding": {"calls": 40000, "tokens": 20000000, "usd": 0}
+      }
+    },
+    {
+      "stage": "sealed_validation",
+      "optimizer": "none",
+      "status": "unrun",
+      "authorized": false,
+      "families": ["extraction_v1", "locomo", "longmemeval_s", "mab_fixture"],
+      "reservations": {
+        "extraction": {"calls": 2000, "tokens": 6000000, "usd": 6},
+        "reader": {"calls": 1500, "tokens": 9000000, "usd": 8},
+        "judge": {"calls": 4500, "tokens": 4500000, "usd": 10},
+        "embedding": {"calls": 20000, "tokens": 10000000, "usd": 0}
+      }
+    }
+  ],
+  "contingency_usd": 43,
+  "selection": {
+    "split": "dev",
+    "utility": "capability-weighted mean on dev, each capability scored by the frozen evaluator",
+    "eligibility": [
+      "scorecards come from the evaluator fingerprint pinned above",
+      "every family meets its floor",
+      "no family or capability falls more than its max_regression below reviewed_baseline",
+      "spend stays within the stage reservation"
+    ],
+    "sealed": "only the single frozen winner is evaluated on sealed_test, once; failing it means reject or inconclusive, never more search on the same test"
+  }
+}
