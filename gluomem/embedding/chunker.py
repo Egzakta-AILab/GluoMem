@@ -1,21 +1,4 @@
-"""gluomem.embedding.chunker — pure-function text chunker.
-
-``chunk(text, cfg)`` is a PURE function: deterministic, no I/O, no globals.
-Every size comes from the passed ``ChunkingConfig`` (max_chars=2000,
-overlap_chars=200, min_chunk_chars=1500) — nothing is hardcoded here.
-
-Splitting rule:
-
-- If ``len(text) < min_chunk_chars`` → a SINGLE whole-frame chunk covering the
-  full text (``char_start=0``, ``char_end=len(text)``).
-- Otherwise → sliding windows of ``max_chars`` advancing by
-  ``max_chars - overlap_chars`` so adjacent chunks overlap by exactly
-  ``overlap_chars``. The final window is clipped at ``len(text)`` so no chunk
-  runs past the end and the last chunk may be shorter than ``max_chars``.
-
-The output is a list of :class:`Chunk` dataclasses, stable across calls for
-identical input + config.
-"""
+"""Pure-function sliding-window text chunker."""
 
 from __future__ import annotations
 
@@ -26,12 +9,7 @@ from gluomem.config.app_config import ChunkingConfig
 
 @dataclass(frozen=True)
 class Chunk:
-    """A single chunk of a frame's content.
-
-    ``char_start`` / ``char_end`` are offsets into the ORIGINAL text such that
-    ``text[char_start:char_end] == content``. Frozen for stable equality /
-    hashability (the chunker's determinism guarantee).
-    """
+    """A single chunk of a frame's content with character offsets."""
 
     content: str
     char_start: int
@@ -39,20 +17,7 @@ class Chunk:
 
 
 def chunk(text: str, cfg: ChunkingConfig) -> list[Chunk]:
-    """Split ``text`` into overlapping chunks per ``cfg``.
-
-    Pure and deterministic: the same ``(text, cfg)`` always yields the same
-    list of :class:`Chunk`. No I/O, no mutation of inputs.
-
-    Parameters
-    ----------
-    text:
-        The frame content to chunk.
-    cfg:
-        A ``ChunkingConfig`` with ``max_chars``, ``overlap_chars``,
-        ``min_chunk_chars``. All sizes come from config — this function holds
-        no literals beyond the documented algorithm shape.
-    """
+    """Split ``text`` into overlapping chunks per ``cfg``."""
     max_chars = int(cfg.max_chars)
     overlap = int(cfg.overlap_chars)
     min_chunk = int(cfg.min_chunk_chars)
@@ -72,14 +37,9 @@ def chunk(text: str, cfg: ChunkingConfig) -> list[Chunk]:
         )
 
     n = len(text)
-
-    # Whole-frame shortcut: text shorter than the threshold is one chunk.
     if n < min_chunk:
         return [Chunk(content=text, char_start=0, char_end=n)]
 
-    # Sliding windows of max_chars advancing by (max_chars - overlap). The
-    # advance is > 0 because overlap < max_chars (validated above). The final
-    # window is clipped at n so no chunk runs past the end of the text.
     advance = max_chars - overlap
     out: list[Chunk] = []
     start = 0

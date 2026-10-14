@@ -1,22 +1,10 @@
-"""gluomem.config.variants — variant overlay loader + merge utilities.
-
-The precedence chain (lowest → highest) is::
-
-    pydantic field defaults < conf/config.yaml < variant overlay
-        < GLUOMEM_-prefixed env ('__' nested delimiter) < explicit overrides
-
-This module provides the pure utilities that implement the middle of that
-chain: deep-merge of the variant overlay over the file layer, and the
-dotted-key → nested-dict conversion used by ``with_overrides``.
-
-The actual ``AppConfig`` cross-validators and ``with_overrides`` method live on
-:class:`gluomem.config.app_config.AppConfig`; this module holds the reusable
-merge helpers so the precedence logic is testable in isolation.
-"""
+"""Variant overlay loader and configuration merge utilities."""
 
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import lru_cache
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -32,12 +20,22 @@ def read_yaml(path: Path) -> dict[str, Any]:
     return data or {}
 
 
-def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
-    """Recursively merge ``overlay`` over ``base`` (returns a new dict).
+@lru_cache(maxsize=1)
+def _cached_default_config() -> dict[str, Any]:
+    text = (files("gluomem.config") / "default_config.yaml").read_text(encoding="utf-8")
+    data = yaml.safe_load(text)
+    if not isinstance(data, dict):
+        return {}
+    return data
 
-    Nested dicts are merged key-by-key; non-dict values in ``overlay`` replace
-    the corresponding value in ``base``.
-    """
+
+def read_default_config() -> dict[str, Any]:
+    """Return a deep copy of packaged ``gluomem/config/default_config.yaml``."""
+    return deepcopy(_cached_default_config())
+
+
+def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge ``overlay`` over ``base`` (returns a new dict)."""
     out = deepcopy(base)
     for key, val in overlay.items():
         if key in out and isinstance(out[key], dict) and isinstance(val, dict):
@@ -59,18 +57,15 @@ def dotted_to_nested(overrides: dict[str, Any]) -> dict[str, Any]:
     return nested
 
 
+def _default_variants_dir() -> Path:
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / "conf" / "variants"
+
+
 def load_variant_overlay(
     name: str, variants_dir: Path | None = None
 ) -> dict[str, Any]:
-    """Load ``conf/variants/{name}.yaml`` as a plain dict.
-
-    Parameters
-    ----------
-    name:
-        The variant name (without ``.yaml``).
-    variants_dir:
-        Directory holding variant YAMLs. Defaults to ``conf/variants``.
-    """
+    """Load ``conf/variants/{name}.yaml`` as a plain dict."""
     vdir = variants_dir if variants_dir is not None else _default_variants_dir()
     return read_yaml(vdir / f"{name}.yaml")
 
@@ -85,9 +80,3 @@ def merge_variant(
     if not overlay:
         return file_layer
     return deep_merge(file_layer, overlay)
-
-
-def _default_variants_dir() -> Path:
-    """Return the default ``conf/variants`` directory."""
-    project_root = Path(__file__).resolve().parents[2]
-    return project_root / "conf" / "variants"

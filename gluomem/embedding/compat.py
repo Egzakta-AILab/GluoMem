@@ -1,19 +1,4 @@
-"""gluomem.embedding.compat — one embedder per ``*.mind`` file.
-
-The first embedder bound to a file with no vectors is recorded in the
-``meta`` table under :data:`FINGERPRINT_META_KEY`. Every later bind
-(``FrameStore`` or ``HybridSearch`` construction) must present the same
-:class:`~gluomem.embedding.fingerprint.EmbedderFingerprint`, so vectors from
-two encoders are never written to, or queried against, the same index.
-
-A file that already holds vectors but has no recorded fingerprint (written by
-0.0.1) is rejected too: its encoder is unknown. Two explicit ways out:
-
-- ``FrameStore.rebuild_index(db, embedder)`` re-embeds every frame with the
-  new embedder and records it, in one transaction.
-- :func:`adopt_embedder` records the embedder without re-embedding, for an
-  operator who knows the existing vectors came from it.
-"""
+"""One embedder per ``*.mind`` store: fingerprint binding and compatibility checks."""
 
 from __future__ import annotations
 
@@ -24,7 +9,7 @@ FINGERPRINT_META_KEY = "embedding_fingerprint"
 
 
 class EmbeddingMismatchError(ValueError):
-    """The embedder does not match the one that wrote this file's vectors."""
+    """The embedder does not match the one that wrote this store's vectors."""
 
     def __init__(
         self,
@@ -57,42 +42,29 @@ class EmbeddingMismatchError(ValueError):
 
 
 def stored_fingerprint(db: MindDB) -> EmbedderFingerprint | None:
-    """The fingerprint recorded in ``db``, or ``None``."""
+    """Return the fingerprint recorded in ``db``, or ``None``."""
     raw = db.meta_get(FINGERPRINT_META_KEY)
     return None if raw is None else EmbedderFingerprint.from_json(raw)
 
 
 def has_vectors(db: MindDB) -> bool:
-    """True when any frame or chunk vector is stored."""
-    for table in ("memory_frames_vec", "memory_frame_chunks_vec"):
-        if db.conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None:
-            return True
-    return False
+    """Return True when any frame or chunk vector is stored."""
+    return db.frame_vec.count() > 0 or db.chunk_vec.count() > 0
 
 
 def write_fingerprint(db: MindDB, fp: EmbedderFingerprint) -> None:
     """Record ``fp`` inside the caller's transaction (no commit)."""
-    db.conn.execute(
-        "INSERT INTO meta(key, value) VALUES (?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (FINGERPRINT_META_KEY, fp.to_json()),
-    )
+    db.meta_set(FINGERPRINT_META_KEY, fp.to_json(), commit=False)
 
 
 def bind_embedder(db: MindDB, embedder: object) -> EmbedderFingerprint:
-    """Check ``embedder`` against ``db`` and record it on first use.
-
-    Raises :class:`EmbeddingMismatchError` before any vector is read or
-    written when the file was indexed by another embedder, or holds vectors
-    of unknown origin.
-    """
+    """Check ``embedder`` against ``db`` and record it on first use."""
     current = fingerprint_of(embedder)
     stored = stored_fingerprint(db)
     if stored is None:
         if has_vectors(db):
             raise EmbeddingMismatchError(str(db.path), None, current)
-        write_fingerprint(db, current)
-        db.conn.commit()
+        db.meta_set(FINGERPRINT_META_KEY, current.to_json(), commit=True)
         return current
     if stored != current:
         raise EmbeddingMismatchError(str(db.path), stored, current)
@@ -100,15 +72,10 @@ def bind_embedder(db: MindDB, embedder: object) -> EmbedderFingerprint:
 
 
 def adopt_embedder(db: MindDB, embedder: object) -> EmbedderFingerprint:
-    """Record ``embedder`` for a file without a fingerprint, without re-embedding.
-
-    Refuses to replace a different recorded fingerprint; use
-    ``FrameStore.rebuild_index`` for that.
-    """
+    """Record ``embedder`` for a store without a fingerprint, without re-embedding."""
     current = fingerprint_of(embedder)
     stored = stored_fingerprint(db)
     if stored is not None and stored != current:
         raise EmbeddingMismatchError(str(db.path), stored, current)
-    write_fingerprint(db, current)
-    db.conn.commit()
+    db.meta_set(FINGERPRINT_META_KEY, current.to_json(), commit=True)
     return current

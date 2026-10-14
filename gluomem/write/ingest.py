@@ -1,32 +1,4 @@
-"""gluomem.write.ingest — LoCoMo benchmark conversations → sessions → frames.
-
-Flow per session: admit raw turns → lane extraction over the
-non-quarantined text → per-observation frame-model dispatch → compaction of
-touched GOPs. Every store write goes through ``gate.admit()``.
-
-GOP layout (dedup/reconstruction semantics drive the split):
-
-- raw dialog turns → ``{conv_id}:session:{n}`` (``event_time`` = session dt);
-- fact lane        → ``{conv_id}:facts``   (cross-session dedup);
-- event lane       → ``{conv_id}:events``;
-- profile lane     → ``{conv_id}:profile:{speaker}`` (``reconstruct_state``
-  = "current state of this speaker"; the natural P-frame habitat).
-
-Frame-model dispatch (``write.frame_model``):
-
-- ``ipb``       — same-subject delta → P on the base; contradiction → new I
-  (the new truth) + B correction on the base + conflicting KG edges retired;
-- ``i_only``    — every observation a fresh I; the contradiction detector is
-  NEVER invoked;
-- ``overwrite`` — new I; on contradiction the superseded base I and its
-  P-refinements are demoted to ``importance='deprecated'`` (demote-and-add:
-  append-only/dedup/index invariants hold, retrieval down-weights the old
-  truth) and conflicting KG edges retired. No P/B rows ever.
-
-Same-subject detection: cognify first, then the base is the non-deprecated
-I-frame in the target lane GOP sharing ≥ ``write.subject.min_entity_overlap``
-KG entities with the observation (max overlap, then most recent).
-"""
+"""LoCoMo benchmark conversation ingestion into sessions, frames, and KG."""
 
 from __future__ import annotations
 
@@ -60,9 +32,6 @@ if TYPE_CHECKING:
     from gluomem.llm.outputs import Extractors
 
 
-# --- LoCoMo parsing ----------------------------------------------------------
-
-
 @dataclass
 class Turn:
     speaker: str
@@ -84,9 +53,8 @@ class Conversation:
     sessions: list[Session]
 
 
-# Formats observed in LoCoMo dumps; strict list, fail-loud on anything else.
 _LOCOMO_DT_FORMATS = (
-    "%I:%M %p on %d %B, %Y",  # "1:56 pm on 8 May, 2023"
+    "%I:%M %p on %d %B, %Y",
     "%Y-%m-%dT%H:%M:%S",
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d",
@@ -94,7 +62,7 @@ _LOCOMO_DT_FORMATS = (
 
 
 def _parse_locomo_datetime(raw: str) -> datetime:
-    """Strict small-format-list parser; ValueError on miss, never a guess."""
+    """Parse a LoCoMo session datetime string against known formats."""
     for fmt in _LOCOMO_DT_FORMATS:
         try:
             return datetime.strptime(raw.strip(), fmt)
@@ -107,14 +75,7 @@ def _parse_locomo_datetime(raw: str) -> datetime:
 
 
 def load_locomo(path: str | Path) -> list[Conversation]:
-    """Parse a LoCoMo-format JSON file into typed conversations.
-
-    Expected shape per sample: ``sample_id`` + ``conversation`` holding
-    ``speaker_a``/``speaker_b``, ``session_{n}`` (list of
-    ``{"speaker", "dia_id", "text"[, "blip_caption"]}``) and
-    ``session_{n}_date_time``. Image turns fold their caption into the text.
-    Malformed input raises ``ValueError`` (fail loud).
-    """
+    """Parse a LoCoMo-format JSON file into typed conversations."""
     data = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
     if not isinstance(data, list):
         raise ValueError(f"{path}: expected a JSON list of LoCoMo samples")
@@ -168,9 +129,6 @@ def load_locomo(path: str | Path) -> list[Conversation]:
     return conversations
 
 
-# --- ingest orchestration ------------------------------------------------------
-
-
 @dataclass
 class IngestReport:
     conversations: int = 0
@@ -187,9 +145,6 @@ class IngestReport:
     relations: int = 0
     retired_edges: int = 0
     demoted: int = 0
-    # Extraction failures are recorded, never silently swallowed; the ingest
-    # degrades to raw-turns for the affected session instead of aborting the
-    # whole run.
     extraction_errors: list[str] = field(default_factory=list)
 
 
@@ -209,12 +164,7 @@ def find_subject_frames(
     store: FrameStore,
     cfg: AppConfig,
 ) -> list[Frame]:
-    """Non-deprecated I-frames in ``gop`` sharing ≥ threshold entities.
-
-    Ordered by (overlap, id) DESCENDING — the head is the same-subject base
-    (most-shared, then most recent). The full list is the subject CLUSTER the
-    ``overwrite`` mode demotes wholesale on contradiction.
-    """
+    """Return non-deprecated I-frames in ``gop`` sharing >= threshold entities."""
     if not entity_ids:
         return []
     overlap: dict[int, int] = {}
@@ -222,16 +172,23 @@ def find_subject_frames(
         for fid in kg.frame_ids_for_entity(eid):
             overlap[fid] = overlap.get(fid, 0) + 1
 
+    candidate_ids = [
+        fid
+        for fid, count in overlap.items()
+        if count >= cfg.write.subject.min_entity_overlap
+    ]
+    if not candidate_ids:
+        return []
+    frames_by_id = store.get_frames(candidate_ids)
+
     scored: list[tuple[int, int, Frame]] = []
-    for fid, count in overlap.items():
-        if count < cfg.write.subject.min_entity_overlap:
-            continue
-        frame = store.get_frame(fid)
-        if frame.gop_id != gop or frame.frame_type != "I":
+    for fid in candidate_ids:
+        frame = frames_by_id.get(fid)
+        if frame is None or frame.gop_id != gop or frame.frame_type != "I":
             continue
         if frame.importance == "deprecated":
             continue
-        scored.append((count, frame.id, frame))
+        scored.append((overlap[fid], frame.id, frame))
     scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
     return [frame for _, _, frame in scored]
 
@@ -244,7 +201,7 @@ def find_base_frame(
     store: FrameStore,
     cfg: AppConfig,
 ) -> Frame | None:
-    """Same-subject base: max entity overlap in ``gop``, threshold from config."""
+    """Return the highest-overlap same-subject base I-frame in ``gop``."""
     frames = find_subject_frames(entity_ids, gop, kg=kg, store=store, cfg=cfg)
     return frames[0] if frames else None
 
@@ -257,16 +214,7 @@ def find_edge_conflict_frames(
     store: FrameStore,
     cfg: AppConfig,
 ) -> list[Frame]:
-    """Contradiction candidates from KG edge conflicts (``kg_edge_conflict``).
-
-    A freshly-resolved relation ``(s, T, t_new)`` whose source already holds a
-    valid same-family edge ``(s, T', t_old != t_new)`` flags the OLD edge's
-    frames: non-deprecated I-frames in ``gop`` linked to BOTH ``s`` and
-    ``t_old`` (falling back to ``t_old`` alone when the intersection is
-    empty), newest first. This catches update-type facts entity overlap
-    structurally misses — ``{Bob, Seattle}`` vs stored ``{Bob, Boston}``
-    share only ``Bob``, but the ``LIVES_IN``-family edge conflict is exact.
-    """
+    """Return contradiction candidate I-frames in ``gop`` from KG edge conflicts."""
     frames: list[Frame] = []
     seen: set[int] = set()
     for rel in relations:
@@ -277,12 +225,14 @@ def find_edge_conflict_frames(
                 source_fids = set(kg.frame_ids_for_entity(rel.source_id))
                 target_fids = kg.frame_ids_for_entity(existing.target_id)
                 fids = [f for f in target_fids if f in source_fids] or target_fids
-                for fid in sorted(fids, reverse=True):
-                    if fid in seen:
-                        continue
+                ordered = [f for f in sorted(fids, reverse=True) if f not in seen]
+                if not ordered:
+                    continue
+                frames_by_id = store.get_frames(ordered)
+                for fid in ordered:
                     seen.add(fid)
-                    frame = store.get_frame(fid)
-                    if frame.gop_id != gop or frame.frame_type != "I":
+                    frame = frames_by_id.get(fid)
+                    if frame is None or frame.gop_id != gop or frame.frame_type != "I":
                         continue
                     if frame.importance == "deprecated":
                         continue
@@ -303,7 +253,7 @@ def _count_frame(result, report: IngestReport) -> None:
         report.semantic_deduped += 1
         return
     if result.superseded_id is not None:
-        report.demoted += 1  # keep_longest demoted the shorter stored near-dup
+        report.demoted += 1
     frame = result.frame
     if frame.frame_type == "I":
         report.i_frames += 1
@@ -314,7 +264,6 @@ def _count_frame(result, report: IngestReport) -> None:
 
 
 def _event_time_for(obs: Observation, session_iso: str) -> str | None:
-    """Event-lane frames carry the resolved (or session-fallback) event time."""
     if obs.lane != "event":
         return None
     return obs.event_time if obs.event_time else session_iso
@@ -341,11 +290,9 @@ def _admit_observation(
     report.entities += len(graph.entity_ids)
     report.relations += len(graph.relation_ids)
 
-    # Semantic dedup applies only to eligible lanes (events excluded — same-text
-    # events at different times are distinct; raw turns / B-frames never probe).
-    # The contradiction path's new-truth I and its B-frame keep deduper=None so a
-    # correction is never dropped as a near-duplicate.
-    obs_deduper = deduper if (deduper is not None and obs.lane in cfg.write.dedup.lanes) else None
+    obs_deduper = (
+        deduper if (deduper is not None and obs.lane in cfg.write.dedup.lanes) else None
+    )
 
     subject_frames = find_subject_frames(
         graph.entity_ids, gop, kg=kg, store=store, cfg=cfg
@@ -363,10 +310,6 @@ def _admit_observation(
         created_at=created_at,
     )
 
-    # Contradiction candidates, per write.subject.trigger. P-frame attachment
-    # stays entity-overlap-only regardless: the trigger nominates frames for
-    # the CONTRADICTION check, never for delta attachment, so kg_edge_conflict
-    # cannot inflate P-frame attachment.
     mode = cfg.write.frame_model
     candidates: list[Frame] = []
     if mode != "i_only" and cfg.write.contradiction.enabled:
@@ -399,7 +342,7 @@ def _admit_observation(
                 deduper=obs_deduper,
                 **admit_kwargs,
             )
-        else:  # fresh I: i_only, no same-subject base, or overwrite delta
+        else:
             result = admit(
                 obs.text,
                 importance=importance,
@@ -410,7 +353,6 @@ def _admit_observation(
         _count_frame(result, report)
         return
 
-    # Contradiction path: the new truth is admitted as I in BOTH modes.
     new_i = admit(
         obs.text,
         importance=importance,
@@ -419,26 +361,19 @@ def _admit_observation(
     )
     _count_frame(new_i, report)
     if new_i.frame is None or not is_recall_eligible(new_i.trust):
-        # Ineligible "new truth" must not correct, demote or retire anything.
         return
 
     if mode == "ipb":
-        if new_i.frame is not None:
-            b = admit(
-                verdict.description or f"contradicts frame {hit.id}",
-                frame_type="B",
-                base_id=hit.id,
-                references=[hit.id, new_i.frame.id],
-                event_time=event_time,
-                **admit_kwargs,
-            )
-            _count_frame(b, report)
+        b = admit(
+            verdict.description or f"contradicts frame {hit.id}",
+            frame_type="B",
+            base_id=hit.id,
+            references=[hit.id, new_i.frame.id],
+            event_time=event_time,
+            **admit_kwargs,
+        )
+        _count_frame(b, report)
     else:
-        # overwrite: demote the WHOLE superseded subject cluster (in this
-        # mode earlier deltas were admitted as sibling I-frames, so demoting
-        # only the tie-break base would leave stale truth at full weight)
-        # plus any P-refinements hanging off the demoted frames. An edge-
-        # conflict hit outside the overlap cluster is part of the stale truth.
         stale_frames = list(subject_frames)
         if all(hit.id != f.id for f in stale_frames):
             stale_frames.append(hit)
@@ -465,11 +400,9 @@ def ingest_conversation(
     kg: KnowledgeGraph,
     cfg: AppConfig,
 ) -> IngestReport:
-    """Ingest one conversation; every write goes through the gate."""
+    """Ingest one conversation through the admission gate."""
     report = IngestReport(conversations=1, sessions=len(conv.sessions))
 
-    # Semantic dedup is per-conversation (fresh cache; same-GOP scope). Built
-    # only under mode='semantic' — mode='exact' passes deduper=None everywhere.
     deduper = (
         SemanticDeduper(
             store.embedder, threshold=cfg.write.dedup.similarity_threshold
@@ -530,14 +463,8 @@ def ingest_conversation(
             report.extraction_errors.append(
                 f"{conv.conv_id}:session:{session.index}: {exc}"
             )
-            continue  # raw turns are already in; degrade, don't abort
+            continue
 
-        # Cognify: LLM calls fan out (write.parallelism); KG resolution is
-        # applied sequentially in observation order (identical ids to a
-        # sequential run). Per-observation failures are recorded, not fatal.
-        # Observations the gate will quarantine or reject never reach cognify:
-        # their entities/relations would otherwise wire flagged text into the
-        # KG and nominate contradiction targets before admission.
         flagged = [
             scanner.scan(obs.text, context="agent_inferred").score
             >= cfg.safety.block_threshold
@@ -602,7 +529,7 @@ def ingest_path(
     db_path: str | Path | None = None,
     embedder: Embedder | None = None,
 ) -> IngestReport:
-    """Wire storage + gate and ingest every conversation in a LoCoMo file."""
+    """Wire storage and gate, then ingest every conversation in a LoCoMo file."""
     conversations = load_locomo(path)
     db = MindDB(db_path or cfg.storage.path, dim=cfg.storage.vector_dim)
     if embedder is None:
@@ -617,9 +544,20 @@ def ingest_path(
             conv, facade=facade, scanner=scanner, store=store, kg=kg, cfg=cfg
         )
         for attr in (
-            "conversations", "sessions", "turns", "i_frames", "p_frames",
-            "b_frames", "deduped", "semantic_deduped", "quarantined", "rejected",
-            "entities", "relations", "retired_edges", "demoted",
+            "conversations",
+            "sessions",
+            "turns",
+            "i_frames",
+            "p_frames",
+            "b_frames",
+            "deduped",
+            "semantic_deduped",
+            "quarantined",
+            "rejected",
+            "entities",
+            "relations",
+            "retired_edges",
+            "demoted",
         ):
             setattr(total, attr, getattr(total, attr) + getattr(report, attr))
         total.extraction_errors.extend(report.extraction_errors)

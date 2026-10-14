@@ -1,133 +1,126 @@
-"""gluomem.storage.sqlite_vec — SqliteVecStore over sqlite-vec vec0.
-
-An exact-KNN vector store over a ``vec0`` virtual table created by ``MindDB``
-at the active embedder's native dim. No ANN index. Vectors are stored at native
-dim with no zero-pad; a fingerprint guard raises on any dim mismatch before a
-write.
-
-The ``rowid`` is passed as a SQL literal per the sqlite-vec convention
-(vec0 maps the integer primary key onto the rowid); the embedding is supplied
-as a packed ``float32`` byte blob. Search uses
-``embedding MATCH ? ORDER BY distance LIMIT k`` (exact KNN).
-"""
+"""SQLite ``vec0`` exact-KNN ``VectorStore`` implementation."""
 
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 
 import numpy as np
 
-from gluomem.embedding.fingerprint import VectorDimMismatchError, assert_dim
+from gluomem.storage.backend import (
+    VectorDimMismatchError,
+    VectorStore,
+    assert_dim,
+)
 
-# Re-export the dim-mismatch error so callers can import it from the store
-# module (the guard is the public contract surface for add/add_batch failures).
-__all__ = ["SqliteVecStore", "VectorDimMismatchError"]
+_ALLOWED_TABLES: frozenset[str] = frozenset(
+    {"memory_frames_vec", "memory_frame_chunks_vec"}
+)
 
 
 class SqliteVecStore:
-    """Exact-KNN vector store over a sqlite-vec ``vec0`` table.
+    """Exact-KNN vector store backed by a ``sqlite-vec`` ``vec0`` virtual table."""
 
-    Parameters
-    ----------
-    conn:
-        An open ``sqlite3.Connection`` with the sqlite-vec extension loaded and
-        the target ``vec0`` table already created (typically by ``MindDB``).
-    table:
-        The ``vec0`` virtual table name (e.g. ``memory_frames_vec``).
-    dim:
-        The native embedding dim the table was created at. Every ``add`` /
-        ``add_batch`` vector MUST have this length — the fingerprint guard
-        enforces it and raises ``VectorDimMismatchError`` on mismatch.
-    """
-
-    def __init__(self, conn: sqlite3.Connection, *, table: str, dim: int) -> None:
+    def __init__(self, conn: sqlite3.Connection, table: str, dim: int) -> None:
+        if table not in _ALLOWED_TABLES:
+            raise ValueError(
+                f"Invalid vec0 table {table!r}; must be one of {sorted(_ALLOWED_TABLES)}"
+            )
         if dim <= 0:
-            raise ValueError(f"SqliteVecStore dim must be positive, got {dim}")
+            raise ValueError(f"dim must be positive, got {dim}")
         self._conn: sqlite3.Connection = conn
-        self._table: str = table
-        self._dim: int = int(dim)
-
-    @property
-    def dim(self) -> int:
-        return self._dim
-
-    # --- writes -------------------------------------------------------------
+        self.table: str = table
+        self.dim: int = dim
 
     def add(self, rowid: int, vec: np.ndarray, *, commit: bool = True) -> None:
-        """Insert one vector at ``rowid`` (native dim, no pad/truncate).
-
-        Raises ``VectorDimMismatchError`` if ``len(vec) != dim`` and writes no
-        row. The rowid is passed as a SQL literal per sqlite-vec; the embedding
-        is a packed float32 byte blob. ``commit=False`` leaves the write inside
-        the caller's open transaction (the FrameStore index hook groups FTS +
-        vec + chunk writes into one atomic commit).
-        """
-        assert_dim(vec, self._dim)
-        blob = self._as_blob(vec)
-        self._conn.execute(
-            f"INSERT INTO {self._table}(rowid, embedding) VALUES (?, ?)",
-            (int(rowid), blob),
-        )
+        rid = int(rowid)
+        f32 = assert_dim(vec, self.dim)
+        blob = f32.tobytes()
         if commit:
-            self._conn.commit()
+            with self._conn:
+                self._conn.execute(f"DELETE FROM {self.table} WHERE rowid = {rid}")
+                self._conn.execute(
+                    f"INSERT INTO {self.table}(rowid, embedding) VALUES ({rid}, ?)",
+                    (blob,),
+                )
+        else:
+            self._conn.execute(f"DELETE FROM {self.table} WHERE rowid = {rid}")
+            self._conn.execute(
+                f"INSERT INTO {self.table}(rowid, embedding) VALUES ({rid}, ?)",
+                (blob,),
+            )
 
     def add_batch(
         self, items: list[tuple[int, np.ndarray]], *, commit: bool = True
     ) -> None:
-        """Insert many ``(rowid, vec)`` pairs in one transaction.
-
-        All vectors are fingerprint-checked up front; on any mismatch the batch
-        is aborted (no partial write for the bad rows). ``commit=False`` leaves
-        the writes inside the caller's open transaction.
-        """
-        # Validate every vector first so a mismatch aborts before any write.
-        rows: list[tuple[int, bytes]] = []
+        if not items:
+            return
+        prepared: list[tuple[int, bytes]] = []
         for rowid, vec in items:
-            assert_dim(vec, self._dim)
-            rows.append((int(rowid), self._as_blob(vec)))
-        self._conn.executemany(
-            f"INSERT INTO {self._table}(rowid, embedding) VALUES (?, ?)",
-            rows,
-        )
+            rid = int(rowid)
+            f32 = assert_dim(vec, self.dim)
+            prepared.append((rid, f32.tobytes()))
         if commit:
-            self._conn.commit()
-
-    # --- reads --------------------------------------------------------------
+            with self._conn:
+                for rid, blob in prepared:
+                    self._conn.execute(f"DELETE FROM {self.table} WHERE rowid = {rid}")
+                    self._conn.execute(
+                        f"INSERT INTO {self.table}(rowid, embedding) VALUES ({rid}, ?)",
+                        (blob,),
+                    )
+        else:
+            for rid, blob in prepared:
+                self._conn.execute(f"DELETE FROM {self.table} WHERE rowid = {rid}")
+                self._conn.execute(
+                    f"INSERT INTO {self.table}(rowid, embedding) VALUES ({rid}, ?)",
+                    (blob,),
+                )
 
     def search(self, query: np.ndarray, k: int) -> list[tuple[int, float]]:
-        """Exact-KNN search: return ``[(rowid, distance)]`` for the nearest ``k``.
-
-        Uses ``embedding MATCH ? ORDER BY distance LIMIT k`` (exact KNN, no ANN).
-        The query vector is NOT required to match the store dim for a MATCH
-        (sqlite-vec validates at query time), but we still fingerprint it so a
-        wrong-dim query fails loudly with the same clear error as a bad add.
-        """
-        assert_dim(query, self._dim)
-        blob = self._as_blob(query)
-        cur = self._conn.execute(
-            f"SELECT rowid, distance FROM {self._table} "
-            f"WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+        if k <= 0:
+            return []
+        f32 = assert_dim(query, self.dim)
+        blob = f32.tobytes()
+        rows = self._conn.execute(
+            f"SELECT rowid, distance FROM {self.table} "
+            f"WHERE embedding MATCH ? AND k = ? ORDER BY distance",
             (blob, int(k)),
-        )
-        return [(int(r), float(d)) for r, d in cur.fetchall()]
-
-    # --- deletes ------------------------------------------------------------
+        ).fetchall()
+        return [(int(r[0]), float(r[1])) for r in rows]
 
     def delete(self, rowid: int, *, commit: bool = True) -> None:
-        """Delete the vector stored at ``rowid`` (no-op if absent).
-
-        ``commit=False`` leaves the delete inside the caller's open transaction.
-        """
-        self._conn.execute(
-            f"DELETE FROM {self._table} WHERE rowid=?", (int(rowid),)
-        )
+        rid = int(rowid)
+        self._conn.execute(f"DELETE FROM {self.table} WHERE rowid = {rid}")
         if commit:
             self._conn.commit()
 
-    # --- helpers ------------------------------------------------------------
+    def clear(self, *, commit: bool = True) -> None:
+        self._conn.execute(f"DELETE FROM {self.table}")
+        if commit:
+            self._conn.commit()
 
-    @staticmethod
-    def _as_blob(vec: np.ndarray) -> bytes:
-        """Pack a float32 ndarray as a contiguous byte blob for sqlite-vec."""
-        arr = np.ascontiguousarray(vec, dtype=np.float32)
-        return arr.tobytes()
+    def count(self) -> int:
+        row = self._conn.execute(f"SELECT COUNT(*) FROM {self.table}").fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def has(self, rowid: int) -> bool:
+        row = self._conn.execute(
+            f"SELECT 1 FROM {self.table} WHERE rowid = {int(rowid)} LIMIT 1"
+        ).fetchone()
+        return row is not None
+
+    def count_by_ids(self, rowids: Sequence[int]) -> int:
+        if not rowids:
+            return 0
+        literals = ",".join(str(int(rid)) for rid in rowids)
+        row = self._conn.execute(
+            f"SELECT COUNT(*) FROM {self.table} WHERE rowid IN ({literals})"
+        ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def ids(self) -> set[int]:
+        rows = self._conn.execute(f"SELECT rowid FROM {self.table}").fetchall()
+        return {int(r[0]) for r in rows}
+
+
+__all__ = ["SqliteVecStore", "VectorDimMismatchError", "VectorStore", "assert_dim"]

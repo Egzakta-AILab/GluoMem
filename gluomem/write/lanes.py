@@ -1,18 +1,4 @@
-"""gluomem.write.lanes — fact/event/profile lane extraction.
-
-Each lane extracts a different kind of knowledge from a session and carries
-its own admission importance (``write.lanes.<lane>.importance``):
-
-- **fact** — atomic facts over the whole session text;
-- **event** — episodic events; the extractor resolves relative time cues
-  against ``reference_date`` (the session datetime) into ``event_date``,
-  mapped here to the frame ``event_time`` (ISO, seconds precision). Events
-  without a resolvable date keep ``event_time=None``; ingest applies the
-  session-datetime fallback (``created_at`` stays ingest time);
-- **profile** — durable per-speaker attributes over that speaker's turns.
-
-dspy-free: extraction goes through the ``Extractors`` facade.
-"""
+"""Fact, event, and profile lane extraction over session text."""
 
 from __future__ import annotations
 
@@ -47,9 +33,7 @@ def _lane_cfg(lane: LaneName, cfg: AppConfig) -> LaneConfig:
 
 
 def lane_importance(lane: LaneName, cfg: AppConfig) -> Importance:
-    """The admission importance for ``lane`` (validated against scoring keys)."""
-    # The config validator guarantees membership in scoring.importance_mult,
-    # whose keys are exactly the Importance literals.
+    """Return the admission importance configured for ``lane``."""
     importance: Importance = _lane_cfg(lane, cfg).importance  # type: ignore[assignment]
     return importance
 
@@ -63,15 +47,7 @@ def extract_observations(
     speaker_texts: Mapping[str, str],
     cfg: AppConfig,
 ) -> list[Observation]:
-    """Run every enabled lane over one session; deterministic ordering.
-
-    Output order: facts, then events, then profile per speaker (in
-    ``speakers`` order) — stable across runs so ingest reports and dedup
-    behave deterministically. With ``write.parallelism > 1`` the independent
-    lane LLM calls run concurrently; results are still assembled in the
-    fixed lane order, so parallel and sequential runs are byte-identical.
-    """
-    # One thunk per enabled lane call, keyed for ordered assembly.
+    """Run every enabled lane over one session in deterministic order."""
     thunks: list[tuple[str, Callable[[], list[Observation]]]] = []
 
     if _lane_cfg("fact", cfg).enabled:
@@ -145,13 +121,7 @@ def run_ordered(
     *,
     max_workers: int,
 ) -> list[tuple[str, _T]]:
-    """Run keyed thunks, returning (key, result) in INPUT order.
-
-    ``max_workers == 1`` runs inline (no threads — strict call order for
-    deterministic tests); otherwise a thread pool fans out the calls and the
-    results are reassembled by input index. The first exception (by input
-    order) is re-raised, matching sequential semantics.
-    """
+    """Run keyed thunks, returning ``(key, result)`` in input order."""
     if max_workers <= 1 or len(thunks) <= 1:
         return [(key, thunk()) for key, thunk in thunks]
 

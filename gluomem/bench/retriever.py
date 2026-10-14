@@ -19,7 +19,7 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from gluomem.bench.types import Prediction, RetrievedDoc, Sample
 from gluomem.embedding.providers import make_embedder
@@ -175,7 +175,7 @@ class GluoMemRetriever:
             abstention=decision,
         )
 
-    def manifest_extra(self) -> dict[str, object]:
+    def manifest_extra(self) -> dict[str, Any]:
         """Effective retrieval provenance for the run manifest (the runner wires
         this into ``retriever_info``). Records what ACTUALLY ran, not just what
         config asked for: ``rerank.active`` is whether a reranker was resolved

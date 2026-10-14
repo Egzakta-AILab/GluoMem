@@ -1,24 +1,4 @@
-"""gluomem.write.cognify — resolve extracted entities/relations into the KG.
-
-The extraction facade returns entity/relation candidates by NAME
-(``gluomem.llm.outputs.KGEntity``/``KGRelation``); this module resolves them
-into KG row ids:
-
-- Entity resolution is alias-aware whole-name matching
-  (``kg.find_valid_entities``) with create-if-missing — idempotent across
-  re-ingest (``k8s`` resolves to an existing ``kubernetes`` entity).
-- Relation endpoints resolve through the same entity resolution (an endpoint
-  the extractor did not list as an entity is created untyped). A duplicate
-  triple raises ``sqlite3.IntegrityError`` (UNIQUE source/target/type); the
-  gate recovers idempotently by looking the existing edge up.
-- ``retire_conflicting_relations`` implements functional-edge invalidation on
-  the contradiction path: of ``(s, rtype, t_new)`` and a valid
-  ``(s, rtype, t_old != t_new)`` the one valid from earlier is closed when the
-  other begins — bitemporal retire-not-delete, ordered by valid time.
-
-dspy-free: only the ``Extractors`` protocol and pydantic output types cross
-this boundary.
-"""
+"""Resolve extracted entities and relations into the knowledge graph."""
 
 from __future__ import annotations
 
@@ -40,9 +20,16 @@ if TYPE_CHECKING:
 _UNTYPED = "unknown"
 
 
+def _is_integrity_error(exc: Exception) -> bool:
+    return isinstance(exc, sqlite3.IntegrityError) or type(exc).__name__ in (
+        "IntegrityError",
+        "UniqueViolation",
+    )
+
+
 @dataclass
 class ResolvedGraph:
-    """Ids of the entities/relations a cognify pass resolved or created."""
+    """IDs of the entities and relations a cognify pass resolved or created."""
 
     entity_ids: list[int] = field(default_factory=list)
     relation_ids: list[int] = field(default_factory=list)
@@ -56,19 +43,13 @@ def _allow_set(cfg: AppConfig) -> frozenset[str]:
 def _resolve_entity(
     candidate: KGEntity, *, kg: KnowledgeGraph, cfg: AppConfig
 ) -> int | None:
-    """Resolve one entity candidate to a valid KG entity id (create if new).
-
-    Returns ``None`` when the entity-type gate DROPS the candidate
-    (``kg.entity_type_mode='drop'`` and its type is not allowlisted) — the
-    caller prunes any relation that touched it. ``mode='off'`` (default) skips
-    the gate entirely.
-    """
+    """Resolve one entity candidate to a valid KG entity ID (create if new)."""
     entity_type = candidate.entity_type
     if cfg.kg.entity_type_mode != "off":
         if entity_type.strip().lower() not in _allow_set(cfg):
             if cfg.kg.entity_type_mode == "drop":
                 return None
-            entity_type = cfg.kg.retype_to  # 'retype': relabel, keep the node
+            entity_type = cfg.kg.retype_to
     existing = kg.find_valid_entities(candidate.name, cfg.kg, entity_type=entity_type)
     if existing:
         return existing[0].id
@@ -81,12 +62,7 @@ def _resolve_entity(
 
 
 def _resolve_endpoint(name: str, *, kg: KnowledgeGraph, cfg: AppConfig) -> int | None:
-    """Resolve a relation endpoint by name regardless of type (create untyped).
-
-    Returns ``None`` under ``kg.entity_type_mode='drop'`` when the name is not
-    already a valid entity — materializing it would create exactly the untyped
-    junk node the drop gate removes, so the relation is pruned instead.
-    """
+    """Resolve a relation endpoint by name regardless of type (create untyped)."""
     existing = kg.find_valid_entities(name, cfg.kg)
     if existing:
         return existing[0].id
@@ -103,12 +79,7 @@ def cognify_text(
     cfg: AppConfig,
     valid_from: str | None = None,
 ) -> ResolvedGraph:
-    """Extract + resolve entities/relations from ``text`` into the KG.
-
-    ``valid_from`` backdates new relations to the observation's event time
-    (bitemporal): the edge is valid from when the fact HAPPENED, not from
-    ingest time. Returns the resolved ids (idempotent on re-ingest).
-    """
+    """Extract and resolve entities and relations from ``text`` into the KG."""
     if not cfg.write.cognify.enabled:
         return ResolvedGraph()
     return resolve_cognify_result(
@@ -125,15 +96,7 @@ def cognify_texts(
     valid_from_list: Sequence[str | None],
     max_workers: int,
 ) -> list[ResolvedGraph | Exception]:
-    """Batch cognify: LLM calls fan out; KG resolution stays sequential.
-
-    The extraction (facade) phase is pure LLM I/O and runs on up to
-    ``max_workers`` threads; the resolution phase writes the KG and runs on
-    the calling thread IN INPUT ORDER, so entity/relation ids are identical
-    to a fully sequential run. Per-text failures come back as the exception
-    at that index (the caller records them; one bad text never aborts the
-    batch).
-    """
+    """Batch cognify: LLM calls fan out; KG resolution stays sequential."""
     if not cfg.write.cognify.enabled:
         return [ResolvedGraph() for _ in texts]
 
@@ -146,7 +109,7 @@ def cognify_texts(
         for _, thunk in thunks:
             try:
                 raw.append(thunk())
-            except Exception as exc:  # noqa: BLE001 - recorded per index
+            except Exception as exc:  # noqa: BLE001
                 raw.append(exc)
     else:
         from concurrent.futures import ThreadPoolExecutor
@@ -156,7 +119,7 @@ def cognify_texts(
             for future in futures:
                 try:
                     raw.append(future.result())
-                except Exception as exc:  # noqa: BLE001 - recorded per index
+                except Exception as exc:  # noqa: BLE001
                     raw.append(exc)
 
     out: list[ResolvedGraph | Exception] = []
@@ -177,13 +140,13 @@ def resolve_cognify_result(
     cfg: AppConfig,
     valid_from: str | None = None,
 ) -> ResolvedGraph:
-    """Resolve one extraction result into KG ids (single-threaded DB phase)."""
+    """Resolve one extraction result into KG IDs (single-threaded DB phase)."""
     entity_ids: list[int] = []
     name_to_id: dict[str, int] = {}
     for candidate in result.entities:
         eid = _resolve_entity(candidate, kg=kg, cfg=cfg)
         if eid is None:
-            continue  # dropped by the entity-type gate (drop mode)
+            continue
         if eid not in entity_ids:
             entity_ids.append(eid)
         name_to_id.setdefault(candidate.name, eid)
@@ -202,7 +165,7 @@ def resolve_cognify_result(
             if target_id is not None:
                 name_to_id[rel.target] = target_id
         if source_id is None or target_id is None:
-            continue  # an endpoint was dropped → prune the relation
+            continue
         try:
             created = kg.create_relation(
                 source_id,
@@ -211,13 +174,9 @@ def resolve_cognify_result(
                 confidence=rel.confidence,
                 valid_from=valid_from,
             )
-        except sqlite3.IntegrityError:
-            # Duplicate triple. Valid row -> recover it (idempotent re-ingest).
-            # Retired row -> the fact is being RE-ASSERTED after a
-            # contradiction retired it (real LoCoMo does this): reopen the
-            # edge from this assertion's valid time (the retirement gap is
-            # kept in the relation history), feeding contradiction detection
-            # like any fresh edge.
+        except Exception as exc:
+            if not _is_integrity_error(exc):
+                raise
             existing = [
                 r
                 for r in kg.find_valid_relations(source_id, rel.relation_type)
@@ -247,23 +206,7 @@ def retire_conflicting_relations(
     kg: KnowledgeGraph,
     kg_cfg: KgConfig | None = None,
 ) -> list[int]:
-    """Functional-edge invalidation for ``(s, rtype, t_old != t_new)``.
-
-    For each new relation, every OTHER currently-valid relation with the same
-    source and type but a different target conflicts with it. With
-    ``kg_cfg.predicate_families`` configured, "same type" widens to the whole
-    predicate family, so ``MOVED_TO`` can retire a stale ``LIVES_IN``.
-
-    The conflict is resolved by VALID time, not by recording order:
-
-    - the new edge is valid from on or after the old one: the old edge is
-      closed at the new edge's ``valid_from`` (when the change happened);
-    - the new edge is valid from strictly earlier (a backdated, older fact
-      recorded late): the old edge stays current and the new edge is closed
-      at the old edge's ``valid_from``.
-
-    Retire-not-delete either way. Returns the retired relation ids.
-    """
+    """Functional-edge invalidation for ``(s, rtype, t_old != t_new)`` ordered by valid time."""
     retired: list[int] = []
     for rel in new_relations:
         if kg_cfg is not None:

@@ -1,37 +1,73 @@
-"""gluomem.frames.sessions — GOP session lifecycle.
-
-A *session* is the Group of Pictures (GOP) container that frames belong to.
-``memory_frames.gop_id`` has a foreign key to ``sessions(gop_id)``, so a
-session row MUST exist before any frame is inserted. This module provides the
-``get_or_create_session`` helper used by ``FrameStore`` to ensure the FK target
-exists (insert-if-absent, idempotent).
-"""
+"""Session (GOP) helpers."""
 
 from __future__ import annotations
 
 import sqlite3
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from gluomem.storage.backend import DatabaseBackend
+    from gluomem.storage.db import MindDB
 
 
 def get_or_create_session(
-    conn: sqlite3.Connection,
+    db: MindDB | DatabaseBackend | sqlite3.Connection,
     gop_id: str,
-    *,
     project_id: str | None = None,
-) -> int:
-    """Ensure a session row exists for ``gop_id`` and return its integer id.
+    *,
+    commit: bool = False,
+) -> None:
+    """Ensure a row exists in ``sessions`` for ``gop_id``."""
+    if isinstance(db, sqlite3.Connection):
+        db.execute(
+            "INSERT OR IGNORE INTO sessions(gop_id, project_id) VALUES (?, ?)",
+            (gop_id, project_id),
+        )
+        if commit:
+            db.commit()
+        return
 
-    Inserts if absent (``INSERT OR IGNORE``), then reads back the id. Idempotent:
-    calling twice with the same ``gop_id`` returns the same session id and does
-    NOT create a duplicate (``sessions.gop_id`` is UNIQUE).
-    """
-    conn.execute(
-        "INSERT OR IGNORE INTO sessions(gop_id, project_id) VALUES (?, ?)",
-        (gop_id, project_id),
+    backend: Any = db.backend if hasattr(db, "backend") else db
+    if getattr(backend, "dialect", "sqlite") == "postgres":
+        sql = (
+            "INSERT INTO sessions(gop_id, project_id) VALUES (?, ?) "
+            "ON CONFLICT (gop_id) DO NOTHING"
+        )
+    else:
+        sql = "INSERT OR IGNORE INTO sessions(gop_id, project_id) VALUES (?, ?)"
+    backend.execute(sql, (gop_id, project_id))
+    if commit:
+        backend.commit()
+
+
+def end_session(
+    db: MindDB | DatabaseBackend | sqlite3.Connection,
+    gop_id: str,
+    summary: str | None = None,
+    *,
+    commit: bool = True,
+) -> None:
+    """Mark a session as ended and optionally store its summary."""
+    if isinstance(db, sqlite3.Connection):
+        db.execute(
+            "UPDATE sessions SET status = 'ended', ended_at = datetime('now'), summary = ? "
+            "WHERE gop_id = ?",
+            (summary, gop_id),
+        )
+        if commit:
+            db.commit()
+        return
+
+    backend: Any = db.backend if hasattr(db, "backend") else db
+    now_expr = (
+        " CURRENT_TIMESTAMP::text "
+        if getattr(backend, "dialect", "sqlite") == "postgres"
+        else " datetime('now') "
     )
-    conn.commit()
-    row = conn.execute(
-        "SELECT id FROM sessions WHERE gop_id=?", (gop_id,)
-    ).fetchone()
-    if row is None:  # pragma: no cover — INSERT OR IGNORE guarantees the row
-        raise RuntimeError(f"session for gop_id={gop_id!r} vanished after upsert")
-    return int(row[0])
+    backend.execute(
+        f"UPDATE sessions SET status = 'ended', ended_at = {now_expr}, summary = ? "
+        "WHERE gop_id = ?",
+        (summary, gop_id),
+    )
+    if commit:
+        backend.commit()

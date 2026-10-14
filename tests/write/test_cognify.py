@@ -1,9 +1,23 @@
-"""Cognify resolution tests — idempotent entities, dup-triple recovery, retirement."""
+"""Cognify entity/relation resolution, bitemporal retirement, and contradiction triggers."""
 
 from __future__ import annotations
 
-from gluomem.llm import CognifyResult, FakeExtractors, KGEntity, KGRelation
+from datetime import datetime
+
+import pytest
+
+from gluomem.config.app_config import load_config
+from gluomem.llm import (
+    CognifyResult,
+    ContradictionVerdict,
+    ExtractedFact,
+    FakeExtractors,
+    KGEntity,
+    KGRelation,
+)
 from gluomem.write.cognify import cognify_text, retire_conflicting_relations
+from gluomem.write.gate import InjectionScanner
+from gluomem.write.ingest import Conversation, Session, Turn, ingest_conversation
 
 
 def _facade(*results: CognifyResult) -> FakeExtractors:
@@ -22,87 +36,38 @@ def _lives_in(city: str) -> CognifyResult:
     )
 
 
-def test_entity_resolution_idempotent(env) -> None:
-    result = _lives_in("boston")
-    facade = _facade(result, result)
+def test_entity_resolution_alias_and_implicit_endpoints(env) -> None:
+    res = _lives_in("boston")
+    facade = _facade(res, res)
     g1 = cognify_text("t", facade=facade, kg=env.kg, cfg=env.cfg)
     g2 = cognify_text("t", facade=facade, kg=env.kg, cfg=env.cfg)
     assert g1.entity_ids == g2.entity_ids
-    assert g1.relation_ids == g2.relation_ids  # dup triple recovered, same edge
+    assert g1.relation_ids == g2.relation_ids
     assert len(env.kg.find_valid_entities("alice", env.cfg.kg)) == 1
 
-
-def test_alias_resolves_to_existing_entity(env) -> None:
     existing = env.kg.create_entity("technology", "kubernetes")
-    facade = _facade(
-        CognifyResult(entities=[KGEntity(entity_type="technology", name="k8s")])
-    )
-    g = cognify_text("t", facade=facade, kg=env.kg, cfg=env.cfg)
-    assert g.entity_ids == [existing.id]
-
-
-def test_relation_endpoint_created_when_not_listed_as_entity(env) -> None:
-    facade = _facade(
-        CognifyResult(
-            entities=[KGEntity(entity_type="person", name="alice")],
-            relations=[
-                KGRelation(source="alice", target="acme", relation_type="WORKS_AT")
-            ],
-        )
-    )
-    g = cognify_text("t", facade=facade, kg=env.kg, cfg=env.cfg)
-    assert len(g.relation_ids) == 1
-    acme = env.kg.find_valid_entities("acme", env.cfg.kg)
-    assert len(acme) == 1 and acme[0].entity_type == "unknown"
-
-
-def test_retire_conflicting_relations_functional_edge(env) -> None:
-    old = cognify_text(
-        "t", facade=_facade(_lives_in("boston")), kg=env.kg, cfg=env.cfg
-    )
-    new = cognify_text(
-        "t2", facade=_facade(_lives_in("seattle")), kg=env.kg, cfg=env.cfg
-    )
-    retired = retire_conflicting_relations(new.relations, kg=env.kg)
-    assert retired == old.relation_ids
-    # Retire-not-delete: the row survives with valid_to set.
-    old_rel = env.kg.get_relation(old.relation_ids[0])
-    assert old_rel.valid_to is not None
-    # The new edge stays valid.
-    assert env.kg.get_relation(new.relation_ids[0]).valid_to is None
-
-
-def test_reasserted_retired_triple_reopens_edge(env) -> None:
-    """boston -> seattle -> boston again. The third assertion hits the
-    UNIQUE triple whose row was RETIRED — recovery must reopen it, not
-    crash (real LoCoMo re-mentions retired facts)."""
-    first = cognify_text(
-        "t", facade=_facade(_lives_in("boston")), kg=env.kg, cfg=env.cfg
-    )
-    moved = cognify_text(
-        "t2", facade=_facade(_lives_in("seattle")), kg=env.kg, cfg=env.cfg
-    )
-    retire_conflicting_relations(moved.relations, kg=env.kg)
-    assert env.kg.get_relation(first.relation_ids[0]).valid_to is not None
-
-    back = cognify_text(
-        "t3", facade=_facade(_lives_in("boston")), kg=env.kg, cfg=env.cfg
-    )
-    # Same row identity, valid again.
-    assert back.relation_ids == first.relation_ids
-    assert env.kg.get_relation(back.relation_ids[0]).valid_to is None
-
-
-def test_relation_backdating_via_valid_from(env) -> None:
-    g = cognify_text(
+    g_alias = cognify_text(
         "t",
-        facade=_facade(_lives_in("boston")),
+        facade=_facade(CognifyResult(entities=[KGEntity(entity_type="technology", name="k8s")])),
         kg=env.kg,
         cfg=env.cfg,
-        valid_from="2023-05-07T00:00:00",
     )
-    rel = env.kg.get_relation(g.relation_ids[0])
-    assert rel.valid_from == "2023-05-07T00:00:00"
+    assert g_alias.entity_ids == [existing.id]
+
+    g_imp = cognify_text(
+        "t",
+        facade=_facade(
+            CognifyResult(
+                entities=[KGEntity(entity_type="person", name="alice")],
+                relations=[KGRelation(source="alice", target="acme", relation_type="WORKS_AT")],
+            )
+        ),
+        kg=env.kg,
+        cfg=env.cfg,
+    )
+    assert len(g_imp.relation_ids) == 1
+    acme = env.kg.find_valid_entities("acme", env.cfg.kg)
+    assert len(acme) == 1 and acme[0].entity_type == "unknown"
 
 
 def test_cognify_disabled_is_noop(env) -> None:
@@ -110,142 +75,198 @@ def test_cognify_disabled_is_noop(env) -> None:
     facade = _facade(_lives_in("boston"))
     g = cognify_text("t", facade=facade, kg=env.kg, cfg=cfg)
     assert g.entity_ids == [] and g.relation_ids == []
-    assert facade.calls["cognify"] == 0  # facade never invoked
+    assert facade.calls["cognify"] == 0
 
 
-# --- entity-type pollution gate (kg.entity_type_mode) -----------------------
+def test_bitemporal_retirement_reassertion_and_valid_time_ordering(env) -> None:
+    def _rel_on(city: str, when: str):
+        g = cognify_text(
+            f"t-{city}-{when}",
+            facade=_facade(_lives_in(city)),
+            kg=env.kg,
+            cfg=env.cfg,
+            valid_from=when,
+        )
+        return env.kg.get_relation(g.relation_ids[0]), g
 
-# Alice (allowlisted 'person') enjoys a junk-typed entity, and has a relation to
-# an endpoint never listed as an entity (resolves untyped 'unknown').
-def _polluted() -> CognifyResult:
-    return CognifyResult(
-        entities=[
-            KGEntity(entity_type="person", name="alice"),
-            KGEntity(entity_type="coffee scene", name="the coffee scene"),
-        ],
-        relations=[
-            KGRelation(source="alice", target="the coffee scene", relation_type="ENJOYS"),
-            KGRelation(
-                source="alice", target="golden retriever puppy", relation_type="HAS_PET"
-            ),
-        ],
-    )
+    boston, _ = _rel_on("boston", "2023-01-01T00:00:00")
+    seattle, g_sea = _rel_on("seattle", "2023-03-01T00:00:00")
+    assert retire_conflicting_relations(g_sea.relations, kg=env.kg) == [boston.id]
+    assert env.kg.get_relation(boston.id).valid_to == "2023-03-01T00:00:00"
 
-
-def test_entity_type_off_keeps_junk_unchanged(env) -> None:
-    """`off` applies no hygiene: junk type + untyped endpoint pass through."""
-    cfg = env.cfg.with_overrides({"kg.entity_type_mode": "off"})
-    g = cognify_text("t", facade=_facade(_polluted()), kg=env.kg, cfg=cfg)
-    assert len(g.entity_ids) == 2 and len(g.relation_ids) == 2
-    junk = env.kg.find_valid_entities("the coffee scene", cfg.kg)
-    assert junk and junk[0].entity_type == "coffee scene"
-    puppy = env.kg.find_valid_entities("golden retriever puppy", cfg.kg)
-    assert puppy and puppy[0].entity_type == "unknown"
-
-
-def test_entity_type_default_is_retype() -> None:
-    """The shipped default is `retype`."""
-    from gluomem.config.app_config import load_config
-
-    assert load_config().kg.entity_type_mode == "retype"
-
-
-def test_entity_type_retype_relabels_but_keeps_graph(env) -> None:
-    cfg = env.cfg.with_overrides({"kg.entity_type_mode": "retype"})  # explicit, though default
-    g = cognify_text("t", facade=_facade(_polluted()), kg=env.kg, cfg=cfg)
-    # Node + both relations survive; only the junk type is relabelled.
-    assert len(g.entity_ids) == 2 and len(g.relation_ids) == 2
-    junk = env.kg.find_valid_entities("the coffee scene", cfg.kg)
-    assert junk and junk[0].entity_type == "other"
-    # Allowlisted entity untouched.
-    alice = env.kg.find_valid_entities("alice", cfg.kg)
-    assert alice and alice[0].entity_type == "person"
-
-
-def test_entity_type_drop_prunes_entity_and_its_relations(env) -> None:
-    cfg = env.cfg.with_overrides({"kg.entity_type_mode": "drop"})
-    g = cognify_text("t", facade=_facade(_polluted()), kg=env.kg, cfg=cfg)
-    # Only allowlisted Alice survives; both relations pruned (one endpoint is the
-    # dropped junk entity, the other an unlisted untyped endpoint).
-    assert len(g.entity_ids) == 1 and len(g.relation_ids) == 0
-    assert not env.kg.find_valid_entities("the coffee scene", cfg.kg)
-    assert not env.kg.find_valid_entities("golden retriever puppy", cfg.kg)
-    alice = env.kg.find_valid_entities("alice", cfg.kg)
-    assert alice and alice[0].entity_type == "person"
-
-
-def test_entity_type_drop_relinks_relation_to_existing_allowlisted(env) -> None:
-    """A junk-typed duplicate of an existing GOOD node is dropped, but a relation
-    naming it reconnects to the real node (find-by-name, no type filter)."""
-    acme = env.kg.create_entity("organization", "acme")
-    result = CognifyResult(
-        entities=[
-            KGEntity(entity_type="person", name="alice"),
-            KGEntity(entity_type="vibes", name="acme"),  # junk-typed dup of acme
-        ],
-        relations=[KGRelation(source="alice", target="acme", relation_type="WORKS_AT")],
-    )
-    cfg = env.cfg.with_overrides({"kg.entity_type_mode": "drop"})
-    g = cognify_text("t", facade=_facade(result), kg=env.kg, cfg=cfg)
-    assert len(g.relation_ids) == 1  # relation kept, wired to the real acme
-    rel = env.kg.get_relation(g.relation_ids[0])
-    assert rel.target_id == acme.id
-    # No junk-typed 'vibes' duplicate was created.
-    assert all(
-        e.entity_type != "vibes" for e in env.kg.find_valid_entities("acme", cfg.kg)
-    )
-
-
-# --- valid time, not recording order ----------------------------------------
-
-
-def _rel_on(env, city: str, when: str | None):
-    g = cognify_text(
-        f"t-{city}-{when}", facade=_facade(_lives_in(city)), kg=env.kg,
-        cfg=env.cfg, valid_from=when,
-    )
-    return env.kg.get_relation(g.relation_ids[0]), g
-
-
-def test_newer_fact_closes_old_edge_at_its_valid_time(env) -> None:
-    old, _ = _rel_on(env, "boston", "2023-01-01T00:00:00")
-    new, g = _rel_on(env, "seattle", "2023-05-01T00:00:00")
-    assert retire_conflicting_relations(g.relations, kg=env.kg) == [old.id]
-    assert env.kg.get_relation(old.id).valid_to == "2023-05-01T00:00:00"
-    assert {r.id for r in env.kg.as_of("2023-03-01").relations} == {old.id}
-    assert {r.id for r in env.kg.as_of("2023-06-01").relations} == {new.id}
-
-
-def test_late_recorded_older_fact_does_not_retire_newer_one(env) -> None:
-    """Seattle (valid May) is recorded first; Boston (valid Jan) is recorded
-    later. Newest-recorded is not newest-valid: Seattle stays current and
-    Boston is closed when Seattle began."""
-    seattle, _ = _rel_on(env, "seattle", "2023-05-01T00:00:00")
-    boston, g = _rel_on(env, "boston", "2023-01-01T00:00:00")
-    assert retire_conflicting_relations(g.relations, kg=env.kg) == [boston.id]
-    assert env.kg.get_relation(seattle.id).valid_to is None
-    assert env.kg.get_relation(boston.id).valid_to == "2023-05-01T00:00:00"
-    assert {r.id for r in env.kg.as_of("2023-03-01").relations} == {boston.id}
-    assert {r.id for r in env.kg.as_of("2023-06-01").relations} == {seattle.id}
-
-
-def test_replayed_history_keeps_gap_after_reassertion(env) -> None:
-    """Boston (Jan) -> Seattle (Mar) -> Boston again (Jul), replayed with
-    fixed valid times: April is Seattle, not Boston."""
-    boston, _ = _rel_on(env, "boston", "2023-01-01T00:00:00")
-    _seattle, g = _rel_on(env, "seattle", "2023-03-01T00:00:00")
-    retire_conflicting_relations(g.relations, kg=env.kg)
+    # Re-asserting retired triple reopens edge and preserves intermediate gap.
     again = cognify_text(
-        "t-back", facade=_facade(_lives_in("boston")), kg=env.kg, cfg=env.cfg,
+        "t-back",
+        facade=_facade(_lives_in("boston")),
+        kg=env.kg,
+        cfg=env.cfg,
         valid_from="2023-07-01T00:00:00",
     )
     assert again.relation_ids == [boston.id]
     retire_conflicting_relations(again.relations, kg=env.kg)
 
     def city_at(iso: str) -> set[int]:
-        return {r.target_id for r in env.kg.as_of(iso).relations if r.relation_type == "LIVES_IN"}
+        return {
+            r.target_id
+            for r in env.kg.as_of(iso).relations
+            if r.relation_type == "LIVES_IN"
+        }
 
-    b_id, s_id = boston.target_id, _seattle.target_id
-    assert city_at("2023-02-01") == {b_id}
-    assert city_at("2023-04-01") == {s_id}
-    assert city_at("2023-08-01") == {b_id}
+    assert city_at("2023-02-01") == {boston.target_id}
+    assert city_at("2023-04-01") == {seattle.target_id}
+    assert city_at("2023-08-01") == {boston.target_id}
+
+
+def test_late_recorded_older_fact_does_not_retire_newer_one(env) -> None:
+    g_sea = cognify_text(
+        "t-sea",
+        facade=_facade(_lives_in("seattle")),
+        kg=env.kg,
+        cfg=env.cfg,
+        valid_from="2023-05-01T00:00:00",
+    )
+    g_bos = cognify_text(
+        "t-bos",
+        facade=_facade(_lives_in("boston")),
+        kg=env.kg,
+        cfg=env.cfg,
+        valid_from="2023-01-01T00:00:00",
+    )
+    seattle_id, boston_id = g_sea.relation_ids[0], g_bos.relation_ids[0]
+    assert retire_conflicting_relations(g_bos.relations, kg=env.kg) == [boston_id]
+    assert env.kg.get_relation(seattle_id).valid_to is None
+    assert env.kg.get_relation(boston_id).valid_to == "2023-05-01T00:00:00"
+
+
+def test_entity_type_modes_off_retype_and_drop(env) -> None:
+    assert load_config().kg.entity_type_mode == "retype"
+    polluted = CognifyResult(
+        entities=[
+            KGEntity(entity_type="person", name="alice"),
+            KGEntity(entity_type="coffee scene", name="the coffee scene"),
+        ],
+        relations=[
+            KGRelation(source="alice", target="the coffee scene", relation_type="ENJOYS"),
+            KGRelation(source="alice", target="golden retriever puppy", relation_type="HAS_PET"),
+        ],
+    )
+
+    cfg_off = env.cfg.with_overrides({"kg.entity_type_mode": "off"})
+    g_off = cognify_text("t", facade=_facade(polluted), kg=env.kg, cfg=cfg_off)
+    assert len(g_off.entity_ids) == 2 and len(g_off.relation_ids) == 2
+
+    cfg_retype = env.cfg.with_overrides({"kg.entity_type_mode": "retype"})
+    g_ret = cognify_text("t2", facade=_facade(polluted), kg=env.kg, cfg=cfg_retype)
+    assert len(g_ret.entity_ids) == 2 and len(g_ret.relation_ids) == 2
+
+    acme = env.kg.create_entity("organization", "acme")
+    dup_junk = CognifyResult(
+        entities=[
+            KGEntity(entity_type="person", name="alice"),
+            KGEntity(entity_type="vibes", name="acme"),
+        ],
+        relations=[KGRelation(source="alice", target="acme", relation_type="WORKS_AT")],
+    )
+    cfg_drop = env.cfg.with_overrides({"kg.entity_type_mode": "drop"})
+    g_drop = cognify_text("t3", facade=_facade(dup_junk), kg=env.kg, cfg=cfg_drop)
+    assert len(g_drop.relation_ids) == 1
+    assert env.kg.get_relation(g_drop.relation_ids[0]).target_id == acme.id
+
+
+_BOB = KGEntity(entity_type="person", name="bob")
+_BOSTON = KGEntity(entity_type="city", name="boston")
+_SEATTLE = KGEntity(entity_type="city", name="seattle")
+_F1 = "Bob lives in Boston."
+_F2 = "Bob moved to Seattle."
+_FAMILIES = [["LIVES_IN", "MOVED_TO", "RESIDES_IN"]]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_checks", "expected_b", "expected_retired"),
+    [
+        ({}, 0, 0, 0),
+        ({"write.subject.trigger": "kg_edge_conflict"}, 0, 0, 0),
+        (
+            {
+                "write.subject.trigger": "kg_edge_conflict",
+                "kg.predicate_families": _FAMILIES,
+            },
+            1,
+            1,
+            1,
+        ),
+        (
+            {
+                "write.subject.trigger": "both",
+                "kg.predicate_families": _FAMILIES,
+            },
+            1,
+            1,
+            1,
+        ),
+    ],
+)
+def test_contradiction_triggers(
+    env,
+    scripted_facade_cls,
+    overrides: dict,
+    expected_checks: int,
+    expected_b: int,
+    expected_retired: int,
+) -> None:
+    cfg = env.cfg.with_overrides(
+        {
+            "write.raw_turns.enabled": False,
+            "write.lanes.event.enabled": False,
+            "write.lanes.profile.enabled": False,
+            **overrides,
+        }
+    )
+    facade = scripted_facade_cls(
+        facts={
+            "session one": [ExtractedFact(text=_F1)],
+            "session two": [ExtractedFact(text=_F2)],
+        },
+        cognify_map={
+            _F1: CognifyResult(
+                entities=[_BOB, _BOSTON],
+                relations=[
+                    KGRelation(source="bob", target="boston", relation_type="LIVES_IN")
+                ],
+            ),
+            _F2: CognifyResult(
+                entities=[_BOB, _SEATTLE],
+                relations=[
+                    KGRelation(source="bob", target="seattle", relation_type="MOVED_TO")
+                ],
+            ),
+        },
+        verdicts={
+            "moved to Seattle": ContradictionVerdict(
+                is_contradiction=True, description="Bob moved cities"
+            )
+        },
+    )
+    conv = Conversation(
+        conv_id="c1",
+        speakers=("Bob", "Ann"),
+        sessions=[
+            Session(
+                index=i,
+                date_time=datetime(2023, 5, 8 + i),
+                turns=[Turn(speaker="Bob", text=f"chatter in session {w}")],
+            )
+            for i, w in ((1, "one"), (2, "two"))
+        ],
+    )
+    report = ingest_conversation(
+        conv,
+        facade=facade,
+        scanner=InjectionScanner(cfg.safety),
+        store=env.store,
+        kg=env.kg,
+        cfg=cfg,
+    )
+    assert facade.calls["check_contradiction"] == expected_checks
+    assert report.b_frames == expected_b
+    assert report.retired_edges == expected_retired

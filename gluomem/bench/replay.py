@@ -1,30 +1,4 @@
-"""gluomem.bench.replay — ordered replay of permitted events, then probes.
-
-The sequential-ingestion protocol for incremental-memory benchmarks
-(MemoryAgentBench-shaped). Each history is a list of events in arrival order
-and a set of probes, each asked after a cursor (``after_seq``). For every
-probe the runner:
-
-1. ingests, through the normal write gate, only the events with
-   ``seq <= after_seq`` that are not yet in memory (probe questions, accepted
-   answers and later events are never passed to the write path);
-2. checks that every ingested frame's FTS and vector projections are ready,
-   and refuses to query otherwise;
-3. searches with the probe's logical time as the clock, so recency decay
-   never depends on today's date;
-4. scores the retrieved events objectively (no reader model).
-
-Each (candidate, history) gets a fresh ``.mind`` file; an existing file is
-refused so no candidate or history can see another's memories.
-
-Receipts contain no wall-clock fields, so the same fixture, config and
-embedder reproduce a byte-identical receipt.
-
-Future seam (not implemented): interactive benchmarks (MemoryArena,
-STATE-Bench) need a trajectory runner where an agent acts, the environment
-observes, and only the observation becomes the next eligible event. See
-``TrajectoryEnvironment``; nothing in this module implements it.
-"""
+"""Ordered replay of permitted events followed by probes."""
 
 from __future__ import annotations
 
@@ -35,7 +9,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from gluomem.bench.metrics import MetricRegistry, objective_tag
 from gluomem.bench.registry import (
@@ -98,23 +72,6 @@ class ReplayHistory:
     history_id: str
     events: tuple[ReplayEvent, ...]
     probes: tuple[ReplayProbe, ...]
-
-
-class TrajectoryEnvironment(Protocol):
-    """Seam for a future trajectory runner (interactive benchmarks).
-
-    ``reset`` starts an episode and returns the first observation; ``step``
-    applies an agent action and returns ``(observation, done)``. A runner
-    would ingest each observation as the next eligible event, recall before
-    each action, and score task outcomes. No implementation exists yet.
-    """
-
-    def reset(self, episode_id: str) -> str: ...
-
-    def step(self, action: str) -> tuple[str, bool]: ...
-
-
-# --- fixture loading -----------------------------------------------------------
 
 
 def _validate(h: ReplayHistory) -> None:
@@ -208,9 +165,6 @@ def load_registered_fixture(benchmark_id: str) -> tuple[BenchmarkEntry, list[Rep
     return entry, histories, sha
 
 
-# --- scoring -------------------------------------------------------------------
-
-
 def _probe_scores(
     probe: ReplayProbe, retrieved: Sequence[tuple[str | None, str]], k: int
 ) -> dict[str, float | None]:
@@ -232,9 +186,6 @@ def _probe_scores(
     else:
         out[f"current_over_stale@{k}"] = None
     return out
-
-
-# --- runner --------------------------------------------------------------------
 
 
 class ReplayRunner:
@@ -433,7 +384,6 @@ __all__ = [
     "ReplayNotReadyError",
     "ReplayProbe",
     "ReplayRunner",
-    "TrajectoryEnvironment",
     "load_registered_fixture",
     "load_replay_fixture",
     "receipt_digest",

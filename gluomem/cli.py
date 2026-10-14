@@ -150,7 +150,7 @@ def _cmd_index(args: argparse.Namespace) -> int:
         embedder = make_embedder(cfg)
         if args.index_command == "rebuild":
             store = FrameStore.rebuild_index(db, embedder, chunking=cfg.chunking)
-            n = db.conn.execute("SELECT COUNT(*) FROM memory_frames").fetchone()[0]
+            n = store.count_frames()
             print(f"rebuilt index for {n} frame(s); fingerprint {store.fingerprint.digest}")
         else:
             fp = adopt_embedder(db, embedder)
@@ -646,7 +646,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             return 1
         return handler(args)
     print(
-        f"gluomem: '{args.command}' is not implemented yet (arrives in M6+).",
+        f"gluomem: '{args.command}' is not implemented yet.",
         file=sys.stderr,
     )
     return 1

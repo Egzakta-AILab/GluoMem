@@ -1,15 +1,4 @@
-"""gluomem.embedding.reranker — Reranker protocol + cross-encoder impl.
-
-A :class:`Reranker` protocol re-scores ``(query, docs)`` pairs into logits.
-The real impl :class:`CrossEncoderReranker` wraps
-``cross-encoder/ms-marco-MiniLM-L-6-v2`` via ``sentence-transformers`` and
-lazy-loads the model on first use — merely importing or constructing it does
-NOT download anything. It sits behind the protocol so callers stay decoupled
-and tests use a stub.
-
-The cross-encoder is OPTIONAL and never loaded by the default test run. Any
-test that loads the real model is ``@pytest.mark.slow``.
-"""
+"""Reranker protocol and cross-encoder implementation."""
 
 from __future__ import annotations
 
@@ -21,50 +10,29 @@ if TYPE_CHECKING:
 
 @runtime_checkable
 class Reranker(Protocol):
-    """A reranker re-scores ``(query, docs)`` into a logit per doc.
-
-    Implementations MUST return one float per doc, ordered to match the input
-    ``docs`` list. The real cross-encoder is lazy-loaded and optional; tests
-    use a deterministic stub.
-    """
+    """Re-score ``(query, docs)`` pairs into a logit per document."""
 
     def score(self, query: str, docs: list[str]) -> list[float]:
-        """Return a logit per doc, aligned with ``docs`` (higher = more relevant)."""
         ...
 
 
 class StubReranker:
-    """A deterministic, offline reranker for tests.
-
-    Returns a fixed, configurable logit per doc so tests can assert that the
-    rerank pool replaces scores and re-orders by the stub logit. No model is
-    loaded; no network is used.
-    """
+    """Deterministic offline reranker for tests."""
 
     def __init__(self, logit: float = 1.0) -> None:
         self._logit: float = float(logit)
 
-    def score(self, query: str, docs: list[str]) -> list[float]:
+    def score(self, query: str, docs: list[str]) -> list[float]:  # noqa: ARG002
         return [self._logit for _ in docs]
 
 
 class CrossEncoderReranker:
-    """A real cross-encoder reranker wrapping ``sentence-transformers``.
-
-    The model is lazy-loaded on first :meth:`score` call so importing or
-    constructing this class does NOT download anything. The provider model id
-    comes from config (the registry's ``reranker`` entry →
-    ``cross-encoder/ms-marco-MiniLM-L-6-v2``); no literal model id is hardcoded
-    in callers.
-
-    This class is OPTIONAL and never loaded by the default test run. Any test
-    exercising it is ``@pytest.mark.slow``.
-    """
+    """Lazy-loaded ``sentence-transformers`` cross-encoder reranker."""
 
     def __init__(self, model_name: str, *, revision: str | None = None) -> None:
         self._model_name: str = model_name
         self._revision: str | None = revision
-        self._model: Any = None  # CrossEncoder, typed loose to avoid an import
+        self._model: Any = None
 
     @property
     def model_name(self) -> str:
@@ -87,21 +55,11 @@ class CrossEncoderReranker:
         return [float(x) for x in logits]
 
 
-#: Reranker providers with an implementation in this package.
 RERANKER_PROVIDERS: tuple[str, ...] = ("inprocess",)
 
 
 def make_reranker(cfg: AppConfig) -> Reranker | None:
-    """Config-resolved reranker; ``None`` when reranking is disabled.
-
-    The registry entry's ``provider`` selects the implementation; only
-    ``inprocess`` (a ``sentence-transformers`` cross-encoder) exists, and any
-    other provider raises
-    :class:`~gluomem.components.ProviderUnavailableError` instead of silently
-    running a different implementation. A missing ``embeddings`` extra raises
-    :class:`~gluomem.extras.MissingExtraError`. Construction does not download
-    the model.
-    """
+    """Build the configured reranker, or return ``None`` when reranking is disabled."""
     if not cfg.search.rerank.enabled:
         return None
     from gluomem.components import ProviderUnavailableError

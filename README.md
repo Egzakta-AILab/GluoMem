@@ -17,7 +17,7 @@ GluoMem is a research-stage Python library (version 0.0.1). It runs locally agai
 
 ## What is not implemented
 
-- **Offline numeric tuning.** `gluomem/tune` is a placeholder, and `gluomem tune` and `gluomem ablate` exit with "not implemented". The tuning design in [DESIGN.md §9](./DESIGN.md#9-tuning-subsystem) is a plan.
+- **Offline numeric tuning.** The tuning design in [DESIGN.md §9](./DESIGN.md#9-tuning-subsystem) is a plan; `gluomem tune` and `gluomem ablate` exit with "not implemented".
 - **Prompt optimization runs.** Fact and event extraction now have a frozen, source-backed objective ([extraction_eval](./gluomem/llm/extraction_eval.py)): unsupported facts score zero, and wrong subject, lost negation, a plan recorded as done and a superseded state presented as current are reported as separate errors with feedback. Its fixture is nine authored cases, which is enough to test the scorer, not to measure model quality. `make optimize-prompts` (MIPROv2) spends real tokens, is never run automatically, and refuses extraction trainsets that do not reference annotated, non-sealed cases. The [campaign contract](./gluomem/llm/fixtures/campaign_v1.json) for baseline, MIPROv2 and GEPA comparisons is defined but unrun and unauthorized; other tasks still use a parse-or-exact-match metric.
 - **Service features**: HTTP or MCP API, multi-user identity, tenants, workspaces, RBAC, durable jobs, deployment packaging.
 
@@ -32,9 +32,10 @@ The core package is small. Model-backed components are optional extras. When a c
 | Install | Adds | Readiness |
 |---|---|---|
 | `gluomem` (core) | Config, SQLite storage, I/P/B frames, hybrid search, KG, fake extractors, mock embedder | Works offline; real embedding, reranking and DSPy extraction raise `MissingExtraError` |
-| `gluomem[llm]` | DSPy 3.2.1: extraction, answerer, judges, prompt optimization | Needs `OPENROUTER_API_KEY` at call time; calls are paid |
+| `gluomem[llm]` | DSPy >= 3.4.1: extraction, answerer, judges, prompt optimization | Needs `OPENROUTER_API_KEY` at call time; calls are paid |
 | `gluomem[embeddings]` | sentence-transformers MiniLM embedder and cross-encoder reranker | Downloads models from Hugging Face on first use |
-| `gluomem[all]` | `llm` and `embeddings` | Both of the above |
+| `gluomem[postgres]` | `psycopg` and `pgvector` for PostgreSQL/pgvector storage backend | Connects via `storage.backend: postgres` and `storage.dsn` |
+| `gluomem[all]` | `llm`, `embeddings`, and `postgres` | All of the above |
 | `gluomem[mem0]` | mem0ai 2.0.11 comparison baseline | Benchmark comparison only |
 
 `gluomem.extras.status()` reports which extras are installed without importing or downloading anything.

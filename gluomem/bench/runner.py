@@ -889,7 +889,7 @@ def verify_ingest_completeness(
     conversations from a pre-sentinel ingest with the completion sentinel so
     ``--skip-existing`` accepts them.
     """
-    import sqlite3
+    from gluomem.storage.db import MindDB
 
     adapter = make_adapter(dataset, cfg)
     adapter.verify()
@@ -907,17 +907,18 @@ def verify_ingest_completeness(
                 }
             )
             continue
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        db = MindDB(db_path, dim=cfg.storage.vector_dim)
         try:
             found = int(
-                con.execute(
+                db.scalar(
                     "SELECT COUNT(DISTINCT gop_id) FROM memory_frames "
                     "WHERE gop_id LIKE ?",
                     (f"{conv.conv_id}:session:%",),
-                ).fetchone()[0]
+                )
+                or 0
             )
         finally:
-            con.close()
+            db.close()
         complete = found == expected
         rows.append(
             {

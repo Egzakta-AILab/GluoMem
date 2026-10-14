@@ -1,15 +1,4 @@
-"""gluomem.bench.judge — single + trio-strict judge composition (dspy-free).
-
-A ``SingleJudge`` wraps one backbone's ``JudgeFn`` (the dspy-backed
-``QAJudge.judge`` on the live path, ``fake_judge_fn`` offline) and emits a
-self-contained ``JudgeRecord`` per verdict. ``TrioStrictJudge`` composes
-exactly three: a sample is correct only on unanimous CORRECT.
-
-The trio decision is derivable from the three per-backbone records alone —
-``metrics.qa_scores_from_records`` re-derives it during ``bench rescore``
-with zero model calls, and the singles double as the self-judge-inflation
-measurement.
-"""
+"""Single-backbone QA judge wrapper and offline fake judge."""
 
 from __future__ import annotations
 
@@ -21,7 +10,7 @@ from gluomem.bench.types import JudgeRecord, Prediction, ProtocolTag, Sample, Sc
 from gluomem.llm.outputs import Verdict
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
 
     from gluomem.bench.types import JudgeFn
 
@@ -35,7 +24,7 @@ _fake_banner_emitted = False
 
 
 class SingleJudge:
-    """One judge backbone; every verdict lands in the sink as a JudgeRecord."""
+    """One judge backbone; every verdict lands in the sink as a ``JudgeRecord``."""
 
     family = "single"
 
@@ -54,8 +43,6 @@ class SingleJudge:
         self._model_slug = model_slug
         self._dataset_sha = dataset_sha
         self._sink = sink
-        # Per-sample grading rubric selector (LongMemEval per-type grading).
-        # None (default) = the plain 3-arg judge call.
         self._rubric_for = rubric_for
         self._tag = ProtocolTag(
             metric_family="qa_accuracy",
@@ -88,44 +75,13 @@ class SingleJudge:
         return Score(value=1.0 if verdict.correct else 0.0, tag=self._tag, n=1)
 
 
-class TrioStrictJudge:
-    """Three independent backbones; correct iff unanimous."""
-
-    family = "trio_strict"
-
-    def __init__(self, members: Sequence[SingleJudge]) -> None:
-        if len(members) != 3:
-            raise ValueError(
-                f"trio_strict requires exactly 3 member judges, got {len(members)}"
-            )
-        self._members = list(members)
-        backbones = sorted(m.backbone for m in members)
-        shas = {m._tag.dataset_sha for m in members}
-        if len(shas) != 1:
-            raise ValueError(f"member judges span datasets: {sorted(shas)}")
-        self._tag = ProtocolTag(
-            metric_family="qa_accuracy",
-            judge_family="trio_strict",
-            judge_count=3,
-            backbone="+".join(backbones),
-            dataset_sha=shas.pop(),
-        )
-
-    def score(self, s: Sample, p: Prediction) -> Score:
-        # Members emit their own JudgeRecords — singles recorded for free.
-        verdicts = [m.score(s, p) for m in self._members]
-        unanimous = all(v.value == 1.0 for v in verdicts)
-        return Score(value=1.0 if unanimous else 0.0, tag=self._tag, n=1)
-
-
 def fake_judge_fn(
     question: str,  # noqa: ARG001
     gold: str,
     prediction: str,
-    rubric: str | None = None,  # noqa: ARG001 - accepted for rubric-path parity
+    rubric: str | None = None,  # noqa: ARG001
 ) -> Verdict:
-    """Deterministic offline JudgeFn: correct iff normalized gold appears in
-    the prediction. LOUD about not being a model."""
+    """Deterministic offline ``JudgeFn``: correct iff normalized gold appears in prediction."""
     global _fake_banner_emitted
     if not _fake_banner_emitted:
         print(_FAKE_BANNER, file=sys.stderr, flush=True)
@@ -139,4 +95,4 @@ def fake_judge_fn(
     )
 
 
-__all__ = ["SingleJudge", "TrioStrictJudge", "fake_judge_fn"]
+__all__ = ["SingleJudge", "fake_judge_fn"]

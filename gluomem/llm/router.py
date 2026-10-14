@@ -1,20 +1,4 @@
-"""gluomem.llm.router — LMRouter: config/registry-driven dspy.LM construction.
-
-The router resolves each task's model NAME through the ``ModelRegistry``
-and binds the resulting ``dspy.LM`` via ``dspy.context`` — a model swap is
-a registry-name change, never a code change.
-
-All LLM traffic rides OpenRouter (LiteLLM ``openrouter/<vendor>/<model>``
-strings, ``OPENROUTER_API_KEY``). ``ModelEntry.extra`` is passed verbatim as
-extra ``dspy.LM`` kwargs → LiteLLM, carrying e.g.
-``extra_body={"provider": {"order": [...], "allow_fallbacks": False,
-"require_parameters": True}}`` for reproducible backend pinning.
-
-``bind()`` uses ``dspy.context`` (thread/task-local), NEVER the global
-``dspy.configure`` — no cross-test or cross-caller bleed. The disk cache is
-configured once, lazily, from ``cfg.dspy.cache`` (dspy would otherwise
-default to ``~/.dspy_cache``).
-"""
+"""LMRouter: config- and registry-driven ``dspy.LM`` construction."""
 
 from __future__ import annotations
 
@@ -60,15 +44,13 @@ def _make_adapter(name: str) -> dspy.Adapter:
 
 
 class LMRouter:
-    """Per-task LM resolution + context binding (config-pure)."""
+    """Per-task LM resolution and context binding."""
 
     def __init__(self, cfg: AppConfig, registry: ModelRegistry | None = None) -> None:
         self._cfg = cfg
         self._registry = registry if registry is not None else ModelRegistry(cfg)
         self._adapter = _make_adapter(cfg.dspy.adapter)
         _ensure_cache(cfg)
-
-    # --- LM construction -----------------------------------------------------
 
     def _task_cfg(self, task: str) -> DspyTaskConfig:
         try:
@@ -96,22 +78,36 @@ class LMRouter:
             kwargs["temperature"] = temperature
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
-        return dspy.LM(
-            entry.provider_model,
-            api_key=os.environ.get(entry.api_key_env or "", ""),
-            cache=self._cfg.dspy.cache.disk,
-            **kwargs,
-        )
+        api_key = os.environ.get(entry.api_key_env or "", "")
+        try:
+            return dspy.LM(
+                entry.provider_model,
+                api_key=api_key,
+                cache=self._cfg.dspy.cache.disk,
+                **kwargs,
+            )
+        except dspy.utils.exceptions.LMConfigurationError:
+            reasoning = (kwargs.get("extra_body") or {}).get("reasoning") or {}
+            if reasoning.get("enabled") is not False:
+                raise
+            clean_kwargs = {
+                k: v
+                for k, v in kwargs.items()
+                if k not in ("temperature", "max_tokens")
+            }
+            lm = dspy.LM(
+                entry.provider_model,
+                api_key=api_key,
+                cache=self._cfg.dspy.cache.disk,
+                **clean_kwargs,
+            )
+            if temperature is not None:
+                lm.kwargs["temperature"] = temperature
+            if max_tokens is not None:
+                lm.kwargs["max_tokens"] = max_tokens
+            return lm
 
     def _reasoning_extra_body(self, entry: ModelEntry) -> dict[str, Any]:
-        """Merge the global hidden-reasoning policy into the entry's extra_body.
-
-        ``dspy.reasoning_enabled`` (False by default) is injected for
-        OpenRouter-routed models; an entry-level
-        ``extra.extra_body.reasoning`` always wins; ``None`` sends nothing
-        (provider default). OpenRouter ignores the parameter for models
-        without a reasoning mode, so blanket injection is safe.
-        """
         extra_body: dict[str, Any] = dict(entry.extra.get("extra_body") or {})
         policy = self._cfg.dspy.reasoning_enabled
         if (
@@ -123,7 +119,7 @@ class LMRouter:
         return extra_body
 
     def lm_for(self, task: str) -> dspy.LM:
-        """The ``dspy.LM`` for a configured task."""
+        """Return the ``dspy.LM`` for a configured task."""
         tc = self._task_cfg(task)
         entry = self._registry.resolve(tc.model)
         return self._build_lm(
@@ -137,22 +133,12 @@ class LMRouter:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> dspy.LM:
-        """A ``dspy.LM`` for a registry model name (judge / benchmark harness)."""
+        """Return a ``dspy.LM`` for a registry model name."""
         entry = self._registry.resolve(name)
         return self._build_lm(entry, temperature=temperature, max_tokens=max_tokens)
 
-    # --- live-path preflight ---------------------------------------------------
-
     def assert_api_key(self, model_name: str) -> None:
-        """Fail loud when the model's ``api_key_env`` is missing or empty.
-
-        LIVE-path preflight only (``bind`` and the bench runner's non-fake
-        answer/judge factories). LM *construction* stays keyless — the offline
-        gate builds and inspects LMs without any key — so this runs only where
-        the provider is about to be called for real. An EMPTY value counts as
-        missing: an empty key cannot authenticate and would otherwise surface
-        as a cryptic provider 401 mid-run.
-        """
+        """Fail loudly when the model's ``api_key_env`` is missing or empty."""
         entry = self._registry.resolve(model_name)
         env = entry.api_key_env
         if env and not os.environ.get(env):
@@ -162,15 +148,9 @@ class LMRouter:
                 f"to run live"
             )
 
-    # --- context binding -------------------------------------------------------
-
     @contextmanager
     def bind(self, task: str) -> Iterator[None]:
-        """Bind the task's LM + adapter + usage tracking for the duration.
-
-        Binding is the live entry for task execution, so the model's API key
-        is preflighted here (clear error instead of a provider 401 later).
-        """
+        """Bind the task's LM, adapter, and usage tracking for the duration."""
         self.assert_api_key(self._task_cfg(task).model)
         with dspy.context(
             lm=self.lm_for(task),
