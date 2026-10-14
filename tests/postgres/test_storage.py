@@ -8,6 +8,7 @@ import pytest
 
 from gluomem.frames.store import FrameStore
 from gluomem.kg.graph import KnowledgeGraph
+from gluomem.search.sanitize import sanitize
 from gluomem.storage.backend import IncompatibleSchemaError, VectorDimMismatchError
 from gluomem.storage.db import MindDB
 from gluomem.storage.postgres_backend import PostgresBackend
@@ -71,6 +72,18 @@ def test_vector_fts_like_scope_and_eligibility(
     assert [rid for rid, _ in mind_db.chunk_vec.search(vec, 100)] == [own_chunk]
     with pytest.raises(VectorDimMismatchError):
         mind_db.frame_vec.add(own.id, vec[:4])
+
+
+def test_fts_matches_script_variants_and_survives_operator_input(
+    mind_db: MindDB, frame_store: FrameStore
+) -> None:
+    serbian = frame_store.create_i_frame("gop", "Извештај за Београд је послао Ђорђе.")
+    english = frame_store.create_i_frame("gop", "The deployments were running smoothly.")
+    for query in ("Београд извештај", "Beogradu izveštaj", "Beograd izvestaj Djordje"):
+        assert mind_db.fts.search(sanitize(query), 10) == [serbian.id]
+    assert mind_db.fts.search(sanitize("deployment run"), 10) == [english.id]
+    for hostile in ("or -x", "a & b | !c", "O'Brien:*", "C++ (v1.2.3)", "<-> ''", "!!!"):
+        assert mind_db.fts.search(sanitize(hostile), 10) == []
 
 
 def test_concurrent_opens_do_not_execute_ddl(mind_db: MindDB, pg_dsn: str) -> None:

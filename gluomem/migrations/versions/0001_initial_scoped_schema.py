@@ -1,4 +1,4 @@
-"""initial scoped schema."""
+"""Initial scoped schema."""
 
 from __future__ import annotations
 
@@ -75,10 +75,6 @@ def upgrade() -> None:
             ),
             nullable=False,
         ),
-        sa.Column("llm_calls_used", sa.Integer(), server_default="0", nullable=False),
-        sa.Column("max_llm_calls", sa.Integer(), server_default="6", nullable=False),
-        sa.Column("tokens_used", sa.Integer(), server_default="0", nullable=False),
-        sa.Column("max_tokens", sa.Integer(), server_default="8000", nullable=False),
         sa.Column("last_error", sa.Text(), nullable=True),
         sa.Column(
             "created_at",
@@ -96,10 +92,7 @@ def upgrade() -> None:
             ),
             nullable=False,
         ),
-        sa.CheckConstraint(
-            "status IN ('queued','leased','succeeded','failed','dead_letter',"
-            "'aborted_stale','fenced')"
-        ),
+        sa.CheckConstraint("status IN ('queued','leased','succeeded','dead_letter')"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("tenant_id", "principal_id", "namespace", "job_type", "dedup_key"),
     )
@@ -313,12 +306,10 @@ def upgrade() -> None:
             "importance IN ('critical','important','normal','temporary','deprecated')"
         ),
         sa.CheckConstraint(
-            "kind IN ('fact','profile','preference','decision','procedure','episode',"
-            "'correction','summary')"
+            "kind IN ('fact','profile','preference','decision','procedure','episode','correction','summary')"
         ),
         sa.CheckConstraint(
-            "source IN ('user_stated','tool_verified','agent_inferred','import','system',"
-            "'personal','workspace','team_sync')"
+            "source IN ('user_stated','tool_verified','agent_inferred','import','system','personal','workspace','team_sync')"
         ),
         sa.CheckConstraint(
             "status IN ('candidate','active','superseded','expired','forgotten','tombstoned')"
@@ -373,6 +364,16 @@ def upgrade() -> None:
         unique=False,
     )
     op.create_table(
+        "memory_tombstone_keys",
+        sa.Column("tombstone_id", sa.BigInteger(), autoincrement=False, nullable=False),
+        sa.Column("suppression_key", sa.Text(), nullable=False),
+        sa.ForeignKeyConstraint(["tombstone_id"], ["memory_tombstones.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("tombstone_id"),
+    )
+    op.create_index(
+        "idx_tombstone_keys_suppression", "memory_tombstone_keys", ["suppression_key"], unique=False
+    )
+    op.create_table(
         "kg_entity_frames",
         sa.Column("entity_id", sa.BigInteger(), nullable=False),
         sa.Column("frame_id", sa.BigInteger(), nullable=False),
@@ -381,6 +382,17 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("entity_id", "frame_id"),
     )
     op.create_index("idx_kg_entity_frames_frame", "kg_entity_frames", ["frame_id"], unique=False)
+    op.create_table(
+        "kg_relation_frames",
+        sa.Column("relation_id", sa.BigInteger(), nullable=False),
+        sa.Column("frame_id", sa.BigInteger(), nullable=False),
+        sa.ForeignKeyConstraint(["frame_id"], ["memory_frames.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["relation_id"], ["knowledge_relations.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("relation_id", "frame_id"),
+    )
+    op.create_index(
+        "idx_kg_relation_frames_frame", "kg_relation_frames", ["frame_id"], unique=False
+    )
     op.create_table(
         "knowledge_relation_history",
         sa.Column("id", sa.BigInteger(), nullable=False),
@@ -413,6 +425,13 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["frame_id"], ["memory_frames.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("frame_id", "chunk_idx"),
+    )
+    op.create_table(
+        "memory_frame_keys",
+        sa.Column("frame_id", sa.BigInteger(), autoincrement=False, nullable=False),
+        sa.Column("suppression_key", sa.Text(), nullable=False),
+        sa.ForeignKeyConstraint(["frame_id"], ["memory_frames.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("frame_id"),
     )
     op.create_table(
         "memory_frame_lineage",
@@ -450,8 +469,7 @@ def upgrade() -> None:
             "tsv",
             postgresql.TSVECTOR(),
             sa.Computed(
-                "to_tsvector('simple', coalesce(folded_content, '')) "
-                "|| to_tsvector('english', coalesce(content, ''))",
+                "to_tsvector('simple', coalesce(folded_content, '')) || to_tsvector('english', coalesce(content, ''))",
                 persisted=True,
             ),
             nullable=True,
@@ -553,11 +571,16 @@ def downgrade() -> None:
     op.drop_index("idx_lineage_source", table_name="memory_frame_lineage")
     op.drop_index("idx_lineage_derived", table_name="memory_frame_lineage")
     op.drop_table("memory_frame_lineage")
+    op.drop_table("memory_frame_keys")
     op.drop_table("memory_frame_chunks")
     op.drop_index("idx_kg_rel_history_rel", table_name="knowledge_relation_history")
     op.drop_table("knowledge_relation_history")
+    op.drop_index("idx_kg_relation_frames_frame", table_name="kg_relation_frames")
+    op.drop_table("kg_relation_frames")
     op.drop_index("idx_kg_entity_frames_frame", table_name="kg_entity_frames")
     op.drop_table("kg_entity_frames")
+    op.drop_index("idx_tombstone_keys_suppression", table_name="memory_tombstone_keys")
+    op.drop_table("memory_tombstone_keys")
     op.drop_index("idx_frames_scope_status", table_name="memory_frames")
     op.drop_index("idx_frames_scope_hash", table_name="memory_frames")
     op.drop_index("idx_frames_scope_gop_t", table_name="memory_frames")
