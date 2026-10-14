@@ -453,6 +453,16 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("ablate", help="run ablation experiments")
 
     args = parser.parse_args(argv)
+    from gluomem.extras import MissingExtraError
+
+    try:
+        return _dispatch(args, parser)
+    except MissingExtraError as exc:
+        print(f"gluomem: {exc}", file=sys.stderr)
+        return 2
+
+
+def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if args.command is None:
         parser.print_help()
         return 0

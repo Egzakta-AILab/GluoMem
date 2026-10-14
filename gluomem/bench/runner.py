@@ -93,6 +93,9 @@ def _fake_answer_fn(question: str, context: str) -> AnswerResult:  # noqa: ARG00
 def _make_answer_fn(cfg: AppConfig) -> AnswerFn:
     if cfg.benchmark.answer.backend == "fake":
         return _fake_answer_fn
+    from gluomem.extras import require
+
+    require("llm", "benchmark.answer.backend=dspy")
     from gluomem.llm.answer import Answerer
     from gluomem.llm.router import LMRouter
 
@@ -111,6 +114,9 @@ def _make_judge_fns(
     backbones = cfg.benchmark.judge.backbones
     if cfg.benchmark.judge.backend == "fake":
         return {b: fake_judge_fn for b in backbones}, dict
+    from gluomem.extras import require
+
+    require("llm", "benchmark.judge.backend=dspy")
     from gluomem.llm.judge import QAJudge
     from gluomem.llm.router import LMRouter
     from gluomem.llm.usage import UsageAccumulator
