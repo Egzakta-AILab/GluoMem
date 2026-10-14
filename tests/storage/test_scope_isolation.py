@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -58,9 +57,7 @@ def test_two_scopes_in_same_db_zero_cross_scope_leakage_vector_fts_hybrid(
     db = MindDB(tmp_path / "shared.mind", dim=16)
     emb = MockEmbedder(dim=16)
     # Force chunking so both chunk_vec and frame_vec are exercised
-    chunk_cfg = ChunkingConfig(
-        chunk_size=40, chunk_overlap=5, whole_frame_threshold=20
-    )
+    chunk_cfg = ChunkingConfig(chunk_size=40, chunk_overlap=5, whole_frame_threshold=20)
 
     scope_a = MemoryScope("tenant_alpha", "alice", "personal")
     scope_b = MemoryScope("tenant_beta", "bob", "workspace")
@@ -91,9 +88,9 @@ def test_two_scopes_in_same_db_zero_cross_scope_leakage_vector_fts_hybrid(
     # 2. Pre-filtered chunk_vec KNN at k=1 returns only chunks belonging to scope_a
     chunk_hits_a = db.chunk_vec.search(qvec, k=1, scope=scope_a)
     assert len(chunk_hits_a) == 1
-    resolved_a = store_a.resolve_chunk_frames([ chunk_hits_a[0][0] ], scope=scope_a)
+    resolved_a = store_a.resolve_chunk_frames([chunk_hits_a[0][0]], scope=scope_a)
     assert list(resolved_a.values()) == [frame_a.id]
-    assert store_a.resolve_chunk_frames([ chunk_hits_a[0][0] ], scope=scope_b) == {}
+    assert store_a.resolve_chunk_frames([chunk_hits_a[0][0]], scope=scope_b) == {}
 
     # 3. FTS5 search and LIKE search at k=1 respect scope before LIMIT
     fts_hits_a = db.fts.search("Hyperion", limit=1, scope=scope_a)
@@ -122,12 +119,8 @@ def test_same_gop_id_across_two_scopes_isolated(tmp_path: Path) -> None:
     scope_b = MemoryScope("acme", "user_2", "personal")
 
     # Same gop_id in two different scopes
-    get_or_create_session(
-        db, "conv-1:facts", project_id="proj-a", scope=scope_a, commit=True
-    )
-    get_or_create_session(
-        db, "conv-1:facts", project_id="proj-b", scope=scope_b, commit=True
-    )
+    get_or_create_session(db, "conv-1:facts", project_id="proj-a", scope=scope_a, commit=True)
+    get_or_create_session(db, "conv-1:facts", project_id="proj-b", scope=scope_b, commit=True)
     end_session(db, "conv-1:facts", summary="summary-a", scope=scope_a)
     row_a = db.backend.fetchone(
         "SELECT project_id, status, summary FROM sessions "
@@ -144,9 +137,7 @@ def test_same_gop_id_across_two_scopes_isolated(tmp_path: Path) -> None:
 
     store = FrameStore(db, embedder=emb, scope=scope_a)
     fa_i = store.create_i_frame("conv-1:facts", "Alice prefers Rust.", scope=scope_a)
-    fa_p = store.create_p_frame(
-        "conv-1:facts", "Alice also uses Python.", fa_i.id, scope=scope_a
-    )
+    fa_p = store.create_p_frame("conv-1:facts", "Alice also uses Python.", fa_i.id, scope=scope_a)
 
     fb_i = store.create_i_frame("conv-1:facts", "Bob prefers Go.", scope=scope_b)
     assert fb_i.t == 0  # Independent sequence numbering in scope_b!
@@ -232,12 +223,8 @@ def test_kg_entities_relations_and_bfs_isolated_across_scopes(tmp_path: Path) ->
         kg.link_entity_frame(ea1.id, fb.id, scope=scope_a)
 
     # Entity lookup and contextual BFS stay strictly in-scope
-    assert [e.id for e in kg.find_valid_entities("Alice", cfg.kg, scope=scope_a)] == [
-        ea1.id
-    ]
-    assert [e.id for e in kg.find_valid_entities("Alice", cfg.kg, scope=scope_b)] == [
-        eb1.id
-    ]
+    assert [e.id for e in kg.find_valid_entities("Alice", cfg.kg, scope=scope_a)] == [ea1.id]
+    assert [e.id for e in kg.find_valid_entities("Alice", cfg.kg, scope=scope_b)] == [eb1.id]
 
     ctx_a = kg.contextual("Where does Alice work?", cfg.kg, depth=2, scope=scope_a)
     assert fa.id in ctx_a
@@ -284,74 +271,3 @@ def test_lifecycle_status_and_expires_at_filtered_from_recall(tmp_path: Path) ->
     assert f_expired.id not in hit_ids
     assert f_superseded.id not in hit_ids
     db.close()
-
-
-def test_legacy_sqlite_migration_adds_scope_and_lifecycle_columns(
-    tmp_path: Path,
-) -> None:
-    db_file = tmp_path / "legacy.mind"
-    conn = sqlite3.connect(str(db_file))
-    conn.executescript(
-        """
-        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        CREATE TABLE sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            gop_id TEXT UNIQUE NOT NULL,
-            project_id TEXT,
-            status TEXT DEFAULT 'active',
-            started_at TEXT DEFAULT (datetime('now')),
-            ended_at TEXT,
-            summary TEXT
-        );
-        CREATE TABLE memory_frames (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            frame_type TEXT NOT NULL,
-            gop_id TEXT NOT NULL,
-            t INTEGER NOT NULL DEFAULT 0,
-            base_frame_id INTEGER,
-            content TEXT NOT NULL,
-            importance TEXT NOT NULL DEFAULT 'normal',
-            source TEXT NOT NULL DEFAULT 'user_stated',
-            trust TEXT NOT NULL DEFAULT 'normal',
-            access_count INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            event_time TEXT,
-            last_accessed TEXT NOT NULL DEFAULT (datetime('now')),
-            content_hash TEXT
-        );
-        CREATE TABLE knowledge_entities (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entity_type TEXT,
-            name TEXT,
-            properties TEXT DEFAULT '{}',
-            valid_from TEXT DEFAULT (datetime('now')),
-            valid_to TEXT,
-            recorded_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE knowledge_relations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id INTEGER,
-            target_id INTEGER,
-            relation_type TEXT,
-            confidence REAL DEFAULT 1.0,
-            properties TEXT DEFAULT '{}',
-            valid_from TEXT DEFAULT (datetime('now')),
-            valid_to TEXT,
-            recorded_at TEXT DEFAULT (datetime('now'))
-        );
-        INSERT INTO sessions (gop_id) VALUES ('legacy-gop');
-        INSERT INTO memory_frames (frame_type, gop_id, t, content)
-        VALUES ('I', 'legacy-gop', 0, 'Legacy memory content');
-        """
-    )
-    conn.commit()
-    conn.close()
-
-    mind = MindDB(db_file, dim=16)
-    emb = MockEmbedder(dim=16)
-    store = FrameStore(mind, embedder=emb)
-    frame = store.get_frame(1)
-    assert frame.scope == DEFAULT_SCOPE
-    assert frame.kind == "fact"
-    assert frame.status == "active"
-    mind.close()

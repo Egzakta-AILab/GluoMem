@@ -1,66 +1,95 @@
-"""Alembic environment script for GluoMem PostgreSQL schema migrations."""
+"""Alembic environment for schema-isolated PostgreSQL migrations."""
 
 from __future__ import annotations
 
 from alembic import context
-from sqlalchemy import create_engine, pool, text
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import create_engine, inspect, pool, text
 
 from gluomem.migrations.runner import validate_schema_name
+from gluomem.storage.pg_schema import build_metadata
 
 config = context.config
-schema: str = validate_schema_name(str(config.attributes.get("schema", "gluomem")))
+schema = validate_schema_name(str(config.attributes.get("schema", "gluomem")))
+target_metadata = build_metadata(int(config.attributes.get("vector_dim", 384)))
+
+
+def render_item(type_, obj, autogen_context):
+    if type_ == "type" and isinstance(obj, Vector):
+        autogen_context.imports.add("import pgvector.sqlalchemy")
+        return "pgvector.sqlalchemy.Vector(dim=vector_dim)"
+    return False
+
+
+def include_name(name, type_, parent_names):
+    if type_ == "schema":
+        # The selected search_path is the default schema to the inspector.
+        return name is None
+    return True
+
+
+def include_object(obj, name, type_, reflected, compare_to):
+    return type_ != "table" or name in target_metadata.tables
+
+
+def configure(**kwargs) -> None:
+    context.configure(
+        target_metadata=target_metadata,
+        version_table_schema=schema,
+        include_schemas=True,
+        include_name=include_name,
+        include_object=include_object,
+        compare_type=True,
+        render_item=render_item,
+        **kwargs,
+    )
 
 
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode (emit SQL without a DB connection)."""
-    url = config.get_main_option("sqlalchemy.url")
-    context.configure(
-        url=url,
-        target_metadata=None,
+    """Emit SQL that can be applied to an empty database."""
+    configure(
+        url=config.get_main_option("sqlalchemy.url"),
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        version_table="alembic_version",
-        version_table_schema=schema,
-        include_schemas=True,
     )
-
     with context.begin_transaction():
+        # The version table must not precede creation of its containing schema.
+        context.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+        context.execute(f"SET LOCAL search_path TO {schema}, public")
         context.run_migrations()
 
 
-def _run_with_connection(connection) -> None:  # noqa: ANN001
-    dialect_name = connection.dialect.name
-    version_schema = schema if dialect_name == "postgresql" else None
-    if dialect_name == "postgresql":
-        connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
-        connection.execute(text(f"SET search_path TO {schema}, public"))
-
-    context.configure(
-        connection=connection,
-        target_metadata=None,
-        version_table="alembic_version",
-        version_table_schema=version_schema,
-        include_schemas=True,
-    )
-
-    with context.begin_transaction():
-        context.run_migrations()
+def run_with_connection(connection) -> None:
+    connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
+    connection.execute(text(f"SET LOCAL search_path TO {schema}, public"))
+    connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector SCHEMA public"))
+    inspector = inspect(connection)
+    tables = set(inspector.get_table_names(schema=schema))
+    if tables & target_metadata.tables.keys() and "alembic_version" not in tables:
+        raise RuntimeError("Unversioned PostgreSQL schema; recreate the database")
+    # SQLAlchemy otherwise reflects unqualified tables as public.
+    previous_schema = connection.dialect.default_schema_name
+    connection.dialect.default_schema_name = schema
+    try:
+        configure(connection=connection)
+        with context.begin_transaction():
+            context.run_migrations()
+    finally:
+        connection.dialect.default_schema_name = previous_schema
 
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode against a live SQLAlchemy connection or engine."""
-    provided_conn = config.attributes.get("connection")
-    if provided_conn is not None:
-        _run_with_connection(provided_conn)
+    """Migrate using the supplied connection or a new transaction."""
+    connection = config.attributes.get("connection")
+    if connection is not None:
+        run_with_connection(connection)
         return
-
-    url = config.get_main_option("sqlalchemy.url")
-    if not url:
-        raise RuntimeError("sqlalchemy.url is not configured for online migration")
-    connectable = create_engine(url, poolclass=pool.NullPool)
-    with connectable.connect() as connection:
-        _run_with_connection(connection)
-        connection.commit()
+    engine = create_engine(config.get_main_option("sqlalchemy.url"), poolclass=pool.NullPool)
+    try:
+        with engine.begin() as connection:
+            run_with_connection(connection)
+    finally:
+        engine.dispose()
 
 
 if context.is_offline_mode():

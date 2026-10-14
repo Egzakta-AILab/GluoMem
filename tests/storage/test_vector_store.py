@@ -16,6 +16,11 @@ def _unit_vec(dim: int, idx: int) -> np.ndarray:
 
 
 def test_exact_knn_batch_and_delete(mind_db: MindDB) -> None:
+    mind_db.execute("INSERT INTO sessions(gop_id) VALUES ('vectors')")
+    mind_db.executemany(
+        "INSERT INTO memory_frames(id, frame_type, gop_id, content) VALUES (?, 'I', 'vectors', ?)",
+        [(i, f"frame {i}") for i in range(1, 4)],
+    )
     store = SqliteVecStore(mind_db.conn, table="memory_frames_vec", dim=384)
     v1, v2, v3 = _unit_vec(384, 0), _unit_vec(384, 1), _unit_vec(384, 2)
     store.add(1, v1)
@@ -46,3 +51,10 @@ def test_dimension_guard_rejects_wrong_dim(mind_db: MindDB) -> None:
         store.add_batch([(1, _unit_vec(384, 0)), (2, wrong)])
     n = mind_db.conn.execute("SELECT COUNT(*) FROM memory_frames_vec").fetchone()[0]
     assert n == 0
+
+
+def test_orphan_vectors_are_not_recalled(mind_db: MindDB) -> None:
+    store = mind_db.frame_vec
+    vec = _unit_vec(384, 0)
+    store.add(99, vec)
+    assert store.search(vec, k=1) == []
