@@ -14,8 +14,13 @@ The frame store is the core memory primitive. Three frame types:
   ``get_b_correction``. When ``importance`` is None, the B-frame INHERITS the
   corrected base frame's importance.
 
-Every write funnels through the internal ``_index(frame)`` hook, which performs
-synchronous FTS + whole-frame vector + chunk row writes.
+Write atomicity: every ``create_*`` embeds the frame text FIRST (the fallible
+model/network step), then inserts the frame row and its FTS + whole-frame
+vector + chunk rows in ONE transaction. A failure anywhere leaves no frame row
+and no index rows, so a retry inserts cleanly. Databases written before this
+guarantee may hold frames without a complete index; :meth:`FrameStore.index_state`
+reports that truthfully, dedup hits repair it (:meth:`FrameStore.ensure_indexed`),
+and :meth:`FrameStore.repair_indexes` repairs a whole file.
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
@@ -87,6 +92,62 @@ class BCorrection:
 
     description: str
     references: list[int]
+
+
+@dataclass(frozen=True)
+class IndexState:
+    """Projection readiness of one frame against its current content.
+
+    ``ready`` is true only when the FTS row holds the frame's current indexable
+    text, exactly one whole-frame vector exists, and the chunk rows (each with
+    a vector) match the chunker's output for that text. A stale generation
+    (content changed but index not) is therefore not ready.
+    """
+
+    frame_id: int
+    fts_current: bool
+    frame_vec: int
+    chunks: int
+    expected_chunks: int
+    chunk_vecs: int
+
+    @property
+    def ready(self) -> bool:
+        return (
+            self.fts_current
+            and self.frame_vec == 1
+            and self.chunks == self.expected_chunks
+            and self.chunk_vecs == self.chunks
+        )
+
+
+@dataclass(frozen=True)
+class LineageEntry:
+    """One constituent of a derived frame (e.g. a P-frame merged by compaction).
+
+    The constituent row may no longer exist; this record keeps its identity
+    and provenance (not its text) for later lifecycle work.
+    """
+
+    derived_frame_id: int
+    source_frame_id: int
+    source_frame_type: str
+    source_content_hash: str | None
+    source_source: str
+    source_trust: str
+    source_created_at: str
+    source_event_time: str | None
+    operation: str
+
+
+@dataclass
+class _PreparedIndex:
+    """Embeddings computed ahead of any index write."""
+
+    text: str
+    frame_vec: np.ndarray
+    chunks: list[Chunk]
+    chunk_vecs: list[np.ndarray]
 
 
 # --- the store ---------------------------------------------------------------
@@ -190,9 +251,11 @@ class FrameStore:
 
         existing = self.find_frame_by_hash(gop, content)
         if existing is not None:
+            self.ensure_indexed(existing)
             return existing
 
-        frame_id = self._insert(
+        return self._insert_indexed(
+            index_text=content,
             gop=gop,
             frame_type="I",
             base_frame_id=None,
@@ -204,9 +267,6 @@ class FrameStore:
             content_hash=chash,
             created_at=created_at,
         )
-        frame = self.get_frame(frame_id)
-        self._index(frame)
-        return frame
 
     # --- P-frames (deltas) -------------------------------------------------
 
@@ -224,7 +284,8 @@ class FrameStore:
     ) -> Frame:
         """Create a P-frame: a delta/refinement on the base I-frame ``base_id``."""
         get_or_create_session(self._conn, gop)
-        frame_id = self._insert(
+        return self._insert_indexed(
+            index_text=content,
             gop=gop,
             frame_type="P",
             base_frame_id=base_id,
@@ -236,9 +297,6 @@ class FrameStore:
             content_hash=content_hash(content),
             created_at=created_at,
         )
-        frame = self.get_frame(frame_id)
-        self._index(frame)
-        return frame
 
     # --- B-frames (corrections) -------------------------------------------
 
@@ -273,7 +331,8 @@ class FrameStore:
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        frame_id = self._insert(
+        return self._insert_indexed(
+            index_text=description,
             gop=gop,
             frame_type="B",
             base_frame_id=base_id,
@@ -285,9 +344,6 @@ class FrameStore:
             content_hash=content_hash(description),
             created_at=created_at,
         )
-        frame = self.get_frame(frame_id)
-        self._index(frame)
-        return frame
 
     # --- read accessors ----------------------------------------------------
 
@@ -416,46 +472,145 @@ class FrameStore:
     # --- index hook (FTS + vec + chunk write-through) ----------------------
 
     def _index(self, frame: Frame) -> None:
-        """Synchronous index write-through hook (FTS + vec + chunks).
+        """(Re)build a stored frame's FTS + vec + chunk rows in one transaction.
 
-        On every frame write this populates:
-
-        - the FTS row (``memory_frames_fts``) with the indexable text, so a
-          ``MATCH`` returns the frame id;
-        - the whole-frame vector (``memory_frames_vec``) at the embedder's
-          native dim, via ``SqliteVecStore``;
-        - chunk row(s) (``memory_frame_chunks``) plus their chunk vectors
-          (``memory_frame_chunks_vec``), produced by the pure-function chunker.
-
-        For B-frames the *description* text is indexed (not the raw JSON
-        payload) so FTS/vec match the human-readable correction.
-
-        Failure atomicity: all embeddings are computed BEFORE any index row is
-        touched (the embedder is the fallible step — network/model), and the
-        FTS + vec + chunk writes then land in one transaction committed at the
-        end. An embedder failure leaves existing index rows (compaction
-        re-index) untouched; a SQL failure rolls the partial index write back.
-        The frame row itself is committed by ``_insert`` before this hook runs,
-        so a failed index leaves the frame present but unindexed — never a
-        half-indexed frame.
+        Embeddings are computed before any index row is touched, so an embedder
+        failure leaves the existing rows intact; a SQL failure rolls the
+        partial write back. Used for repair and re-index; new frames go
+        through :meth:`_insert_indexed` instead.
         """
-        text = self._indexable_text(frame)
+        prepared = self._prepare_index(self._indexable_text(frame))
+        try:
+            self._write_index(frame.id, prepared)
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def _prepare_index(self, text: str) -> _PreparedIndex:
+        """Embed ``text`` and its chunks. No database access."""
         frame_vec = self._embedder.embed(text)
         chunks = chunk(text, self._chunking)
         chunk_vecs = self._embedder.embed_batch([c.content for c in chunks])
         if len(chunk_vecs) != len(chunks):
             raise RuntimeError(
                 f"embed_batch returned {len(chunk_vecs)} vectors for "
-                f"{len(chunks)} chunks (frame {frame.id}); index not written"
+                f"{len(chunks)} chunks; index not written"
             )
-        try:
-            self._index_fts(frame.id, text)
-            self._index_frame_vec(frame.id, frame_vec)
-            self._index_chunks(frame.id, chunks, chunk_vecs)
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
+        return _PreparedIndex(
+            text=text, frame_vec=frame_vec, chunks=chunks, chunk_vecs=chunk_vecs
+        )
+
+    def _write_index(self, frame_id: int, prepared: _PreparedIndex) -> None:
+        """Replace the frame's index rows inside the caller's transaction."""
+        self._index_fts(frame_id, prepared.text)
+        self._index_frame_vec(frame_id, prepared.frame_vec)
+        self._index_chunks(frame_id, prepared.chunks, prepared.chunk_vecs)
+
+    # --- readiness / repair ------------------------------------------------
+
+    def index_state(self, frame_id: int) -> IndexState:
+        """Return the projection readiness of ``frame_id`` (``KeyError`` if absent)."""
+        frame = self.get_frame(frame_id)
+        text = self._indexable_text(frame)
+        fts_row = self._conn.execute(
+            "SELECT content FROM memory_frames_fts WHERE rowid=?", (frame_id,)
+        ).fetchall()
+        vec = self._conn.execute(
+            "SELECT COUNT(*) FROM memory_frames_vec WHERE rowid=?", (frame_id,)
+        ).fetchone()[0]
+        chunk_ids = [
+            int(r[0])
+            for r in self._conn.execute(
+                "SELECT id FROM memory_frame_chunks WHERE frame_id=?", (frame_id,)
+            ).fetchall()
+        ]
+        chunk_vecs = 0
+        if chunk_ids:
+            marks = ",".join("?" * len(chunk_ids))
+            chunk_vecs = self._conn.execute(
+                f"SELECT COUNT(*) FROM memory_frame_chunks_vec WHERE rowid IN ({marks})",
+                chunk_ids,
+            ).fetchone()[0]
+        return IndexState(
+            frame_id=frame_id,
+            fts_current=len(fts_row) == 1 and fts_row[0][0] == text,
+            frame_vec=int(vec),
+            chunks=len(chunk_ids),
+            expected_chunks=len(chunk(text, self._chunking)),
+            chunk_vecs=int(chunk_vecs),
+        )
+
+    def ensure_indexed(self, frame: Frame) -> bool:
+        """Rebuild ``frame``'s projections if they are missing or stale.
+
+        Returns True when a repair was written. Dedup hits call this so a
+        retried write of a frame left unindexed by an older build becomes
+        searchable instead of being silently absorbed.
+        """
+        if self.index_state(frame.id).ready:
+            return False
+        self._index(frame)
+        return True
+
+    def repair_indexes(self) -> list[int]:
+        """Rebuild every frame whose projections are missing or stale.
+
+        The explicit recovery path for existing ``*.mind`` files. Returns the
+        repaired frame ids. Requires the same embedder the file was built with.
+        """
+        repaired: list[int] = []
+        ids = [
+            int(r[0])
+            for r in self._conn.execute(
+                "SELECT id FROM memory_frames ORDER BY id"
+            ).fetchall()
+        ]
+        for fid in ids:
+            if self.ensure_indexed(self.get_frame(fid)):
+                repaired.append(fid)
+        return repaired
+
+    # --- lineage -------------------------------------------------------------
+
+    def lineage(self, derived_frame_id: int) -> list[LineageEntry]:
+        """Constituents recorded for a derived frame, oldest first."""
+        rows = self._conn.execute(
+            "SELECT derived_frame_id, source_frame_id, source_frame_type, "
+            "source_content_hash, source_source, source_trust, source_created_at, "
+            "source_event_time, operation FROM memory_frame_lineage "
+            "WHERE derived_frame_id=? ORDER BY id ASC",
+            (derived_frame_id,),
+        ).fetchall()
+        return [LineageEntry(*r) for r in rows]
+
+    def _record_lineage(
+        self, derived_frame_id: int, source: Frame, source_hash: str | None, operation: str
+    ) -> None:
+        """Insert one lineage row inside the caller's transaction."""
+        self._conn.execute(
+            "INSERT INTO memory_frame_lineage (derived_frame_id, source_frame_id, "
+            "source_frame_type, source_content_hash, source_source, source_trust, "
+            "source_created_at, source_event_time, operation) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                derived_frame_id,
+                source.id,
+                source.frame_type,
+                source_hash,
+                source.source,
+                source.trust,
+                source.created_at,
+                source.event_time,
+                operation,
+            ),
+        )
+
+    def _content_hash_of(self, frame_id: int) -> str | None:
+        row = self._conn.execute(
+            "SELECT content_hash FROM memory_frames WHERE id=?", (frame_id,)
+        ).fetchone()
+        return None if row is None else row[0]
 
     # --- index helpers -----------------------------------------------------
 
@@ -544,13 +699,14 @@ class FrameStore:
         for (chunk_id,) in rows:
             self._chunks_vec.delete(int(chunk_id), commit=commit)
 
-    def _delete_index_rows(self, frame_id: int) -> None:
+    def _delete_index_rows(self, frame_id: int, *, commit: bool = True) -> None:
         """Delete ALL index rows (FTS + frame vec + chunks + chunk vecs) for a frame.
 
         Used by compaction when referentially deleting a merged P-frame. The
         ``memory_frame_chunks`` rows cascade on the frame-row delete, but the
         FTS and vec0 rows are not FK-cascaded, so they are removed explicitly.
-        All deletes land in one transaction (rolled back together on failure).
+        With ``commit=True`` the deletes land in their own transaction (rolled
+        back together on failure); ``commit=False`` leaves them in the caller's.
         """
         try:
             self._delete_chunk_vecs(frame_id, commit=False)
@@ -561,9 +717,11 @@ class FrameStore:
             self._conn.execute(
                 "DELETE FROM memory_frame_chunks WHERE frame_id=?", (frame_id,)
             )
-            self._conn.commit()
+            if commit:
+                self._conn.commit()
         except Exception:
-            self._conn.rollback()
+            if commit:
+                self._conn.rollback()
             raise
 
     # --- compaction (delegates to gluomem.frames.compaction) -----------------
@@ -596,7 +754,7 @@ class FrameStore:
         content_hash: str,
         created_at: str | None = None,
     ) -> int:
-        """Insert a frame row and return its assigned id.
+        """Insert a frame row (uncommitted) and return its assigned id.
 
         ``t`` is a per-GOP monotonic counter (max existing t in the GOP + 1, or
         0 for the first frame) so ``idx_frames_gop_t`` reflects write order.
@@ -648,11 +806,22 @@ class FrameStore:
                     created_at,
                 ),
             )
-        self._conn.commit()
         lastrowid = cur.lastrowid
         if lastrowid is None:  # pragma: no cover — sqlite3 always sets it on INSERT
             raise RuntimeError("INSERT did not return a lastrowid")
         return int(lastrowid)
+
+    def _insert_indexed(self, *, index_text: str, **row: Any) -> Frame:
+        """Embed ``index_text``, then insert the row + its index in one commit."""
+        prepared = self._prepare_index(index_text)
+        try:
+            frame_id = self._insert(**row)
+            self._write_index(frame_id, prepared)
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return self.get_frame(frame_id)
 
     def _row_to_frame(self, row: sqlite3.Row | tuple) -> Frame:
         """Build a typed ``Frame`` from a row ordered like ``_COLUMNS``."""

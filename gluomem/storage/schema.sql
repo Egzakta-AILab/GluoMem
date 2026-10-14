@@ -39,6 +39,17 @@ CREATE TABLE IF NOT EXISTS memory_frame_chunks (id INTEGER PRIMARY KEY AUTOINCRE
   frame_id INTEGER NOT NULL REFERENCES memory_frames(id) ON DELETE CASCADE,
   chunk_idx INTEGER NOT NULL, content TEXT NOT NULL, char_start INTEGER, char_end INTEGER,
   UNIQUE(frame_id, chunk_idx));
+-- Constituents of derived frames (compaction). source_frame_id has no FK: the
+-- merged source row is deleted; this keeps its identity + provenance, not text.
+-- Added after 0.0.1; IF NOT EXISTS upgrades older files on open.
+CREATE TABLE IF NOT EXISTS memory_frame_lineage (id INTEGER PRIMARY KEY AUTOINCREMENT,
+  derived_frame_id INTEGER NOT NULL REFERENCES memory_frames(id) ON DELETE CASCADE,
+  source_frame_id INTEGER NOT NULL, source_frame_type TEXT NOT NULL,
+  source_content_hash TEXT, source_source TEXT NOT NULL, source_trust TEXT NOT NULL,
+  source_created_at TEXT NOT NULL, source_event_time TEXT,
+  operation TEXT NOT NULL, recorded_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE INDEX IF NOT EXISTS idx_lineage_derived ON memory_frame_lineage(derived_frame_id);
+CREATE INDEX IF NOT EXISTS idx_lineage_source  ON memory_frame_lineage(source_frame_id);
 -- vec0 tables created with dim = active embedder dim (never hardcoded):
 --   memory_frames_vec(embedding float[<dim>]) ; memory_frame_chunks_vec(embedding float[<dim>])
 

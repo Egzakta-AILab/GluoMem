@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from gluomem.config.app_config import AppConfig
 from gluomem.embedding.providers import MockEmbedder
 from gluomem.frames.store import FrameStore
@@ -274,4 +276,148 @@ def test_compaction_rejects_cross_gop_base(tmp_path: Path) -> None:
 
     assert store.get_frame(i.id).content == "base fact"
     assert len(_p_rows(db, "gop-b")) == 11
+    db.close()
+
+
+# --- failure-atomic publication + lineage --------------------------------------
+
+
+class FlakyEmbedder(MockEmbedder):
+    """MockEmbedder whose embed / embed_batch fail on command."""
+
+    fail_embed = False
+    fail_batch = False
+
+    def embed(self, text: str):
+        if self.fail_embed:
+            raise RuntimeError("embedder down (embed)")
+        return super().embed(text)
+
+    def embed_batch(self, texts: list[str]):
+        if self.fail_batch:
+            raise RuntimeError("embedder down (embed_batch)")
+        return super().embed_batch(texts)
+
+
+def _flaky_store(tmp_path: Path) -> tuple[MindDB, FrameStore, FlakyEmbedder, AppConfig]:
+    db = MindDB(tmp_path / "test.mind", dim=384)
+    emb = FlakyEmbedder(dim=384)
+    return db, FrameStore(db, embedder=emb), emb, AppConfig()
+
+
+def _snapshot(db: MindDB, store: FrameStore, base_id: int) -> tuple:
+    base = store.get_frame(base_id)
+    fts = db.conn.execute(
+        "SELECT content FROM memory_frames_fts WHERE rowid=?", (base_id,)
+    ).fetchone()
+    ps = db.conn.execute(
+        "SELECT id FROM memory_frames WHERE frame_type='P' ORDER BY id"
+    ).fetchall()
+    lineage = db.conn.execute("SELECT COUNT(*) FROM memory_frame_lineage").fetchone()
+    return base.content, store._content_hash_of(base_id), fts, ps, lineage
+
+
+def _seed(store: FrameStore, n: int = 11) -> tuple[int, list[int]]:
+    i = store.create_i_frame("gop-1", "base fact")
+    return i.id, [
+        store.create_p_frame("gop-1", f"delta body {k}", base_id=i.id).id for k in range(n)
+    ]
+
+
+@pytest.mark.parametrize("failure", ["fail_embed", "fail_batch"])
+def test_compaction_embed_failure_changes_nothing(tmp_path: Path, failure: str) -> None:
+    db, store, emb, cfg = _flaky_store(tmp_path)
+    base_id, _ = _seed(store)
+    before = _snapshot(db, store, base_id)
+
+    setattr(emb, failure, True)
+    with pytest.raises(RuntimeError, match="embedder down"):
+        store.compact("gop-1", cfg)
+
+    assert _snapshot(db, store, base_id) == before
+    assert store.index_state(base_id).ready
+    db.close()
+
+
+@pytest.mark.parametrize("hook", ["_record_lineage", "_delete_index_rows"])
+def test_compaction_sql_failure_mid_publication_rolls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hook: str
+) -> None:
+    """A failure after the new content and index rows are written (while
+    recording lineage or deleting constituents) rolls everything back: the
+    base serves its old content with a matching index, all P-frames remain.
+    Reopen, then retry, and compaction completes."""
+    db, store, _emb, cfg = _flaky_store(tmp_path)
+    base_id, p_ids = _seed(store)
+    before = _snapshot(db, store, base_id)
+
+    real = getattr(store, hook)
+    calls = {"n": 0}
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("publication failed")
+        return real(*a, **k)
+
+    monkeypatch.setattr(store, hook, flaky)
+    with pytest.raises(RuntimeError, match="publication failed"):
+        store.compact("gop-1", cfg)
+    monkeypatch.undo()
+    db.close()
+
+    db = MindDB(tmp_path / "test.mind", dim=384)
+    store = FrameStore(db, embedder=FlakyEmbedder(dim=384))
+    assert _snapshot(db, store, base_id) == before
+    assert store.index_state(base_id).ready
+    for pid in p_ids:
+        assert store.index_state(pid).ready
+
+    store.compact("gop-1", cfg)
+    assert "delta body 0" in store.get_frame(base_id).content
+    assert store.index_state(base_id).ready
+    db.close()
+
+
+def test_compaction_records_constituent_lineage(tmp_path: Path) -> None:
+    """Every merged P-frame (and the base's prior content) is recorded with
+    its id, type, content hash and provenance; KG links carry to the base."""
+    from gluomem.frames.content_hash import content_hash
+    from gluomem.kg.graph import KnowledgeGraph
+
+    db, store, cfg = _store(tmp_path)
+    kg = KnowledgeGraph(db)
+    base_id, p_ids = _seed(store)
+    ent = kg.create_entity("concept", "delta")
+    kg.link_entity_frame(ent.id, p_ids[0])
+
+    store.compact("gop-1", cfg)
+
+    entries = store.lineage(base_id)
+    assert [(e.source_frame_id, e.operation) for e in entries] == [
+        (base_id, "compaction_base")
+    ] + [(pid, "compaction_merge") for pid in p_ids[:6]]
+    assert entries[0].source_content_hash == content_hash("base fact")
+    assert entries[1].source_content_hash == content_hash("delta body 0")
+    assert {e.source_trust for e in entries} == {"normal"}
+    assert {e.source_source for e in entries} == {"user_stated"}
+    assert all(e.source_created_at for e in entries)
+    assert base_id in kg.frame_ids_for_entity(ent.id)
+    assert store.index_state(base_id).ready
+    db.close()
+
+
+def test_existing_file_without_lineage_table_upgrades_on_open(tmp_path: Path) -> None:
+    """A *.mind file created before the lineage table existed gains it on
+    open and compacts normally."""
+    db, store, cfg = _store(tmp_path)
+    base_id, _ = _seed(store)
+    db.conn.execute("DROP TABLE memory_frame_lineage")
+    db.conn.commit()
+    db.close()
+
+    db = MindDB(tmp_path / "test.mind", dim=384)
+    store = FrameStore(db, embedder=MockEmbedder(dim=384))
+    store.compact("gop-1", cfg)
+    assert len(store.lineage(base_id)) == 7
     db.close()

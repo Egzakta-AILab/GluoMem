@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from gluomem.embedding.providers import MockEmbedder
-from gluomem.frames.store import FrameStore
+from gluomem.frames.store import FrameStore, FrameType
 from gluomem.storage.db import MindDB
 
 
@@ -100,27 +100,149 @@ def test_reindex_failure_leaves_old_index_intact(
     db.close()
 
 
-@pytest.mark.parametrize("failure", ["fail_embed", "fail_batch"])
-def test_first_index_failure_leaves_no_partial_rows(
-    tmp_path: Path, failure: str
-) -> None:
-    """An embedder failure during the first index writes NO index rows.
+def _frame_rows(db: MindDB) -> int:
+    return db.conn.execute("SELECT COUNT(*) FROM memory_frames").fetchone()[0]
 
-    The frame row itself is committed before ``_index`` runs (documented), but
-    the index must be all-or-nothing: no FTS row without a vec row, etc.
-    """
+
+def _fts_ids(db: MindDB, term: str) -> list[int]:
+    return [
+        int(r[0])
+        for r in db.conn.execute(
+            "SELECT rowid FROM memory_frames_fts WHERE memory_frames_fts MATCH ?",
+            (term,),
+        ).fetchall()
+    ]
+
+
+@pytest.mark.parametrize("failure", ["fail_embed", "fail_batch"])
+@pytest.mark.parametrize("kind", ["I", "P", "B"])
+def test_first_write_embed_failure_leaves_nothing_and_retry_succeeds(
+    tmp_path: Path, failure: str, kind: str
+) -> None:
+    """An embedder failure on a new frame leaves no frame row and no index
+    rows; the retried write then lands once, fully indexed."""
     db, store, emb = _store(tmp_path)
+    base = store.create_i_frame("gop-1", "base alpha")
+
+    def write():
+        if kind == "I":
+            return store.create_i_frame("gop-1", "delta epsilon zeta")
+        if kind == "P":
+            return store.create_p_frame("gop-1", "delta epsilon zeta", base.id)
+        return store.create_b_frame("gop-1", "delta epsilon zeta", base.id, [base.id])
+
     setattr(emb, failure, True)
     with pytest.raises(RuntimeError, match="embedder down"):
-        store.create_i_frame("gop-1", "delta epsilon zeta")
+        write()
+    assert _frame_rows(db) == 1
+    assert _fts_ids(db, "epsilon") == []
 
-    row = db.conn.execute(
-        "SELECT id FROM memory_frames WHERE gop_id='gop-1'"
-    ).fetchone()
-    assert row is not None, "the frame row itself is committed before _index"
-    assert _index_counts(db, int(row[0])) == (0, 0, 0, 0), (
-        "a failed first index must leave no partial FTS/vec/chunk rows"
+    setattr(emb, failure, False)
+    frame = write()
+    assert _frame_rows(db) == 2
+    assert store.index_state(frame.id).ready
+    assert _fts_ids(db, "epsilon") == [frame.id]
+    db.close()
+
+
+def test_sql_failure_mid_index_rolls_back_frame_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A SQL failure after the FTS and vec rows are written rolls back the
+    frame row too; reopening the file shows nothing, and a retry succeeds."""
+    db, store, _ = _store(tmp_path)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("chunk write failed")
+
+    monkeypatch.setattr(store, "_index_chunks", boom)
+    with pytest.raises(RuntimeError, match="chunk write failed"):
+        store.create_i_frame("gop-1", "delta epsilon zeta")
+    db.close()
+
+    db = MindDB(tmp_path / "test.mind", dim=384)
+    store = FrameStore(db, embedder=FlakyEmbedder(384))
+    assert _frame_rows(db) == 0
+    assert db.conn.execute("SELECT COUNT(*) FROM memory_frames_vec").fetchone()[0] == 0
+    assert _fts_ids(db, "epsilon") == []
+
+    frame = store.create_i_frame("gop-1", "delta epsilon zeta")
+    assert store.index_state(frame.id).ready
+    db.close()
+
+
+def _legacy_unindexed(store: FrameStore, content: str, *, frame_type: FrameType = "I",
+                      base_id: int | None = None) -> int:
+    """Insert a frame row WITHOUT its index, as a pre-fix build could leave it."""
+    from gluomem.frames.content_hash import content_hash
+    from gluomem.frames.sessions import get_or_create_session
+
+    get_or_create_session(store._conn, "gop-1")
+    fid = store._insert(
+        gop="gop-1", frame_type=frame_type, base_frame_id=base_id, content=content,
+        importance="normal", source="user_stated", trust="normal", event_time=None,
+        content_hash=content_hash(content),
     )
+    store._conn.commit()
+    return fid
+
+
+def test_dedup_hit_repairs_legacy_unindexed_frame(tmp_path: Path) -> None:
+    """Retrying a write whose earlier attempt left an unindexed row repairs
+    that row instead of hiding it behind dedup; no duplicate is created."""
+    db, store, _ = _store(tmp_path)
+    fid = _legacy_unindexed(store, "delta epsilon zeta")
+    state = store.index_state(fid)
+    assert not state.ready and state.frame_vec == 0 and not state.fts_current
+
+    again = store.create_i_frame("gop-1", "delta epsilon zeta")
+    assert again.id == fid
+    assert _frame_rows(db) == 1
+    assert store.index_state(fid).ready
+    assert _fts_ids(db, "epsilon") == [fid]
+    db.close()
+
+
+def test_gate_dedup_hit_repairs_legacy_unindexed_pframe(tmp_path: Path) -> None:
+    """The gate's exact-hash dedup (all frame types) repairs too."""
+    from gluomem.config.app_config import load_config
+    from gluomem.write.gate import InjectionScanner, admit
+
+    cfg = load_config()
+    db, store, _ = _store(tmp_path)
+    base = store.create_i_frame("gop-1", "base alpha")
+    pid = _legacy_unindexed(store, "delta epsilon zeta", frame_type="P", base_id=base.id)
+
+    res = admit(
+        "delta epsilon zeta", gop="gop-1", scanner=InjectionScanner(cfg.safety),
+        store=store, kg=None, cfg=cfg, frame_type="P", base_id=base.id,
+    )
+    assert res.deduped and res.frame is not None and res.frame.id == pid
+    assert store.index_state(pid).ready
+    db.close()
+
+
+def test_repair_indexes_recovers_existing_file(tmp_path: Path) -> None:
+    """Explicit recovery for an existing file: missing and stale projections
+    are rebuilt after reopen; ready frames are left alone."""
+    db, store, _ = _store(tmp_path)
+    ok = store.create_i_frame("gop-1", "alpha ready")
+    missing = _legacy_unindexed(store, "beta missing")
+    stale = store.create_i_frame("gop-1", "gamma stale")
+    db.conn.execute(
+        "UPDATE memory_frames SET content='gamma rewritten' WHERE id=?", (stale.id,)
+    )
+    db.conn.commit()
+    db.close()
+
+    db = MindDB(tmp_path / "test.mind", dim=384)
+    store = FrameStore(db, embedder=FlakyEmbedder(384))
+    assert not store.index_state(stale.id).ready
+    assert store.repair_indexes() == [missing, stale.id]
+    for fid in (ok.id, missing, stale.id):
+        assert store.index_state(fid).ready
+    assert _fts_ids(db, "rewritten") == [stale.id]
+    assert store.repair_indexes() == []
     db.close()
 
 

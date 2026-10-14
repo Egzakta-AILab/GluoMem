@@ -6,7 +6,7 @@ GluoMem is a research-stage Python library (version 0.0.1). It runs locally agai
 
 ## What is implemented
 
-- **I/P/B memory frames** (a video-codec model of memory): I-frames hold self-contained facts and are content-hash deduplicated per GOP (group of pictures, a topic or session scope); P-frames hold refinements on a base I-frame; B-frames hold corrections written by the contradiction detector. Compaction merges a GOP's P-frames into its I-frame.
+- **I/P/B memory frames** (a video-codec model of memory): I-frames hold self-contained facts and are content-hash deduplicated per GOP (group of pictures, a topic or session scope); P-frames hold refinements on a base I-frame; B-frames hold corrections written by the contradiction detector. Compaction merges a GOP's P-frames into its I-frame and records each merged frame's identity as lineage. A frame row and its FTS/vector index commit together; `FrameStore.repair_indexes()` rebuilds missing or stale indexes in files written by 0.0.1.
 - **Temporal knowledge graph** with `valid_from`/`valid_to` on relations and relation retirement.
 - **Hybrid retrieval**: SQLite FTS5 (BM25) and sqlite-vec exact KNN, fused with RRF, then a four-signal relevance model (temporal, popularity, contextual, importance) and an optional cross-encoder reranker.
 - **DSPy write path**: typed extraction behind an `Extractors` protocol, with deterministic fake extractors for offline tests, an admission gate (regex injection scanner, quarantine or reject), and an extraction cache. Quarantined frames are kept for inspection by id but excluded from search, current-state reads, graph linking and compaction ([eligibility rule](./gluomem/frames/eligibility.py)).
@@ -23,7 +23,6 @@ GluoMem is a research-stage Python library (version 0.0.1). It runs locally agai
 
 These are tracked for the first hardening iteration and are being fixed:
 
-- Frame insertion and its FTS/vector indexing are separate commits; an indexing failure can leave a stored but unsearchable frame that deduplication then hides on retry.
 - Reasserting a retired graph relation rewrites the original row's validity interval.
 - A timezone-aware `created_at` can raise `TypeError` during search recency scoring.
 - Embedding compatibility is checked by vector dimension only.
