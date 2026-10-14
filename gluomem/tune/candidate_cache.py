@@ -1,8 +1,4 @@
-"""Offline candidate pool cache for zero-call retrieval parameter tuning.
-
-Separates the expensive one-time retrieval pass (FTS + vector KNN + KG BFS +
-frame metadata load) from the cheap parameter rescore pass (`DESIGN.md` §9).
-"""
+"""Offline cache of runtime candidate features and gold qrels."""
 
 from __future__ import annotations
 
@@ -14,13 +10,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+from numpy.typing import NDArray
+
 from gluomem.embedding.compat import stored_fingerprint
 from gluomem.embedding.fingerprint import fingerprint_of
-from gluomem.frames.eligibility import is_recall_eligible
 from gluomem.frames.store import Frame, FrameStore
 from gluomem.kg.graph import KnowledgeGraph
-from gluomem.search.sanitize import sanitize
+from gluomem.search.hybrid import HybridSearch
 from gluomem.storage.db import MindDB
+from gluomem.storage.scope import MemoryScope
 from gluomem.timeutil import Clock, parse_utc, utc_key, utc_now
 
 if TYPE_CHECKING:
@@ -48,7 +47,6 @@ class CandidateRow:
     access_count: int
     bfs_distance: int
     importance_level: str
-    grade: int = 0
     frame_id: int | None = None
     dia_id: str | None = None
 
@@ -69,7 +67,6 @@ class CandidateRow:
             access_count=int(data["access_count"]),
             bfs_distance=int(data["bfs_distance"]),
             importance_level=str(data["importance_level"]),
-            grade=int(data.get("grade", 0)),
             frame_id=int(frame_id) if frame_id is not None else None,
             dia_id=str(dia_id) if dia_id is not None else None,
         )
@@ -113,7 +110,9 @@ class CacheManifest:
         return asdict(self)
 
     def digest(self) -> str:
-        payload = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+        material = self.to_dict()
+        material.pop("created_at")
+        payload = json.dumps(material, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @classmethod
@@ -131,6 +130,22 @@ class CacheManifest:
         )
 
 
+@dataclass(frozen=True)
+class CandidateArrays:
+    """Padded per-query arrays prepared once for vectorized rescoring."""
+
+    fts: NDArray[np.float64]
+    vec: NDArray[np.float64]
+    days: NDArray[np.float64]
+    access: NDArray[np.float64]
+    distance: NDArray[np.int64]
+    importance: NDArray[np.int64]
+    importance_levels: tuple[str, ...]
+    ties: NDArray[np.int64]
+    valid: NDArray[np.bool_]
+    doc_ids: NDArray[np.str_]
+
+
 class CandidateCache:
     """In-memory and on-disk store of per-query candidate pools and qrels."""
 
@@ -145,19 +160,12 @@ class CandidateCache:
             str(qid): list(rows) for qid, rows in queries.items()
         }
         self._qrels: dict[str, dict[str, int]] = {}
-        for qid, rows in self._queries.items():
-            derived = {r.doc_id: int(r.grade) for r in rows if int(r.grade) > 0}
-            if qrels and qid in qrels:
-                for doc_id, grade in qrels[qid].items():
-                    if int(grade) > 0:
-                        derived[str(doc_id)] = int(grade)
-            self._qrels[qid] = derived
         if qrels:
-            for qid, qmap in qrels.items():
-                if qid not in self._qrels:
-                    self._qrels[str(qid)] = {
-                        str(d): int(g) for d, g in qmap.items() if int(g) > 0
-                    }
+            self._qrels = {
+                str(qid): {str(d): int(g) for d, g in qmap.items() if int(g) > 0}
+                for qid, qmap in qrels.items()
+            }
+        self._arrays: CandidateArrays | None = None
 
         self._manifest = manifest or CacheManifest(
             dataset="in_memory",
@@ -184,6 +192,39 @@ class CandidateCache:
 
     def qrels(self) -> dict[str, dict[str, int]]:
         return {qid: dict(qmap) for qid, qmap in self._qrels.items()}
+
+    def arrays(self) -> CandidateArrays:
+        """Prepare reusable arrays for all queries in sorted query-id order."""
+        if self._arrays is None:
+            pools = [self._queries[qid] for qid in self.query_ids()]
+            levels = tuple(sorted({r.importance_level for rows in pools for r in rows}))
+            level_ids = {level: i for i, level in enumerate(levels)}
+            shape = (len(pools), max((len(rows) for rows in pools), default=0))
+            fts = np.full(shape, np.inf)
+            vec = np.full(shape, np.inf)
+            days = np.zeros(shape)
+            access = np.zeros(shape)
+            distance = np.zeros(shape, dtype=np.int64)
+            importance = np.zeros(shape, dtype=np.int64)
+            ties = np.zeros(shape, dtype=np.int64)
+            valid = np.zeros(shape, dtype=np.bool_)
+            max_id = max((len(row.doc_id) for rows in pools for row in rows), default=1)
+            doc_ids = np.full(shape, "", dtype=f"U{max_id}")
+            for i, rows in enumerate(pools):
+                for j, row in enumerate(rows):
+                    fts[i, j] = row.fts_rank if row.fts_rank is not None else np.inf
+                    vec[i, j] = row.vec_rank if row.vec_rank is not None else np.inf
+                    days[i, j] = row.days_since_created
+                    access[i, j] = row.access_count
+                    distance[i, j] = row.bfs_distance
+                    importance[i, j] = level_ids[row.importance_level]
+                    ties[i, j] = row.frame_id if row.frame_id is not None else j
+                    valid[i, j] = True
+                    doc_ids[i, j] = row.doc_id
+            self._arrays = CandidateArrays(
+                fts, vec, days, access, distance, importance, levels, ties, valid, doc_ids
+            )
+        return self._arrays
 
     def save(self, cache_dir: Path | str) -> Path:
         """Persist `manifest.json` and `candidates.jsonl` to `cache_dir`."""
@@ -215,9 +256,7 @@ class CandidateCache:
             raise FileNotFoundError(f"missing candidate cache manifest: {manifest_path}")
         if not rows_path.is_file():
             raise FileNotFoundError(f"missing candidate cache rows: {rows_path}")
-        manifest = CacheManifest.from_dict(
-            json.loads(manifest_path.read_text(encoding="utf-8"))
-        )
+        manifest = CacheManifest.from_dict(json.loads(manifest_path.read_text(encoding="utf-8")))
         queries: dict[str, list[CandidateRow]] = {}
         qrels: dict[str, dict[str, int]] = {}
         for line in rows_path.read_text(encoding="utf-8").splitlines():
@@ -226,41 +265,13 @@ class CandidateCache:
                 continue
             payload = json.loads(stripped)
             qid = str(payload["query_id"])
-            queries[qid] = [
-                CandidateRow.from_dict(item) for item in payload.get("candidates", [])
-            ]
+            queries[qid] = [CandidateRow.from_dict(item) for item in payload.get("candidates", [])]
             raw_qrel = payload.get("qrel", {})
             if isinstance(raw_qrel, Mapping):
                 qrels[qid] = {
-                    str(doc_id): int(grade)
-                    for doc_id, grade in raw_qrel.items()
-                    if int(grade) > 0
+                    str(doc_id): int(grade) for doc_id, grade in raw_qrel.items() if int(grade) > 0
                 }
         return cls(queries, qrels=qrels, manifest=manifest)
-
-
-def _days_since_created(created_at: str, now: datetime) -> float:
-    try:
-        dt = parse_utc(created_at)
-    except ValueError:
-        return 0.0
-    delta = (parse_utc(now) - dt).total_seconds() / 86400.0
-    return max(0.0, delta)
-
-
-def _event_time_in_range(
-    event_time: str | None, since: str | None, until: str | None
-) -> bool:
-    if since is None and until is None:
-        return True
-    if event_time is None:
-        return False
-    et = utc_key(event_time)
-    if since is not None and et < utc_key(since):
-        return False
-    if until is not None and et > utc_key(until):
-        return False
-    return True
 
 
 def _retrieve_query_pool(
@@ -271,75 +282,38 @@ def _retrieve_query_pool(
     kg: KnowledgeGraph | None,
     cfg: AppConfig,
     spec: QuerySpec,
-    lane_fetch: int,
+    lane_fetch: int | None,
     now: datetime,
+    scope: MemoryScope | None = None,
+    limit: int = 10,
     content_to_dias: Mapping[str, tuple[str, ...]] | None = None,
 ) -> list[CandidateRow]:
-    sanitized = sanitize(spec.query)
-    if not sanitized:
-        fts_ids = db.fts.search_like(spec.query, int(lane_fetch))
-    else:
-        fts_ids = db.fts.search(sanitized, int(lane_fetch))
-    eligible_fts = store.filter_eligible_ids(fts_ids)
-    fts_ids = [fid for fid in fts_ids if fid in eligible_fts]
-
-    qvec = embedder.embed(spec.query)
-    vec_ids: list[int] = []
-    chunk_hits = db.chunk_vec.search(qvec, int(lane_fetch))
-    if chunk_hits:
-        chunk_ids = [int(cid) for cid, _dist in chunk_hits]
-        chunk_to_frame = store.resolve_chunk_frames(chunk_ids)
-        seen: set[int] = set()
-        for cid in chunk_ids:
-            fid = chunk_to_frame.get(cid)
-            if fid is not None and fid not in seen:
-                seen.add(fid)
-                vec_ids.append(fid)
-        if vec_ids:
-            eligible_vec = store.filter_eligible_ids(vec_ids)
-            vec_ids = [fid for fid in vec_ids if fid in eligible_vec]
-    if not vec_ids:
-        frame_hits = db.frame_vec.search(qvec, int(lane_fetch))
-        raw_frame_ids = [int(fid) for fid, _dist in frame_hits]
-        eligible_vec = store.filter_eligible_ids(raw_frame_ids)
-        vec_ids = [fid for fid in raw_frame_ids if fid in eligible_vec]
-
-    fts_rank_map = {fid: rank for rank, fid in enumerate(fts_ids)}
-    vec_rank_map = {fid: rank for rank, fid in enumerate(vec_ids)}
-    all_fids = list(dict.fromkeys([*fts_ids, *vec_ids]))
-
-    ctx_map: dict[int, int] = {}
-    if kg is not None:
-        try:
-            ctx_map = kg.contextual(spec.query, cfg.kg, depth=cfg.scoring.bfs_depth)
-        except Exception:
-            ctx_map = {}
-
-    beyond_depth = cfg.scoring.bfs_depth + 1
-    frames_by_id = store.get_frames(all_fids)
+    search = HybridSearch(db, store, cfg, embedder=embedder, kg=kg)
+    pool = search.candidates(
+        spec.query,
+        scope=scope or store.scope,
+        now=parse_utc(spec.clock_iso) if spec.clock_iso else now,
+        lane_fetch=lane_fetch,
+        limit=limit,
+        since=spec.since,
+        until=spec.until,
+    )
+    rows = []
     qrel = spec.qrel()
-    rows: list[CandidateRow] = []
-
-    for fid in all_fids:
-        frame = frames_by_id.get(fid)
-        if frame is None or not is_recall_eligible(frame.trust):
-            continue
-        if not _event_time_in_range(frame.event_time, spec.since, spec.until):
-            continue
-        dia_id = _resolve_dia_id(frame, content_to_dias, qrel)
-        doc_id, grade = _resolve_doc_id_and_grade(frame, dia_id, qrel)
+    for row in pool.rows:
+        dia_id = _resolve_dia_id(row.frame, content_to_dias, qrel)
+        doc_id = _resolve_doc_id(row.frame, dia_id, qrel)
         rows.append(
             CandidateRow(
-                doc_id=doc_id,
-                fts_rank=fts_rank_map.get(fid),
-                vec_rank=vec_rank_map.get(fid),
-                days_since_created=_days_since_created(frame.created_at, now),
-                access_count=frame.access_count,
-                bfs_distance=ctx_map.get(fid, beyond_depth),
-                importance_level=frame.importance,
-                grade=grade,
-                frame_id=frame.id,
-                dia_id=dia_id,
+                doc_id,
+                row.fts_rank,
+                row.vec_rank,
+                row.days_since_created,
+                row.access_count,
+                row.bfs_distance,
+                row.importance_level,
+                row.frame.id,
+                dia_id,
             )
         )
     return rows
@@ -360,22 +334,22 @@ def _resolve_dia_id(
     return next((d for d in dias if d in qrel), dias[0])
 
 
-def _resolve_doc_id_and_grade(
+def _resolve_doc_id(
     frame: Frame,
     dia_id: str | None,
     qrel: Mapping[str, int],
-) -> tuple[str, int]:
+) -> str:
     if dia_id is not None and dia_id in qrel:
-        return dia_id, int(qrel[dia_id])
+        return dia_id
     frame_key = f"frame:{frame.id}"
     if frame_key in qrel:
-        return frame_key, int(qrel[frame_key])
+        return frame_key
     id_str = str(frame.id)
     if id_str in qrel:
-        return id_str, int(qrel[id_str])
+        return id_str
     if dia_id is not None:
-        return dia_id, int(qrel.get(dia_id, 0))
-    return frame_key, 0
+        return dia_id
+    return frame_key
 
 
 def build_cache_for_db(
@@ -386,8 +360,10 @@ def build_cache_for_db(
     *,
     embedder: Embedder | None = None,
     kg: KnowledgeGraph | None = None,
-    lane_fetch: int = 100,
+    lane_fetch: int | None = None,
+    limit: int = 10,
     clock: Clock | None = None,
+    scope: MemoryScope | None = None,
     dataset_name: str = "custom",
     dataset_sha: str | None = None,
 ) -> CandidateCache:
@@ -412,21 +388,50 @@ def build_cache_for_db(
             spec=spec,
             lane_fetch=lane_fetch,
             now=now,
+            scope=scope,
+            limit=limit,
         )
         qrels_by_query[spec.query_id] = qrel
 
     fp = stored_fingerprint(db) or fingerprint_of(resolved_embedder)
-    sha = dataset_sha or hashlib.sha256(
-        json.dumps(
-            [(q.query_id, q.query, sorted(q.qrel().items())) for q in queries],
-            sort_keys=True,
-        ).encode("utf-8")
-    ).hexdigest()
+    sha = (
+        dataset_sha
+        or hashlib.sha256(
+            json.dumps(
+                {
+                    "scope": (scope or store.scope).as_tuple(),
+                    "queries": [
+                        (
+                            q.query_id,
+                            q.query,
+                            sorted(q.qrel().items()),
+                            q.since,
+                            q.until,
+                            q.clock_iso,
+                        )
+                        for q in queries
+                    ],
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+    )
     manifest = CacheManifest(
         dataset=dataset_name,
         dataset_sha=sha,
         embedder_fingerprint=fp.as_dict(),
-        lane_fetch=int(lane_fetch),
+        lane_fetch=lane_fetch
+        if lane_fetch is not None
+        else max(1, limit)
+        * max(
+            (
+                cfg.search.lane_fetch_time_mult
+                if q.since is not None or q.until is not None
+                else cfg.search.lane_fetch_mult
+                for q in queries
+            ),
+            default=cfg.search.lane_fetch_mult,
+        ),
         bfs_depth=int(cfg.scoring.bfs_depth),
         query_count=len(pool_by_query),
         created_at=utc_key(resolved_clock()),
@@ -440,7 +445,8 @@ def build_cache_for_benchmark(
     db_dir: Path | str,
     dataset_name: str = "locomo",
     sample_manifest: Path | str | None = None,
-    lane_fetch: int = 100,
+    lane_fetch: int | None = None,
+    limit: int = 10,
     embedder: Embedder | None = None,
     clock: Clock | None = None,
 ) -> CandidateCache:
@@ -454,20 +460,20 @@ def build_cache_for_benchmark(
         samples = load_sample_manifest(Path(sample_manifest), adapter=adapter)
     else:
         all_samples = adapter.load()
-        try:
-            samples = stratified_sample(
-                all_samples,
-                per_category=cfg.benchmark.sample.per_category,
-                categories=cfg.benchmark.sample.categories,
-                seed=cfg.benchmark.sample.seed,
-            )
-        except Exception:
-            samples = list(all_samples)
+        samples = stratified_sample(
+            all_samples,
+            per_category=cfg.benchmark.sample.per_category,
+            categories=cfg.benchmark.sample.categories,
+            seed=cfg.benchmark.sample.seed,
+        )
 
     content_to_dias = adapter.content_to_dias()
     resolved_embedder = embedder or make_embedder(cfg)
     resolved_clock = clock or utc_now
-    now = resolved_clock()
+    conv_clocks = {
+        conv.conv_id: utc_key(max(parse_utc(session.date_time) for session in conv.sessions))
+        for conv in adapter.conversations()
+    }
 
     root = Path(db_dir)
     pool_by_query: dict[str, list[CandidateRow]] = {}
@@ -482,9 +488,7 @@ def build_cache_for_benchmark(
     for conv_id, conv_samples in sorted(by_conv.items()):
         db_path = root / f"{conv_id}.mind"
         if not db_path.is_file():
-            raise FileNotFoundError(
-                f"no memory DB for conversation '{conv_id}' at {db_path}"
-            )
+            raise FileNotFoundError(f"no memory DB for conversation '{conv_id}' at {db_path}")
         db = MindDB(db_path, dim=cfg.storage.vector_dim)
         try:
             store = FrameStore(db, embedder=resolved_embedder, chunking=cfg.chunking)
@@ -498,6 +502,7 @@ def build_cache_for_benchmark(
                     query=s.question,
                     relevant_doc_ids=tuple(s.evidence),
                     conv_id=s.conv_id,
+                    clock_iso=conv_clocks[s.conv_id],
                 )
                 pool_by_query[s.id] = _retrieve_query_pool(
                     db=db,
@@ -507,7 +512,8 @@ def build_cache_for_benchmark(
                     cfg=cfg,
                     spec=spec,
                     lane_fetch=lane_fetch,
-                    now=now,
+                    now=parse_utc(conv_clocks[s.conv_id]),
+                    limit=limit,
                     content_to_dias=content_to_dias,
                 )
                 qrels_by_query[s.id] = spec.qrel()
@@ -518,9 +524,11 @@ def build_cache_for_benchmark(
         dataset=dataset_name,
         dataset_sha=adapter.sha,
         embedder_fingerprint=fp_dict,
-        lane_fetch=int(lane_fetch),
+        lane_fetch=lane_fetch
+        if lane_fetch is not None
+        else max(1, limit) * cfg.search.lane_fetch_mult,
         bfs_depth=int(cfg.scoring.bfs_depth),
         query_count=len(pool_by_query),
-        created_at=utc_key(now),
+        created_at=utc_key(resolved_clock()),
     )
     return CandidateCache(pool_by_query, qrels=qrels_by_query, manifest=manifest)

@@ -80,67 +80,21 @@ class AblationReport:
         }
 
 
-def _zero_signal(
-    base: ParamVector,
-    *,
-    w_t: float | None = None,
-    w_p: float | None = None,
-    w_c: float | None = None,
-    w_i: float | None = None,
-) -> ParamVector:
-    rt = base.w_t if w_t is None else w_t
-    rp = base.w_p if w_p is None else w_p
-    rc = base.w_c if w_c is None else w_c
-    ri = base.w_i if w_i is None else w_i
-    total = rt + rp + rc + ri
-    if total > 0:
-        rt, rp, rc, ri = rt / total, rp / total, rc / total, ri / total
-    return replace(base, w_t=rt, w_p=rp, w_c=rc, w_i=ri)
-
-
 def default_ablation_variants(base: ParamVector) -> list[AblationVariant]:
-    """Build the standard signal and lane ablation suite from `base`."""
+    """Build the standard signal and lane ablation suite from ``base``."""
+    variants: tuple[tuple[str, str, dict[str, Any]], ...] = (
+        ("incumbent", "Full hybrid RRF × relevance", {}),
+        ("no_temporal", "Zero temporal decay", {"w_t": 0.0}),
+        ("no_popularity", "Zero popularity boost", {"w_p": 0.0}),
+        ("no_contextual", "Zero KG contextual boost", {"w_c": 0.0}),
+        ("no_importance", "Zero importance multiplier", {"w_i": 0.0}),
+        ("hybrid_rrf", "Pure RRF fusion", {"use_relevance": False}),
+        ("fts_only", "FTS lane only", {"use_vec": False}),
+        ("vec_only", "Vector lane only", {"use_fts": False}),
+    )
     return [
-        AblationVariant(
-            name="incumbent",
-            description="Full hybrid RRF × relevance (all 4 signals + FTS + Vec)",
-            params=base,
-        ),
-        AblationVariant(
-            name="no_temporal",
-            description="Zero temporal recency decay (w_t = 0)",
-            params=_zero_signal(base, w_t=0.0),
-        ),
-        AblationVariant(
-            name="no_popularity",
-            description="Zero access-count popularity boost (w_p = 0)",
-            params=_zero_signal(base, w_p=0.0),
-        ),
-        AblationVariant(
-            name="no_contextual",
-            description="Zero KG BFS contextual boost (w_c = 0)",
-            params=_zero_signal(base, w_c=0.0),
-        ),
-        AblationVariant(
-            name="no_importance",
-            description="Zero frame importance multiplier (w_i = 0)",
-            params=_zero_signal(base, w_i=0.0),
-        ),
-        AblationVariant(
-            name="hybrid_rrf",
-            description="Pure RRF fusion without relevance multiplier",
-            params=replace(base, use_relevance=False),
-        ),
-        AblationVariant(
-            name="fts_only",
-            description="BM25 / FTS lane only (+ relevance)",
-            params=replace(base, use_fts=True, use_vec=False),
-        ),
-        AblationVariant(
-            name="vec_only",
-            description="Vector KNN lane only (+ relevance)",
-            params=replace(base, use_fts=False, use_vec=True),
-        ),
+        AblationVariant(name, description, replace(base, **changes))
+        for name, description, changes in variants
     ]
 
 
@@ -161,9 +115,7 @@ def run_ablation(
     base_recall = float(incumbent_metrics["recall"])
 
     resolved_variants = (
-        list(variants)
-        if variants is not None
-        else default_ablation_variants(incumbent)
+        list(variants) if variants is not None else default_ablation_variants(incumbent)
     )
     rows: list[AblationRow] = []
     for variant in resolved_variants:

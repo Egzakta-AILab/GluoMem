@@ -26,7 +26,6 @@ def _ablation_cache() -> CandidateCache:
             access_count=5,
             bfs_distance=0,
             importance_level="critical",
-            grade=1,
             frame_id=1,
         ),
         # Doc B: only in Vec, normal importance
@@ -38,7 +37,6 @@ def _ablation_cache() -> CandidateCache:
             access_count=1,
             bfs_distance=3,
             importance_level="normal",
-            grade=1,
             frame_id=2,
         ),
         # Distractor
@@ -50,7 +48,6 @@ def _ablation_cache() -> CandidateCache:
             access_count=0,
             bfs_distance=4,
             importance_level="temporary",
-            grade=0,
             frame_id=3,
         ),
     ]

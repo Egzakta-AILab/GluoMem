@@ -246,8 +246,8 @@ def _default_scoring_profiles() -> dict[str, ScoringProfile]:
 
 
 class ScoringConfig(BaseModel):
-    half_life_days: int = 30
-    flat_boost_days: int = 7
+    half_life_days: float = 30
+    flat_boost_days: float = 7
     log_coef: float = 0.1
     bfs_steps: list[float] = Field(
         default_factory=lambda: [1.0, 0.7, 0.4, 0.2, 0.0]
