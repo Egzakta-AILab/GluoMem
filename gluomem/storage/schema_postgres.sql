@@ -194,6 +194,15 @@ CREATE TABLE IF NOT EXISTS kg_entity_frames (
 CREATE INDEX IF NOT EXISTS idx_kg_entity_frames_frame
     ON kg_entity_frames(frame_id);
 
+CREATE TABLE IF NOT EXISTS kg_relation_frames (
+    relation_id BIGINT NOT NULL REFERENCES knowledge_relations(id) ON DELETE CASCADE,
+    frame_id    BIGINT NOT NULL REFERENCES memory_frames(id) ON DELETE CASCADE,
+    PRIMARY KEY(relation_id, frame_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_kg_relation_frames_frame
+    ON kg_relation_frames(frame_id);
+
 CREATE TABLE IF NOT EXISTS source_events (
     id           BIGSERIAL PRIMARY KEY,
     tenant_id    TEXT NOT NULL DEFAULT 'local',
@@ -248,6 +257,19 @@ CREATE INDEX IF NOT EXISTS idx_tombstones_scope_hash
     ON memory_tombstones(tenant_id, principal_id, namespace, content_hash);
 CREATE INDEX IF NOT EXISTS idx_tombstones_scope_event
     ON memory_tombstones(tenant_id, principal_id, namespace, source_event_id);
+
+CREATE TABLE IF NOT EXISTS memory_frame_keys (
+    frame_id        BIGINT PRIMARY KEY REFERENCES memory_frames(id) ON DELETE CASCADE,
+    suppression_key TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS memory_tombstone_keys (
+    tombstone_id    BIGINT PRIMARY KEY REFERENCES memory_tombstones(id) ON DELETE CASCADE,
+    suppression_key TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tombstone_keys_suppression
+    ON memory_tombstone_keys(suppression_key);
 
 CREATE TABLE IF NOT EXISTS scope_generations (
     tenant_id    TEXT NOT NULL,

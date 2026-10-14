@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from gluomem.config.app_config import AppConfig, SafetyConfig
-    from gluomem.frames.store import FrameStore
+    from gluomem.frames.store import FrameStore, _PreparedIndex
     from gluomem.kg.graph import KnowledgeGraph
     from gluomem.write.dedup import SemanticDeduper
 
@@ -85,6 +85,7 @@ def admit(
     event_time: str | None = None,
     trust: Trust = "normal",
     entity_ids: Sequence[int] = (),
+    relation_ids: Sequence[int] = (),
     created_at: str | None = None,
     deduper: SemanticDeduper | None = None,
     scope: MemoryScope | None = None,
@@ -94,22 +95,48 @@ def admit(
     expires_at: str | None = None,
     pinned: bool = False,
     verified_by_user: bool = False,
+    scope_wide: bool = False,
+    prepared: _PreparedIndex | None = None,
 ) -> AdmitResult:
     """Admit one write: scan, dedup, create frame, and link KG entities."""
     s = resolve_scope(scope, default=store.scope)
     verdict = scanner.scan(content, context=source)
     if verdict.score >= cfg.safety.block_threshold:
         if cfg.safety.fail_mode == "reject":
-            return AdmitResult(
-                admitted=False, frame=None, verdict=verdict, trust=trust
-            )
+            return AdmitResult(admitted=False, frame=None, verdict=verdict, trust=trust)
         trust = "quarantined"
     if not is_recall_eligible(trust, status=status, expires_at=expires_at):
         deduper = None
 
-    existing = store.find_frame_by_hash(gop, content, scope=s)
+    def link_graph(frame: Frame) -> None:
+        if kg is not None and is_recall_eligible(frame):
+            for eid in entity_ids:
+                kg.link_entity_frame(eid, frame.id, scope=s)
+            for rid in relation_ids:
+                kg.link_relation_frame(rid, frame.id, scope=s)
+
+    existing = store.find_frame_by_hash(None if scope_wide else gop, content, scope=s)
     if existing is not None:
-        store.ensure_indexed(existing)
+        if (
+            trust != "quarantined"
+            and existing.trust != "quarantined"
+            and (verified_by_user or pinned)
+        ):
+            from gluomem.frames.generation import bump_scope_generation
+
+            with store.db.transaction():
+                store._update(
+                    existing.id,
+                    s,
+                    status="active",
+                    pinned=int(existing.pinned or pinned),
+                    verified_by_user=int(existing.verified_by_user or verified_by_user),
+                    expires_at=None if pinned else existing.expires_at,
+                )
+                bump_scope_generation(store._backend, s)
+            existing = store.get_frame(existing.id, scope=s)
+        store.ensure_indexed(existing, prepared=prepared)
+        link_graph(existing)
         return AdmitResult(
             admitted=True,
             frame=existing,
@@ -126,15 +153,13 @@ def admit(
         except KeyError:
             deduper.forget(gop, probe.matched_id, scope=s)
         else:
-            if (
-                cfg.write.dedup.on_hit == "keep_longest"
-                and len(content) > len(matched.content)
-            ):
+            if cfg.write.dedup.on_hit == "keep_longest" and len(content) > len(matched.content):
                 store.set_importance(matched.id, "deprecated", scope=s)
                 deduper.forget(gop, matched.id, scope=s)
                 superseded_id = matched.id
             else:
                 store.ensure_indexed(matched)
+                link_graph(matched)
                 return AdmitResult(
                     admitted=True,
                     frame=matched,
@@ -147,6 +172,8 @@ def admit(
         frame = store.create_i_frame(
             gop,
             content,
+            prepared=prepared,
+            scope_wide=scope_wide,
             importance=importance if importance is not None else "normal",
             source=source,
             event_time=event_time,
@@ -206,9 +233,7 @@ def admit(
     if deduper is not None and probe is not None:
         deduper.record(gop, frame.id, probe.vector, scope=s)
 
-    if kg is not None and is_recall_eligible(trust, expires_at=expires_at):
-        for eid in entity_ids:
-            kg.link_entity_frame(eid, frame.id, scope=s)
+    link_graph(frame)
 
     return AdmitResult(
         admitted=True,

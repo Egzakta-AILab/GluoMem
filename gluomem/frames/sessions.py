@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import TYPE_CHECKING, Any
 
-from gluomem.storage.scope import MemoryScope, resolve_scope
+from gluomem.storage.scope import MemoryScope, resolve_scope, scope_sql
 
 if TYPE_CHECKING:
     from gluomem.storage.backend import DatabaseBackend
@@ -23,9 +23,7 @@ def get_or_create_session(
     """Ensure a row exists in ``sessions`` for ``(scope, gop_id)``."""
     eff_scope = resolve_scope(scope)
     params = (
-        eff_scope.tenant_id,
-        eff_scope.principal_id,
-        eff_scope.namespace,
+        *eff_scope.as_tuple(),
         gop_id,
         project_id,
     )
@@ -71,15 +69,13 @@ def end_session(
     eff_scope = resolve_scope(scope)
     params = (
         summary,
-        eff_scope.tenant_id,
-        eff_scope.principal_id,
-        eff_scope.namespace,
+        *eff_scope.as_tuple(),
         gop_id,
     )
     if isinstance(db, sqlite3.Connection):
         db.execute(
             "UPDATE sessions SET status = 'ended', ended_at = datetime('now'), summary = ? "
-            "WHERE tenant_id = ? AND principal_id = ? AND namespace = ? AND gop_id = ?",
+            f"WHERE {scope_sql()} AND gop_id = ?",
             params,
         )
         if commit:
@@ -94,7 +90,7 @@ def end_session(
     )
     backend.execute(
         f"UPDATE sessions SET status = 'ended', ended_at = {now_expr}, summary = ? "
-        "WHERE tenant_id = ? AND principal_id = ? AND namespace = ? AND gop_id = ?",
+        f"WHERE {scope_sql()} AND gop_id = ?",
         params,
     )
     if commit:

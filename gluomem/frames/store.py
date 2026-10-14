@@ -9,12 +9,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
-from gluomem.config.app_config import AppConfig, ChunkingConfig
+from gluomem.config.app_config import AppConfig, ChunkingConfig, LifecycleConfig
 from gluomem.embedding.base import Embedder, assert_dim
 from gluomem.embedding.chunker import Chunk, chunk
 from gluomem.embedding.compat import bind_embedder, write_fingerprint
 from gluomem.embedding.fingerprint import EmbedderFingerprint, fingerprint_of
-from gluomem.frames.content_hash import content_hash
+from gluomem.frames.content_hash import content_hash, suppression_key
+from gluomem.frames.expiry import episode_expiry
 from gluomem.frames.sessions import get_or_create_session
 from gluomem.storage.db import MindDB
 from gluomem.storage.scope import (
@@ -53,7 +54,7 @@ _COLUMNS = (
     "id, frame_type, gop_id, t, base_frame_id, content, importance, "
     "source, trust, access_count, created_at, event_time, last_accessed, "
     "tenant_id, principal_id, namespace, kind, status, confidence, "
-    "superseded_by, supersedes, expires_at, pinned, verified_by_user"
+    "superseded_by, supersedes, expires_at, pinned, verified_by_user, content_hash"
 )
 
 
@@ -85,6 +86,7 @@ class Frame:
     expires_at: str | None = None
     pinned: bool = False
     verified_by_user: bool = False
+    content_hash: str | None = None
 
     @property
     def scope(self) -> MemoryScope:
@@ -168,18 +170,18 @@ class FrameStore:
         *,
         chunking: ChunkingConfig | None = None,
         scope: MemoryScope = DEFAULT_SCOPE,
+        lifecycle: LifecycleConfig | None = None,
     ) -> None:
         if embedder is None:
             raise TypeError("FrameStore requires an embedder")
         if embedder.dim != db.dim:
-            raise ValueError(
-                f"embedder.dim ({embedder.dim}) != db.dim ({db.dim})"
-            )
+            raise ValueError(f"embedder.dim ({embedder.dim}) != db.dim ({db.dim})")
         self._fingerprint: EmbedderFingerprint = bind_embedder(db, embedder)
         self._db = db
         self._backend: DatabaseBackend = db.backend
         self._embedder = embedder
         self._chunking = chunking or ChunkingConfig()
+        self._lifecycle = lifecycle or LifecycleConfig()
         self._scope: MemoryScope = scope
         self._fts: FtsStore = db.fts
         self._frames_vec: VectorStore = db.frame_vec
@@ -227,9 +229,7 @@ class FrameStore:
                 "dimension changes require a new MindDB"
             )
         cfg = chunking or ChunkingConfig()
-        rows = db.backend.fetchall(
-            f"SELECT {_COLUMNS} FROM memory_frames ORDER BY id ASC"
-        )
+        rows = db.backend.fetchall(f"SELECT {_COLUMNS} FROM memory_frames ORDER BY id ASC")
         frames = [cls._row_to_frame(r) for r in rows]
 
         prepared: list[tuple[int, _PreparedIndex]] = []
@@ -249,9 +249,7 @@ class FrameStore:
             prepared.append(
                 (
                     frame.id,
-                    _PreparedIndex(
-                        text=text, frame_vec=fvec, chunks=chunks, chunk_vecs=cvecs
-                    ),
+                    _PreparedIndex(text=text, frame_vec=fvec, chunks=chunks, chunk_vecs=cvecs),
                 )
             )
 
@@ -273,9 +271,7 @@ class FrameStore:
             for fid, prep in prepared:
                 db.fts.upsert(fid, prep.text, commit=False)
                 db.frame_vec.add(fid, prep.frame_vec, commit=False)
-                for idx, (ch, cvec) in enumerate(
-                    zip(prep.chunks, prep.chunk_vecs, strict=True)
-                ):
+                for idx, (ch, cvec) in enumerate(zip(prep.chunks, prep.chunk_vecs, strict=True)):
                     cid = db.backend.insert_returning_id(
                         "INSERT INTO memory_frame_chunks"
                         "(frame_id, chunk_idx, content, char_start, char_end) "
@@ -303,17 +299,25 @@ class FrameStore:
         expires_at: str | None = None,
         pinned: bool = False,
         verified_by_user: bool = False,
+        deduplicate: bool = True,
+        scope_wide: bool = False,
+        prepared: _PreparedIndex | None = None,
     ) -> Frame:
-        """Create an I-frame (idempotent per ``(scope, gop, content_hash)``)."""
+        """Create an indexed I-frame, optionally deduplicating within a GOP or scope."""
         eff_scope = self._eff_scope(scope)
         h = content_hash(content)
-        existing = self._find_by_hash(gop, h, frame_type="I", scope=eff_scope)
+        existing = (
+            self._find_by_hash(None if scope_wide else gop, h, frame_type="I", scope=eff_scope)
+            if deduplicate
+            else None
+        )
         if existing is not None:
-            self.ensure_indexed(existing)
+            self.ensure_indexed(existing, prepared=prepared)
             return existing
 
         return self._insert_indexed(
             index_text=content,
+            prepared=prepared,
             scope=eff_scope,
             gop=gop,
             frame_type="I",
@@ -431,19 +435,14 @@ class FrameStore:
             created_at=created_at,
         )
 
-    def get_frame(
-        self, frame_id: int, *, scope: MemoryScope | None = None
-    ) -> Frame:
+    def get_frame(self, frame_id: int, *, scope: MemoryScope | None = None) -> Frame:
         """Load a single frame by id within ``scope``, or raise ``KeyError``."""
         eff_scope = self._eff_scope(scope)
         row = self._backend.fetchone(
-            f"SELECT {_COLUMNS} FROM memory_frames "
-            "WHERE id = ? AND tenant_id = ? AND principal_id = ? AND namespace = ?",
+            f"SELECT {_COLUMNS} FROM memory_frames WHERE id = ? AND {scope_sql()}",
             (
                 frame_id,
-                eff_scope.tenant_id,
-                eff_scope.principal_id,
-                eff_scope.namespace,
+                *eff_scope.as_tuple(),
             ),
         )
         if row is None:
@@ -452,29 +451,23 @@ class FrameStore:
 
     def find_frame_by_hash(
         self,
-        gop: str,
+        gop: str | None,
         content: str,
         *,
         scope: MemoryScope | None = None,
     ) -> Frame | None:
-        """Return the earliest frame in ``(scope, gop)`` matching ``content_hash(content)``."""
-        return self._find_by_hash(
-            gop, content_hash(content), scope=self._eff_scope(scope)
-        )
+        """Return the first active/candidate hash match, optionally within ``gop``."""
+        return self._find_by_hash(gop, content_hash(content), scope=self._eff_scope(scope))
 
-    def frames_based_on(
-        self, base_id: int, *, scope: MemoryScope | None = None
-    ) -> list[Frame]:
+    def frames_based_on(self, base_id: int, *, scope: MemoryScope | None = None) -> list[Frame]:
         """Return all frames (P or B) whose ``base_frame_id == base_id`` in ``scope``."""
         eff_scope = self._eff_scope(scope)
         rows = self._backend.fetchall(
             f"SELECT {_COLUMNS} FROM memory_frames "
-            "WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
+            f"WHERE {scope_sql()} "
             "AND base_frame_id = ? ORDER BY id ASC",
             (
-                eff_scope.tenant_id,
-                eff_scope.principal_id,
-                eff_scope.namespace,
+                *eff_scope.as_tuple(),
                 base_id,
             ),
         )
@@ -492,20 +485,13 @@ class FrameStore:
         self.get_frame(frame_id, scope=eff_scope)
         with self._db.transaction():
             self._backend.execute(
-                "UPDATE memory_frames SET importance = ? "
-                "WHERE id = ? AND tenant_id = ? AND principal_id = ? AND namespace = ?",
+                f"UPDATE memory_frames SET importance = ? WHERE id = ? AND {scope_sql()}",
                 (
                     importance,
                     frame_id,
-                    eff_scope.tenant_id,
-                    eff_scope.principal_id,
-                    eff_scope.namespace,
+                    *eff_scope.as_tuple(),
                 ),
             )
-
-    def set_frame_importance(self, frame_id: int, importance: Importance) -> None:
-        """Alias for :meth:`set_importance`."""
-        self.set_importance(frame_id, importance)
 
     def set_status(
         self,
@@ -521,14 +507,12 @@ class FrameStore:
         with self._db.transaction():
             self._backend.execute(
                 "UPDATE memory_frames SET status = ?, superseded_by = ? "
-                "WHERE id = ? AND tenant_id = ? AND principal_id = ? AND namespace = ?",
+                f"WHERE id = ? AND {scope_sql()}",
                 (
                     status,
                     superseded_by,
                     frame_id,
-                    eff_scope.tenant_id,
-                    eff_scope.principal_id,
-                    eff_scope.namespace,
+                    *eff_scope.as_tuple(),
                 ),
             )
 
@@ -536,9 +520,7 @@ class FrameStore:
         """Decode and return the ``BCorrection`` payload of a B-frame."""
         frame = self.get_frame(frame_id)
         if frame.frame_type != "B":
-            raise ValueError(
-                f"Frame {frame_id} is of type {frame.frame_type!r}, not 'B'"
-            )
+            raise ValueError(f"Frame {frame_id} is of type {frame.frame_type!r}, not 'B'")
         try:
             data = json.loads(frame.content)
             return BCorrection(
@@ -547,8 +529,7 @@ class FrameStore:
             )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise ValueError(
-                f"Frame {frame_id} B content is not a valid correction payload: "
-                f"{frame.content!r}"
+                f"Frame {frame_id} B content is not a valid correction payload: {frame.content!r}"
             ) from exc
 
     def get_frames(
@@ -564,14 +545,10 @@ class FrameStore:
         eff_scope = self._eff_scope(scope)
         marks = ",".join("?" * len(ids))
         rows = self._backend.fetchall(
-            f"SELECT {_COLUMNS} FROM memory_frames "
-            f"WHERE id IN ({marks}) "
-            f"AND tenant_id = ? AND principal_id = ? AND namespace = ?",
+            f"SELECT {_COLUMNS} FROM memory_frames WHERE id IN ({marks}) AND {scope_sql()}",
             [
                 *ids,
-                eff_scope.tenant_id,
-                eff_scope.principal_id,
-                eff_scope.namespace,
+                *eff_scope.as_tuple(),
             ],
         )
         return {int(r["id"]): self._row_to_frame(r) for r in rows}
@@ -592,12 +569,10 @@ class FrameStore:
             f"FROM memory_frame_chunks c "
             f"JOIN memory_frames f ON f.id = c.frame_id "
             f"WHERE c.id IN ({marks}) "
-            f"AND f.tenant_id = ? AND f.principal_id = ? AND f.namespace = ?",
+            f"AND {scope_sql('f')}",
             [
                 *chunk_ids,
-                eff_scope.tenant_id,
-                eff_scope.principal_id,
-                eff_scope.namespace,
+                *eff_scope.as_tuple(),
             ],
         )
         return {int(r["id"]): int(r["frame_id"]) for r in rows}
@@ -635,24 +610,20 @@ class FrameStore:
         if frame_type is None:
             rows = self._backend.fetchall(
                 f"SELECT {_COLUMNS} FROM memory_frames "
-                "WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
+                f"WHERE {scope_sql()} "
                 "AND gop_id = ? ORDER BY id ASC",
                 (
-                    eff_scope.tenant_id,
-                    eff_scope.principal_id,
-                    eff_scope.namespace,
+                    *eff_scope.as_tuple(),
                     gop,
                 ),
             )
         else:
             rows = self._backend.fetchall(
                 f"SELECT {_COLUMNS} FROM memory_frames "
-                "WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
+                f"WHERE {scope_sql()} "
                 "AND gop_id = ? AND frame_type = ? ORDER BY id ASC",
                 (
-                    eff_scope.tenant_id,
-                    eff_scope.principal_id,
-                    eff_scope.namespace,
+                    *eff_scope.as_tuple(),
                     gop,
                     frame_type,
                 ),
@@ -663,14 +634,8 @@ class FrameStore:
         """Return every frame in ``scope`` ordered by ``id`` ascending."""
         eff_scope = self._eff_scope(scope)
         rows = self._backend.fetchall(
-            f"SELECT {_COLUMNS} FROM memory_frames "
-            "WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
-            "ORDER BY id ASC",
-            (
-                eff_scope.tenant_id,
-                eff_scope.principal_id,
-                eff_scope.namespace,
-            ),
+            f"SELECT {_COLUMNS} FROM memory_frames WHERE {scope_sql()} ORDER BY id ASC",
+            (*eff_scope.as_tuple(),),
         )
         return [self._row_to_frame(r) for r in rows]
 
@@ -678,13 +643,8 @@ class FrameStore:
         """Return total number of frames in ``scope``."""
         eff_scope = self._eff_scope(scope)
         val = self._backend.scalar(
-            "SELECT COUNT(*) FROM memory_frames "
-            "WHERE tenant_id = ? AND principal_id = ? AND namespace = ?",
-            (
-                eff_scope.tenant_id,
-                eff_scope.principal_id,
-                eff_scope.namespace,
-            ),
+            f"SELECT COUNT(*) FROM memory_frames WHERE {scope_sql()}",
+            (*eff_scope.as_tuple(),),
         )
         return int(val) if val is not None else 0
 
@@ -700,20 +660,14 @@ class FrameStore:
         eff_scope = self._eff_scope(scope)
         marks = ",".join("?" * len(frame_ids))
         rows = self._backend.fetchall(
-            f"SELECT id, content_hash FROM memory_frames "
-            f"WHERE id IN ({marks}) "
-            f"AND tenant_id = ? AND principal_id = ? AND namespace = ?",
+            f"SELECT id, content_hash FROM memory_frames WHERE id IN ({marks}) AND {scope_sql()}",
             [
                 *frame_ids,
-                eff_scope.tenant_id,
-                eff_scope.principal_id,
-                eff_scope.namespace,
+                *eff_scope.as_tuple(),
             ],
         )
         return {
-            int(r["id"]): (
-                str(r["content_hash"]) if r["content_hash"] is not None else None
-            )
+            int(r["id"]): (str(r["content_hash"]) if r["content_hash"] is not None else None)
             for r in rows
         }
 
@@ -729,21 +683,17 @@ class FrameStore:
         eff_scope = self._eff_scope(scope)
         marks = ",".join("?" * len(frame_ids))
         now_expr = (
-            "CURRENT_TIMESTAMP::text"
-            if self._backend.dialect == "postgres"
-            else "datetime('now')"
+            "CURRENT_TIMESTAMP::text" if self._backend.dialect == "postgres" else "datetime('now')"
         )
         with self._db.transaction():
             self._backend.execute(
                 f"UPDATE memory_frames "
                 f"SET access_count = access_count + 1, last_accessed = {now_expr} "
                 f"WHERE id IN ({marks}) "
-                f"AND tenant_id = ? AND principal_id = ? AND namespace = ?",
+                f"AND {scope_sql()}",
                 [
                     *frame_ids,
-                    eff_scope.tenant_id,
-                    eff_scope.principal_id,
-                    eff_scope.namespace,
+                    *eff_scope.as_tuple(),
                 ],
             )
 
@@ -762,13 +712,11 @@ class FrameStore:
         elig_params: tuple[str, ...] = () if include_ineligible else (eff_now,)
         i_row = self._backend.fetchone(
             f"SELECT {_COLUMNS} FROM memory_frames "
-            f"WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
+            f"WHERE {scope_sql()} "
             f"AND gop_id = ? AND frame_type = 'I'{elig_clause} "
             "ORDER BY id DESC LIMIT 1",
             (
-                eff_scope.tenant_id,
-                eff_scope.principal_id,
-                eff_scope.namespace,
+                *eff_scope.as_tuple(),
                 gop,
                 *elig_params,
             ),
@@ -778,13 +726,11 @@ class FrameStore:
         latest_i = self._row_to_frame(i_row)
         p_rows = self._backend.fetchall(
             f"SELECT {_COLUMNS} FROM memory_frames "
-            f"WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
+            f"WHERE {scope_sql()} "
             f"AND gop_id = ? AND frame_type = 'P' AND id > ?{elig_clause} "
             "ORDER BY id ASC",
             (
-                eff_scope.tenant_id,
-                eff_scope.principal_id,
-                eff_scope.namespace,
+                *eff_scope.as_tuple(),
                 gop,
                 latest_i.id,
                 *elig_params,
@@ -804,8 +750,11 @@ class FrameStore:
 
         compact(self, gop, cfg, scope=self._eff_scope(scope))
 
-    def lineage(self, derived_frame_id: int) -> list[LineageEntry]:
+    def lineage(
+        self, derived_frame_id: int, *, scope: MemoryScope | None = None
+    ) -> list[LineageEntry]:
         """Return lineage audit entries for ``derived_frame_id`` ordered by id."""
+        self.get_frame(derived_frame_id, scope=scope)
         rows = self._backend.fetchall(
             "SELECT derived_frame_id, source_frame_id, source_frame_type, "
             "source_content_hash, source_source, source_trust, "
@@ -823,9 +772,7 @@ class FrameStore:
                 source_trust=r["source_trust"],
                 source_created_at=str(r["source_created_at"]),
                 source_event_time=(
-                    str(r["source_event_time"])
-                    if r["source_event_time"] is not None
-                    else None
+                    str(r["source_event_time"]) if r["source_event_time"] is not None else None
                 ),
                 operation=str(r["operation"]),
             )
@@ -859,15 +806,63 @@ class FrameStore:
             ),
         )
 
-    def _content_hash_of(self, frame_id: int) -> str | None:
-        val = self._backend.scalar(
-            "SELECT content_hash FROM memory_frames WHERE id = ?", (frame_id,)
-        )
-        return None if val is None else str(val)
+    def _content_hash_of(self, frame_id: int, *, scope: MemoryScope | None = None) -> str | None:
+        return self.get_frame(frame_id, scope=scope).content_hash
 
-    def index_state(self, frame_id: int) -> IndexState:
+    def _update(self, frame_id: int, scope: MemoryScope, **cols: Any) -> None:
+        """Update frame columns inside the caller's transaction."""
+        self.get_frame(frame_id, scope=scope)
+        key = cols.pop("suppression_key", None)
+        if key is not None:
+            self._backend.execute(
+                "INSERT INTO memory_frame_keys(frame_id, suppression_key) VALUES (?, ?) "
+                "ON CONFLICT (frame_id) DO UPDATE SET suppression_key = EXCLUDED.suppression_key",
+                (frame_id, key),
+            )
+        if not cols or not set(cols).issubset(set(_COLUMNS.split(", ")) | {"folded_content"}):
+            raise ValueError("Unsupported frame columns")
+        assignments = ", ".join(f"{col} = ?" for col in cols)
+        self._backend.execute(
+            f"UPDATE memory_frames SET {assignments} WHERE id = ? AND {scope_sql()}",
+            (*cols.values(), frame_id, *scope.as_tuple()),
+        )
+
+    def _insert_tombstone(
+        self,
+        frame: Frame,
+        *,
+        reason: str,
+        source_ref: str | None = None,
+        source_event_id: str | None = None,
+    ) -> None:
+        """Record a hash-only replay suppression receipt."""
+        key = self._backend.scalar(
+            "SELECT suppression_key FROM memory_frame_keys WHERE frame_id = ?", (frame.id,)
+        ) or suppression_key(frame.indexable_text)
+        tombstone_id = self._backend.insert_returning_id(
+            "INSERT INTO memory_tombstones "
+            "(tenant_id, principal_id, namespace, content_hash, reason, "
+            "source_event_id, source_ref, frame_id, created_at) VALUES (?, ?, ?, ?, ?, "
+            "?, ?, ?, ?)",
+            (
+                *frame.scope.as_tuple(),
+                frame.content_hash or content_hash(frame.indexable_text),
+                reason,
+                source_event_id,
+                source_ref,
+                frame.id,
+                now_utc_iso(),
+            ),
+        )
+
+        self._backend.execute(
+            "INSERT INTO memory_tombstone_keys(tombstone_id, suppression_key) VALUES (?, ?)",
+            (tombstone_id, key),
+        )
+
+    def index_state(self, frame_id: int, *, scope: MemoryScope | None = None) -> IndexState:
         """Inspect whether ``frame_id`` has complete, current search projections."""
-        frame = self.get_frame(frame_id)
+        frame = self.get_frame(frame_id, scope=scope)
         expected_text = frame.indexable_text
         expected_chunks = len(chunk(expected_text, self._chunking))
 
@@ -891,29 +886,28 @@ class FrameStore:
             chunk_vecs=chunk_vec_count,
         )
 
-    def ensure_indexed(self, frame: Frame) -> bool:
+    def ensure_indexed(self, frame: Frame, *, prepared: _PreparedIndex | None = None) -> bool:
         """Rebuild ``frame``'s projections if missing or stale."""
-        state = self.index_state(frame.id)
+        frame = self.get_frame(frame.id, scope=frame.scope)
+        if frame.status not in ("active", "candidate"):
+            return False
+        state = self.index_state(frame.id, scope=frame.scope)
         if state.ready:
             return False
-        self._index(frame)
+        self._index(frame, prepared=prepared)
         return True
 
     def repair_indexes(self) -> list[int]:
-        """Check all frames and re-index any with missing or stale projections."""
+        """Repair active/candidate projections in this store's scope."""
         repaired: list[int] = []
         for frame in self.all_frames():
             if self.ensure_indexed(frame):
                 repaired.append(frame.id)
         return repaired
 
-    @staticmethod
-    def _indexable_text(frame: Frame) -> str:
-        return frame.indexable_text
-
-    def _index(self, frame: Frame) -> None:
+    def _index(self, frame: Frame, *, prepared: _PreparedIndex | None = None) -> None:
         """Synchronously index ``frame`` into FTS, whole-frame vec, and chunk vecs."""
-        prepared = self._prepare_index(frame.indexable_text)
+        prepared = prepared or self._prepare_index(frame.indexable_text)
         with self._db.transaction():
             self._write_index(frame.id, prepared)
 
@@ -991,44 +985,26 @@ class FrameStore:
 
     def _find_by_hash(
         self,
-        gop: str,
+        gop: str | None,
         h: str,
         *,
         frame_type: FrameType | None = None,
         scope: MemoryScope | None = None,
     ) -> Frame | None:
         eff_scope = self._eff_scope(scope)
-        if frame_type is None:
-            row = self._backend.fetchone(
-                f"SELECT {_COLUMNS} FROM memory_frames "
-                "WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
-                "AND gop_id = ? AND content_hash = ? "
-                "AND status IN ('active', 'candidate') "
-                "ORDER BY id ASC LIMIT 1",
-                (
-                    eff_scope.tenant_id,
-                    eff_scope.principal_id,
-                    eff_scope.namespace,
-                    gop,
-                    h,
-                ),
-            )
-        else:
-            row = self._backend.fetchone(
-                f"SELECT {_COLUMNS} FROM memory_frames "
-                "WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
-                "AND gop_id = ? AND frame_type = ? AND content_hash = ? "
-                "AND status IN ('active', 'candidate') "
-                "ORDER BY id ASC LIMIT 1",
-                (
-                    eff_scope.tenant_id,
-                    eff_scope.principal_id,
-                    eff_scope.namespace,
-                    gop,
-                    frame_type,
-                    h,
-                ),
-            )
+        conditions = [scope_sql(), "content_hash = ?", "status IN ('active', 'candidate')"]
+        params: list[Any] = [*eff_scope.as_tuple(), h]
+        if gop is not None:
+            conditions.append("gop_id = ?")
+            params.append(gop)
+        if frame_type is not None:
+            conditions.append("frame_type = ?")
+            params.append(frame_type)
+        row = self._backend.fetchone(
+            f"SELECT {_COLUMNS} FROM memory_frames WHERE {' AND '.join(conditions)} "
+            f"ORDER BY id LIMIT 1",
+            params,
+        )
         return self._row_to_frame(row) if row is not None else None
 
     def _insert(
@@ -1060,21 +1036,10 @@ class FrameStore:
         event_time_s = to_storage(event_time)
         expires_at_s = None if pinned else to_storage(expires_at)
         if kind == "episode" and expires_at_s is None and not pinned:
-            from datetime import UTC, datetime, timedelta
-
-            from gluomem.timeutil import parse_utc
-
-            anchor_str = created_at_s or event_time_s
-            anchor_dt = (
-                parse_utc(anchor_str)
-                if anchor_str is not None
-                else datetime.now(UTC).replace(tzinfo=None)
-            )
-            expires_at_s = to_storage(anchor_dt + timedelta(days=90))
+            expires_at_s = episode_expiry(created_at_s or now_utc_iso(), self._lifecycle)
         max_t = self._backend.scalar(
-            "SELECT COALESCE(MAX(t), -1) FROM memory_frames "
-            "WHERE tenant_id = ? AND principal_id = ? AND namespace = ? AND gop_id = ?",
-            (eff_scope.tenant_id, eff_scope.principal_id, eff_scope.namespace, gop),
+            f"SELECT COALESCE(MAX(t), -1) FROM memory_frames WHERE {scope_sql()} AND gop_id = ?",
+            (*eff_scope.as_tuple(), gop),
         )
         t = (int(max_t) if max_t is not None else -1) + 1
         common_cols = (
@@ -1084,9 +1049,7 @@ class FrameStore:
             "verified_by_user, event_time, content_hash"
         )
         common_vals = (
-            eff_scope.tenant_id,
-            eff_scope.principal_id,
-            eff_scope.namespace,
+            *eff_scope.as_tuple(),
             frame_type,
             gop,
             t,
@@ -1106,131 +1069,36 @@ class FrameStore:
             event_time_s,
             content_hash,
         )
-        if created_at_s is None:
-            placeholders = ", ".join("?" * len(common_vals))
-            return self._backend.insert_returning_id(
-                f"INSERT INTO memory_frames ({common_cols}) VALUES ({placeholders})",
-                common_vals,
-            )
-        vals_with_created = (*common_vals, created_at_s)
-        placeholders = ", ".join("?" * len(vals_with_created))
-        return self._backend.insert_returning_id(
-            f"INSERT INTO memory_frames ({common_cols}, created_at) VALUES ({placeholders})",
-            vals_with_created,
+        cols, vals = common_cols, common_vals
+        if created_at_s is not None:
+            cols += ", created_at"
+            vals = (*vals, created_at_s)
+        placeholders = ", ".join("?" for _ in vals)
+        frame_id = self._backend.insert_returning_id(
+            f"INSERT INTO memory_frames ({cols}) VALUES ({placeholders})", vals
         )
+        text = json.loads(content)["description"] if frame_type == "B" else content
+        self._backend.execute(
+            "INSERT INTO memory_frame_keys(frame_id, suppression_key) VALUES (?, ?)",
+            (frame_id, suppression_key(text)),
+        )
+        return frame_id
 
-    def _insert_indexed(self, *, index_text: str, **row: Any) -> Frame:
+    def _insert_indexed(
+        self, *, index_text: str, prepared: _PreparedIndex | None = None, **row: Any
+    ) -> Frame:
         """Embed ``index_text``, then insert the row and its index in one transaction."""
-        prepared = self._prepare_index(index_text)
+        prepared = prepared or self._prepare_index(index_text)
         eff_scope: MemoryScope = row["scope"]
         with self._db.transaction():
-            get_or_create_session(
-                self._backend, row["gop"], scope=eff_scope, commit=False
-            )
+            get_or_create_session(self._backend, row["gop"], scope=eff_scope, commit=False)
             frame_id = self._insert(**row)
             self._write_index(frame_id, prepared)
         return self.get_frame(frame_id, scope=eff_scope)
 
     @staticmethod
     def _row_to_frame(row: Any) -> Frame:
-        if hasattr(row, "keys"):
-            keys = set(row.keys())
-            return Frame(
-                id=int(row["id"]),
-                frame_type=row["frame_type"],
-                gop_id=str(row["gop_id"]),
-                t=int(row["t"]),
-                base_frame_id=(
-                    int(row["base_frame_id"])
-                    if row["base_frame_id"] is not None
-                    else None
-                ),
-                content=str(row["content"]),
-                importance=row["importance"],
-                source=row["source"],
-                trust=row["trust"],
-                access_count=int(row["access_count"]),
-                created_at=str(row["created_at"]),
-                event_time=(
-                    str(row["event_time"]) if row["event_time"] is not None else None
-                ),
-                last_accessed=str(row["last_accessed"]),
-                tenant_id=str(row["tenant_id"]) if "tenant_id" in keys else "local",
-                principal_id=(
-                    str(row["principal_id"]) if "principal_id" in keys else "default"
-                ),
-                namespace=str(row["namespace"]) if "namespace" in keys else "personal",
-                kind=row["kind"] if "kind" in keys and row["kind"] else "fact",
-                status=(
-                    row["status"] if "status" in keys and row["status"] else "active"
-                ),
-                confidence=(
-                    float(row["confidence"])
-                    if "confidence" in keys and row["confidence"] is not None
-                    else 1.0
-                ),
-                superseded_by=(
-                    int(row["superseded_by"])
-                    if "superseded_by" in keys and row["superseded_by"] is not None
-                    else None
-                ),
-                supersedes=(
-                    int(row["supersedes"])
-                    if "supersedes" in keys and row["supersedes"] is not None
-                    else None
-                ),
-                expires_at=(
-                    str(row["expires_at"])
-                    if "expires_at" in keys and row["expires_at"] is not None
-                    else None
-                ),
-                pinned=bool(row["pinned"]) if "pinned" in keys else False,
-                verified_by_user=(
-                    bool(row["verified_by_user"])
-                    if "verified_by_user" in keys
-                    else False
-                ),
-            )
-        values = tuple(row)
-        return Frame(
-            id=int(values[0]),
-            frame_type=values[1],
-            gop_id=str(values[2]),
-            t=int(values[3]),
-            base_frame_id=int(values[4]) if values[4] is not None else None,
-            content=str(values[5]),
-            importance=values[6],
-            source=values[7],
-            trust=values[8],
-            access_count=int(values[9]),
-            created_at=str(values[10]),
-            event_time=str(values[11]) if values[11] is not None else None,
-            last_accessed=str(values[12]),
-            tenant_id=str(values[13]) if len(values) > 13 else "local",
-            principal_id=str(values[14]) if len(values) > 14 else "default",
-            namespace=str(values[15]) if len(values) > 15 else "personal",
-            kind=values[16] if len(values) > 16 and values[16] else "fact",
-            status=values[17] if len(values) > 17 and values[17] else "active",
-            confidence=(
-                float(values[18])
-                if len(values) > 18 and values[18] is not None
-                else 1.0
-            ),
-            superseded_by=(
-                int(values[19])
-                if len(values) > 19 and values[19] is not None
-                else None
-            ),
-            supersedes=(
-                int(values[20])
-                if len(values) > 20 and values[20] is not None
-                else None
-            ),
-            expires_at=(
-                str(values[21])
-                if len(values) > 21 and values[21] is not None
-                else None
-            ),
-            pinned=bool(values[22]) if len(values) > 22 else False,
-            verified_by_user=bool(values[23]) if len(values) > 23 else False,
-        )
+        values = {col: row[col] for col in _COLUMNS.split(", ")}
+        values["pinned"] = bool(values["pinned"])
+        values["verified_by_user"] = bool(values["verified_by_user"])
+        return Frame(**values)
