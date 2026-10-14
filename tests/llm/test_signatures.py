@@ -1,17 +1,28 @@
-"""Signature drift guards — field names, annotations, verbatim contract docstrings."""
+"""DSPy signature contracts, Pydantic output models, and dspy-free import boundary tests."""
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from datetime import datetime
+from typing import Literal, get_args, get_origin
 
-from gluomem.llm.outputs import (
+import pytest
+from pydantic import ValidationError
+
+from gluomem.config.app_config import load_config
+from gluomem.llm import (
     ContradictionVerdict,
     ExtractedEvent,
     ExtractedFact,
+    Extractors,
+    FakeExtractors,
     KGEntity,
     KGRelation,
+    NullExtractors,
     Verdict,
 )
+from gluomem.llm.modules import build_module
 from gluomem.llm.signatures import (
     TASK_SIGNATURES,
     CognifyExtraction,
@@ -19,6 +30,7 @@ from gluomem.llm.signatures import (
     EventExtraction,
     FactExtraction,
     JudgeQA,
+    make_cognify_signature,
 )
 
 
@@ -26,48 +38,61 @@ def _fields(sig) -> dict[str, type]:
     return {name: field.annotation for name, field in sig.model_fields.items()}
 
 
-def test_fact_extraction_fields() -> None:
-    fields = _fields(FactExtraction)
-    assert fields["text"] is str
-    assert fields["facts"] == list[ExtractedFact]
+def test_output_models_validation_and_protocol_conformance() -> None:
+    with pytest.raises(ValidationError):
+        ExtractedFact(text="x", confidence=1.5)
+    with pytest.raises(ValidationError):
+        ExtractedEvent(text="x", confidence=-0.1)
+    with pytest.raises(ValidationError):
+        Verdict(correct=True, score=2.0, rationale="r")
+
+    fact = ExtractedFact(text="Alice lives in Boston.")
+    assert fact.confidence == 1.0
+    assert ExtractedEvent(text="moved").event_date is None
+    assert KGEntity(entity_type="person", name="alice").properties == {}
+    v = ContradictionVerdict(is_contradiction=False)
+    assert v.description == "" and v.confidence == 1.0
+
+    assert isinstance(FakeExtractors(banner=False), Extractors)
+    assert isinstance(NullExtractors(), Extractors)
 
 
-def test_event_extraction_verbatim_contract() -> None:
-    """Verbatim contract — docstring + inputs + typed output."""
+def test_importing_llm_seam_never_imports_dspy() -> None:
+    code = "import sys; import gluomem.llm; sys.exit(1 if 'dspy' in sys.modules else 0)"
+    proc = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_signature_fields_and_docstrings() -> None:
+    assert _fields(FactExtraction) == {"text": str, "facts": list[ExtractedFact]}
     assert (
         EventExtraction.__doc__
         == "Extract episodic events; resolve relative time cues to ISO dates."
     )
-    fields = _fields(EventExtraction)
-    assert fields["source_text"] is str
-    assert fields["reference_date"] is datetime
-    assert fields["events"] == list[ExtractedEvent]
-
-
-def test_cognify_extraction_verbatim_contract() -> None:
+    assert _fields(EventExtraction) == {
+        "source_text": str,
+        "reference_date": datetime,
+        "events": list[ExtractedEvent],
+    }
     assert CognifyExtraction.__doc__ == "Extract typed entities + relations from a frame."
-    fields = _fields(CognifyExtraction)
-    assert fields["text"] is str
-    assert fields["entities"] == list[KGEntity]
-    assert fields["relations"] == list[KGRelation]
-
-
-def test_contradiction_check_fields() -> None:
-    fields = _fields(ContradictionCheck)
-    assert fields["new_statement"] is str
-    assert fields["stored_statement"] is str
-    assert fields["verdict"] is ContradictionVerdict
-
-
-def test_judge_qa_fields() -> None:
-    fields = _fields(JudgeQA)
-    assert fields["question"] is str
-    assert fields["gold"] is str
-    assert fields["prediction"] is str
-    assert fields["verdict"] is Verdict
-
-
-def test_task_signature_map_covers_config_tasks() -> None:
+    assert _fields(CognifyExtraction) == {
+        "text": str,
+        "entities": list[KGEntity],
+        "relations": list[KGRelation],
+    }
+    assert _fields(ContradictionCheck) == {
+        "new_statement": str,
+        "stored_statement": str,
+        "verdict": ContradictionVerdict,
+    }
+    assert _fields(JudgeQA) == {
+        "question": str,
+        "gold": str,
+        "prediction": str,
+        "verdict": Verdict,
+    }
     assert set(TASK_SIGNATURES) == {
         "fact_extraction",
         "event_extraction",
@@ -76,37 +101,21 @@ def test_task_signature_map_covers_config_tasks() -> None:
     }
 
 
-def test_make_cognify_signature_constrains_entity_type() -> None:
-    """Prompt-side enum (kg.entity_type_prompt_enum): entity_type becomes a
-    closed Literal on a KGEntity subclass; instructions stay verbatim."""
-    from typing import Literal, get_args, get_origin
-
-    from gluomem.llm.signatures import make_cognify_signature
-
+def test_make_cognify_signature_and_build_module_enum() -> None:
     sig = make_cognify_signature(["person", "city"])
     assert sig.instructions == CognifyExtraction.instructions
-    entities_ann = sig.model_fields["entities"].annotation
-    model = get_args(entities_ann)[0]
+    model = get_args(sig.model_fields["entities"].annotation)[0]
     assert issubclass(model, KGEntity)
     et = model.model_fields["entity_type"].annotation
     assert get_origin(et) is Literal and get_args(et) == ("person", "city")
-    # The JSON schema dspy renders carries the enum — the extractor cannot
-    # invent a type at all.
-    schema = model.model_json_schema()
-    assert schema["properties"]["entity_type"]["enum"] == ["person", "city"]
-    # Relations are untouched.
-    assert sig.model_fields["relations"].annotation == list[KGRelation]
-
-
-def test_build_module_uses_enum_signature_when_configured() -> None:
-    from typing import get_args
-
-    from gluomem.config.app_config import load_config
-    from gluomem.llm.modules import build_module
+    assert model.model_json_schema()["properties"]["entity_type"]["enum"] == [
+        "person",
+        "city",
+    ]
 
     cfg = load_config().with_overrides({"kg.entity_type_prompt_enum": True})
     module = build_module("cognify", cfg)
-    model = get_args(module.signature.model_fields["entities"].annotation)[0]
-    assert model is not KGEntity and issubclass(model, KGEntity)
+    mod_model = get_args(module.signature.model_fields["entities"].annotation)[0]
+    assert mod_model is not KGEntity and issubclass(mod_model, KGEntity)
     off = build_module("cognify", load_config())
     assert get_args(off.signature.model_fields["entities"].annotation)[0] is KGEntity

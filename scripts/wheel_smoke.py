@@ -43,6 +43,9 @@ def main() -> int:
     if not (package_dir / "storage" / "schema.sql").is_file():
         print("FAIL: storage/schema.sql is not packaged", file=sys.stderr)
         return 1
+    if not (package_dir / "storage" / "schema_postgres.sql").is_file():
+        print("FAIL: storage/schema_postgres.sql is not packaged", file=sys.stderr)
+        return 1
 
     cfg = load_config()
     dim = int(cfg.storage.vector_dim)
@@ -66,7 +69,7 @@ def main() -> int:
 
     extra_status = extras.status()
     if args.expect_core_only:
-        if extra_status["llm"] or extra_status["embeddings"]:
+        if extra_status["llm"] or extra_status["embeddings"] or extra_status["postgres"]:
             print(f"FAIL: expected a core-only install, got {extra_status}", file=sys.stderr)
             return 1
         try:

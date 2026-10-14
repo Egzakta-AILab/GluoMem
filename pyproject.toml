@@ -1,42 +1,33 @@
 [project]
 name = "gluomem"
-version = "0.0.1"
-description = "GluoMem — research-stage frame-codec memory library and benchmark harness for AI agents"
+version = "0.1.0"
+description = "GluoMem — frame-codec memory library and benchmark harness for AI agents"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Egzakta" }]
 requires-python = ">=3.11"
-# Core: config, SQLite storage, frames, hybrid search, KG, fake extractors and
-# mock embeddings. Heavier capabilities are extras; see README "Installation".
 dependencies = [
-    "pydantic",
-    "pydantic-settings",
-    "pyyaml",
-    "sqlite-vec",
-    "numpy",
+    "pydantic>=2.11",
+    "pydantic-settings>=2.8",
+    "sqlite-vec>=0.1.6",
+    "numpy>=1.26",
     "python-dotenv>=1.2.2",
 ]
 
 [project.optional-dependencies]
-# DSPy extraction, answerer, judges and prompt optimization (OpenRouter calls).
-llm = [
-    "dspy==3.2.1",
+postgres = [
+    "psycopg[binary]>=3.2",
+    "pgvector>=0.3",
 ]
-# In-process sentence-transformers embedder and cross-encoder reranker
-# (downloads models from Hugging Face on first use).
+llm = [
+    "dspy>=3.4.1",
+]
 embeddings = [
-    "sentence-transformers",
+    "sentence-transformers>=3.0",
 ]
 all = [
-    "gluomem[llm,embeddings]",
-]
-# M5.5 head-to-head competitor: install with `uv sync --extra mem0`.
-# Exact pin — the paper's manifest records this version; the offline gate
-# must pass WITHOUT this extra (all mem0 imports are function-local).
-# Vector store = qdrant local mode (qdrant-client ships in mem0ai core).
-mem0 = [
-    "mem0ai==2.0.11",
+    "gluomem[postgres,llm,embeddings]",
 ]
 
 [project.scripts]
@@ -67,7 +58,7 @@ select = ["E", "F", "W", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 markers = [
-    "slow: marks tests that download/load real models (excluded from the gate)",
+    "slow: marks tests that download/load real models",
 ]
 addopts = "-m 'not slow'"
 
@@ -77,12 +68,13 @@ project-excludes = [
     "**/__pycache__/**",
     "**/.pytest_cache/**",
 ]
-# mem0 and sentence-transformers are optional extras absent from the offline
-# gate env; their lazy imports type as Any so `make check` passes after
-# `make install-offline` without torch.
 replace-imports-with-any = [
     "mem0",
     "mem0.*",
+    "pgvector",
+    "pgvector.*",
+    "psycopg",
+    "psycopg.*",
     "sentence_transformers",
     "sentence_transformers.*",
 ]

@@ -29,19 +29,18 @@
 ### Package layout
 ```
 gluomem/
-  config/    app_config.py  registry.py  variants.py
-  storage/   schema.sql  db.py  vector_store.py  sqlite_vec.py
+  config/    app_config.py  registry.py
+  storage/   schema.sql  schema_postgres.sql  db.py  backend.py  vector_store.py  fts_store.py  sqlite_vec.py  postgres.py
   frames/    store.py  sessions.py  content_hash.py  compaction.py        # I/P/B
   embedding/ base.py  providers.py  chunker.py  reranker.py  fingerprint.py  compat.py
-  search/    hybrid.py  scoring.py  abstain.py  sanitize.py
+  search/    hybrid.py  scoring.py  sanitize.py
   kg/        graph.py  normalizer.py  temporal.py
   write/     gate.py  ingest.py  lanes.py  cognify.py                      # benchmark ingest only
   llm/       signatures.py  modules.py  router.py  judge.py  bootstrap.py  optimize.py
   bench/     adapters/  fixtures/  registry.py  replay.py  retriever.py  judge.py  metrics.py
              rescore.py  report.py  baselines.py
-  tune/      candidate_cache.py  rescore.py  objective.py  two_tier.py  ltr.py
   cli.py  components.py  extras.py  timeutil.py
-conf/  artifacts/  benchmarks_data/  experiments/  tests/
+artifacts/  benchmarks_data/  tests/
 ```
 Out of scope: MCP server, lifecycle hooks, wiki compiler, enrichment/synth queue, identity/awareness layers, harvest adapters.
 
@@ -326,7 +325,7 @@ MCP server · lifecycle hooks · wiki compiler · enrichment/synth queue · iden
 ---
 
 ## 12. Config & stack
-`pydantic-settings v2` `AppConfig` (precedence: defaults < file < variant < env < override); a **ModelRegistry** of by-name models; a **ScoringProfile** validated as a simplex; a cross-validator asserting `storage.vector_dim == embedder.dim`. Stack: Python 3.11+, `sqlite3` + `sqlite-vec`, `sentence-transformers`, **DSPy 3.x** (Anthropic via LiteLLM), `optuna` + `ranx` + `lightgbm`, `pytest`, `uv`. The full default configuration ships as `conf/config.yaml`.
+`pydantic-settings v2` `AppConfig` (precedence: Pydantic defaults < env < override); a **ModelRegistry** of by-name models; a **ScoringProfile** validated as a simplex; a cross-validator asserting `storage.vector_dim == embedder.dim`. Stack: Python 3.11+, `sqlite3` + `sqlite-vec` (plus optional `psycopg` + `pgvector`), `sentence-transformers`, **DSPy 3.x**, `pytest`, `uv`. All default configuration values live in typed Pydantic models in `gluomem/config/app_config.py`.
 
 ---
 

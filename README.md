@@ -13,11 +13,11 @@ GluoMem is a research-stage Python library (version 0.0.1). It runs locally agai
 - **DSPy write path**: typed extraction behind an `Extractors` protocol, with deterministic fake extractors for offline tests, an admission gate (regex injection scanner, quarantine or reject), and an extraction cache. Quarantined frames are kept for inspection by id but excluded from search, current-state reads, graph linking and compaction ([eligibility rule](./gluomem/frames/eligibility.py)).
 - **Benchmark harness**: LoCoMo and LongMemEval (S and oracle) adapters, full-context, BM25 and vector-RAG baselines, an optional mem0 comparison, judge panels, protocol tags, offline rescore of a run directory, and usage accounting. A versioned [benchmark registry](./gluomem/bench/registry.py) records each protocol's source ancestry, native or adapted scorer, logical clock, split grouping, rights and readiness; scores from different protocols never aggregate, and overlapping sources (MemoryAgentBench reuses LongMemEval) are flagged. Every run writes `denominators.json`: an answerable sample with nothing retrieved scores zero, failures and timeouts stay in the denominator, and samples where retrieval does not apply are counted separately. `gluomem bench replay` replays a generated MemoryAgentBench-shaped fixture in event order into isolated stores and writes a reproducible receipt; it is a protocol test, not an official MemoryAgentBench result.
 - **Fail-closed components**: each embedder, reranker and LLM backend is built from the provider its config names, or construction raises; nothing falls back to the mock embedder. Test doubles (`provider: fake` embedders, `fake` backends) need `components.allow_fake: true`. A `.mind` file records the fingerprint of the embedder that wrote its vectors (implementation, model, revision, dim, preprocessing, index schema) and rejects any other embedder before reading or writing a vector. `gluomem components` prints the effective components and their readiness without secrets; `gluomem index rebuild` and `gluomem index adopt` are the explicit ways to change or record a file's embedder.
-- **Configuration**: one typed config tree (pydantic-settings, `GLUOMEM_` prefix). Precedence is `defaults < conf/config.yaml < variant < env < with_overrides()`.
+- **Configuration**: one typed config tree (`pydantic-settings`, `GLUOMEM_` prefix). Precedence is `Pydantic defaults < env < with_overrides()`.
 
 ## What is not implemented
 
-- **Offline numeric tuning.** `gluomem/tune` is a placeholder, and `gluomem tune` and `gluomem ablate` exit with "not implemented". The tuning design in [DESIGN.md §9](./DESIGN.md#9-tuning-subsystem) is a plan.
+- **Offline numeric tuning.** The tuning design in [DESIGN.md §9](./DESIGN.md#9-tuning-subsystem) is a plan; `gluomem tune` and `gluomem ablate` exit with "not implemented".
 - **Prompt optimization runs.** Fact and event extraction now have a frozen, source-backed objective ([extraction_eval](./gluomem/llm/extraction_eval.py)): unsupported facts score zero, and wrong subject, lost negation, a plan recorded as done and a superseded state presented as current are reported as separate errors with feedback. Its fixture is nine authored cases, which is enough to test the scorer, not to measure model quality. `make optimize-prompts` (MIPROv2) spends real tokens, is never run automatically, and refuses extraction trainsets that do not reference annotated, non-sealed cases. The [campaign contract](./gluomem/llm/fixtures/campaign_v1.json) for baseline, MIPROv2 and GEPA comparisons is defined but unrun and unauthorized; other tasks still use a parse-or-exact-match metric.
 - **Service features**: HTTP or MCP API, multi-user identity, tenants, workspaces, RBAC, durable jobs, deployment packaging.
 
@@ -32,10 +32,10 @@ The core package is small. Model-backed components are optional extras. When a c
 | Install | Adds | Readiness |
 |---|---|---|
 | `gluomem` (core) | Config, SQLite storage, I/P/B frames, hybrid search, KG, fake extractors, mock embedder | Works offline; real embedding, reranking and DSPy extraction raise `MissingExtraError` |
-| `gluomem[llm]` | DSPy 3.2.1: extraction, answerer, judges, prompt optimization | Needs `OPENROUTER_API_KEY` at call time; calls are paid |
+| `gluomem[llm]` | DSPy >= 3.4.1: extraction, answerer, judges, prompt optimization | Needs `OPENROUTER_API_KEY` at call time; calls are paid |
 | `gluomem[embeddings]` | sentence-transformers MiniLM embedder and cross-encoder reranker | Downloads models from Hugging Face on first use |
-| `gluomem[all]` | `llm` and `embeddings` | Both of the above |
-| `gluomem[mem0]` | mem0ai 2.0.11 comparison baseline | Benchmark comparison only |
+| `gluomem[postgres]` | `psycopg` and `pgvector` for PostgreSQL/pgvector storage backend | Connects via `storage.backend: postgres` and `storage.dsn` |
+| `gluomem[all]` | `llm`, `embeddings`, and `postgres` | All of the above |
 
 `gluomem.extras.status()` reports which extras are installed without importing or downloading anything.
 

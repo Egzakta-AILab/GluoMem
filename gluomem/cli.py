@@ -51,7 +51,6 @@ def _parse_override(raw: str) -> tuple[str, object]:
 
 
 def _add_config_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--variant", default=None, help="config variant overlay name")
     parser.add_argument(
         "--override",
         action="append",
@@ -64,9 +63,7 @@ def _add_config_args(parser: argparse.ArgumentParser) -> None:
 def _config_from(args: argparse.Namespace) -> AppConfig:
     from gluomem.config.app_config import load_config
 
-    return load_config(
-        variant=args.variant, overrides=dict(args.override or [])
-    )
+    return load_config(overrides=dict(args.override or []))
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
@@ -150,7 +147,7 @@ def _cmd_index(args: argparse.Namespace) -> int:
         embedder = make_embedder(cfg)
         if args.index_command == "rebuild":
             store = FrameStore.rebuild_index(db, embedder, chunking=cfg.chunking)
-            n = db.conn.execute("SELECT COUNT(*) FROM memory_frames").fetchone()[0]
+            n = store.count_frames()
             print(f"rebuilt index for {n} frame(s); fingerprint {store.fingerprint.digest}")
         else:
             fp = adopt_embedder(db, embedder)
@@ -646,7 +643,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             return 1
         return handler(args)
     print(
-        f"gluomem: '{args.command}' is not implemented yet (arrives in M6+).",
+        f"gluomem: '{args.command}' is not implemented yet.",
         file=sys.stderr,
     )
     return 1
