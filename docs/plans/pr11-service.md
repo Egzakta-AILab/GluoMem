@@ -20,6 +20,8 @@ Use request-owned database connections, bounded Pydantic-only wire models, a
 shared request-spec operations layer, and signal-aware worker shutdown. Keep
 authentication as a shared-secret gateway trust model, not principal verification.
 Remove unused service dependencies and expose existing httpx as a client extra.
+Keep lease attempt tokens monotonic across generation retries: grant one extra
+allowed attempt instead of decrementing the counter and reusing an old token.
 
 Integration dependencies: atomic lifecycle ingest/generation reads and the
 dedicated EventConflictError land on the lifecycle branch; Postgres transaction
@@ -40,7 +42,8 @@ Verification: `uv run ruff check . && uv run pyrefly check && uv run pytest -q`;
 client import profiling; `org dev census --diff 30b7d4a` and `org dev perf service`.
 Commit locally on `fix/pr11-service`; do not push or open a PR from this subtask.
 
-The org measurement commands are KVARK-specific: `--repo` produces an all-zero
-census here, and `service` is not a supported perf surface. Report actual
+The org measurement commands are KVARK-specific: `--repo` reports zero census
+counts and treats all changed text as source; `service` is not a supported perf
+surface. Report actual
 GluoMem source/test line and AST test-function deltas separately, not the
 misleading default census from another checkout.

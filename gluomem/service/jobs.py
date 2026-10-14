@@ -307,11 +307,12 @@ class JobQueue:
         """Retry a fenced job at the current generation without charging a failure."""
         now = _resolve_now(now_iso)
         assert job.worker_id is not None
+        # Restoring the allowance must not reuse a previous lease's attempt token.
         return self._update_lease(
             job.id,
             job.worker_id,
             job.attempt_count,
-            "status = 'queued', scope_generation = ?, attempt_count = attempt_count - 1, "
+            "status = 'queued', scope_generation = ?, max_attempts = max_attempts + 1, "
             "worker_id = NULL, lease_expires_at = NULL, available_at = ?, "
             "last_error = NULL, updated_at = ?",
             (generation, now, now),

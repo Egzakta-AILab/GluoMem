@@ -9,7 +9,7 @@ from gluomem.config.app_config import AppConfig
 from gluomem.frames.lifecycle import forget_memory, get_scope_generation, retract_source
 from gluomem.frames.store import FrameStore
 from gluomem.kg.graph import KnowledgeGraph
-from gluomem.service.jobs import LeaseLostError
+from gluomem.service.jobs import LeaseLostError, MemoryJob
 from gluomem.service.worker import MemoryWorker
 from gluomem.storage.db import MindDB
 from gluomem.write import gate
@@ -71,30 +71,34 @@ def test_forget_after_lease_requeues_at_new_generation(
         dedup_key="pending",
         payload={"event_id": "pending", "source_ref": "doc", "content": queued_content},
     )
-    monkeypatch.setattr(
-        worker,
-        "_before_write",
-        lambda _: (
-            retract_source(frame_store, "doc")
-            if retract
-            else forget_memory(frame_store, original.id)
-        ),
-    )
+    leases: list[MemoryJob] = []
+
+    def intervene(leased: MemoryJob) -> None:
+        leases.append(leased)
+        (retract_source(frame_store, "doc") if retract else forget_memory(frame_store, original.id))
+
+    monkeypatch.setattr(worker, "_before_write", intervene)
     result = worker.run_once()
     assert result is not None and result.id == job.id and result.status == "queued"
     assert result.scope_generation == get_scope_generation(frame_store.db.backend)
-    assert result.scope_generation >= 1 and result.attempt_count == 0
+    assert result.scope_generation >= 1 and result.attempt_count == 1
+    assert result.max_attempts - result.attempt_count == job.max_attempts
     assert frame_store.get_frame(original.id).status == "forgotten"
     monkeypatch.setattr(worker, "_before_write", lambda _: None)
     check = worker._assert_not_fenced
 
     def check_inside_transaction(job):
         assert frame_store.db.in_transaction
+        with pytest.raises(LeaseLostError):
+            worker.queue.complete(
+                job.id, worker_id=worker.worker_id, attempt_count=leases[0].attempt_count
+            )
         check(job)
 
     monkeypatch.setattr(worker, "_assert_not_fenced", check_inside_transaction)
     done = worker.run_once()
     assert done is not None and done.status == "succeeded"
+    assert done.attempt_count == 2
     active = [frame for frame in frame_store.all_frames() if frame.status == "active"]
     assert [frame.content for frame in active] == ([] if related else [queued_content])
 
