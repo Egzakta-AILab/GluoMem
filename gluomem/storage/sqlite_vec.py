@@ -12,6 +12,8 @@ from gluomem.storage.backend import (
     VectorStore,
     assert_dim,
 )
+from gluomem.storage.scope import MemoryScope, resolve_scope
+from gluomem.timeutil import now_utc_iso, utc_key
 
 _ALLOWED_TABLES: frozenset[str] = frozenset(
     {"memory_frames_vec", "memory_frame_chunks_vec"}
@@ -76,15 +78,68 @@ class SqliteVecStore:
                     (blob,),
                 )
 
-    def search(self, query: np.ndarray, k: int) -> list[tuple[int, float]]:
+    def _has_frames(self) -> bool:
+        try:
+            row = self._conn.execute(
+                "SELECT 1 FROM memory_frames LIMIT 1"
+            ).fetchone()
+            return row is not None
+        except sqlite3.OperationalError:
+            return False
+
+    def search(
+        self,
+        query: np.ndarray,
+        k: int,
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+    ) -> list[tuple[int, float]]:
         if k <= 0:
             return []
         f32 = assert_dim(query, self.dim)
         blob = f32.tobytes()
+        if scope is None and not self._has_frames():
+            rows = self._conn.execute(
+                f"SELECT rowid, distance FROM {self.table} "
+                f"WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                (blob, int(k)),
+            ).fetchall()
+            return [(int(r[0]), float(r[1])) for r in rows]
+
+        eff_scope = resolve_scope(scope)
+        eff_now = utc_key(now_iso) if now_iso is not None else now_utc_iso()
+        if self.table == "memory_frames_vec":
+            sql = (
+                "SELECT v.rowid AS rowid, vec_distance_L2(v.embedding, ?) AS distance "
+                "FROM memory_frames m "
+                "JOIN memory_frames_vec v ON v.rowid = m.id "
+                "WHERE m.tenant_id = ? AND m.principal_id = ? AND m.namespace = ? "
+                "AND m.status = 'active' AND m.trust != 'quarantined' "
+                "AND (m.pinned = 1 OR m.expires_at IS NULL OR REPLACE(m.expires_at, ' ', 'T') > ?) "
+                "ORDER BY distance ASC, v.rowid ASC LIMIT ?"
+            )
+        else:
+            sql = (
+                "SELECT v.rowid AS rowid, vec_distance_L2(v.embedding, ?) AS distance "
+                "FROM memory_frames m "
+                "JOIN memory_frame_chunks c ON c.frame_id = m.id "
+                "JOIN memory_frame_chunks_vec v ON v.rowid = c.id "
+                "WHERE m.tenant_id = ? AND m.principal_id = ? AND m.namespace = ? "
+                "AND m.status = 'active' AND m.trust != 'quarantined' "
+                "AND (m.pinned = 1 OR m.expires_at IS NULL OR REPLACE(m.expires_at, ' ', 'T') > ?) "
+                "ORDER BY distance ASC, v.rowid ASC LIMIT ?"
+            )
         rows = self._conn.execute(
-            f"SELECT rowid, distance FROM {self.table} "
-            f"WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-            (blob, int(k)),
+            sql,
+            (
+                blob,
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+                eff_now,
+                int(k),
+            ),
         ).fetchall()
         return [(int(r[0]), float(r[1])) for r in rows]
 

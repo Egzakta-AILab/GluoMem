@@ -13,11 +13,21 @@ from gluomem.config.app_config import KgConfig
 from gluomem.kg.normalizer import expand_aliases, normalize
 from gluomem.storage.backend import DatabaseBackend
 from gluomem.storage.db import MindDB
+from gluomem.storage.scope import DEFAULT_SCOPE, MemoryScope
 from gluomem.timeutil import now_utc, to_storage, utc_key
 
 __all__ = ["Entity", "KgSnapshot", "KnowledgeGraph", "Relation"]
 
 _WORD_RE = re.compile(r"\b\w+\b", re.UNICODE)
+
+_ENTITY_COLS = (
+    "id, entity_type, name, properties, valid_from, valid_to, recorded_at, "
+    "tenant_id, principal_id, namespace"
+)
+_REL_COLS = (
+    "id, source_id, target_id, relation_type, confidence, properties, "
+    "valid_from, valid_to, recorded_at, tenant_id, principal_id, namespace"
+)
 
 
 @dataclass
@@ -31,6 +41,13 @@ class Entity:
     valid_from: str
     valid_to: str | None
     recorded_at: str
+    tenant_id: str = "local"
+    principal_id: str = "default"
+    namespace: str = "personal"
+
+    @property
+    def scope(self) -> MemoryScope:
+        return MemoryScope(self.tenant_id, self.principal_id, self.namespace)
 
 
 @dataclass
@@ -46,6 +63,13 @@ class Relation:
     valid_from: str
     valid_to: str | None
     recorded_at: str
+    tenant_id: str = "local"
+    principal_id: str = "default"
+    namespace: str = "personal"
+
+    @property
+    def scope(self) -> MemoryScope:
+        return MemoryScope(self.tenant_id, self.principal_id, self.namespace)
 
 
 @dataclass
@@ -59,10 +83,20 @@ class KgSnapshot:
 class KnowledgeGraph:
     """Bitemporal knowledge graph store over a ``MindDB`` backend."""
 
-    def __init__(self, db: MindDB) -> None:
+    def __init__(
+        self, db: MindDB, *, scope: MemoryScope = DEFAULT_SCOPE
+    ) -> None:
         self._db: MindDB = db
         self._backend: DatabaseBackend = db.backend
         self._conn: sqlite3.Connection = db.conn
+        self._scope: MemoryScope = scope
+
+    @property
+    def scope(self) -> MemoryScope:
+        return self._scope
+
+    def _eff_scope(self, scope: MemoryScope | None = None) -> MemoryScope:
+        return scope if scope is not None else self._scope
 
     def create_entity(
         self,
@@ -71,8 +105,10 @@ class KnowledgeGraph:
         properties: dict[str, object] | None = None,
         *,
         valid_from: str | None = None,
+        scope: MemoryScope | None = None,
     ) -> Entity:
         """Create a KG entity, stamping ``valid_from`` and ``recorded_at``."""
+        eff_scope = self._eff_scope(scope)
         props = json.dumps(properties or {}, ensure_ascii=False, separators=(",", ":"))
         now_iso = to_storage(now_utc())
         valid_from_iso = to_storage(valid_from) if valid_from is not None else now_iso
@@ -80,36 +116,68 @@ class KnowledgeGraph:
         with self._backend.transaction():
             row = self._backend.fetchone(
                 "INSERT INTO knowledge_entities "
-                "(entity_type, name, canonical_name, properties, "
-                "valid_from, valid_to, recorded_at) "
-                "VALUES (?, ?, ?, ?, ?, NULL, ?) RETURNING id",
-                (entity_type, name, canonical, props, valid_from_iso, now_iso),
+                "(tenant_id, principal_id, namespace, entity_type, name, "
+                "canonical_name, properties, valid_from, valid_to, recorded_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?) RETURNING id",
+                (
+                    eff_scope.tenant_id,
+                    eff_scope.principal_id,
+                    eff_scope.namespace,
+                    entity_type,
+                    name,
+                    canonical,
+                    props,
+                    valid_from_iso,
+                    now_iso,
+                ),
             )
         if row is None:
             raise RuntimeError("entity INSERT did not return an id")
-        return self.get_entity(int(row["id"]))
+        return self.get_entity(int(row["id"]), scope=eff_scope)
 
-    def get_entity(self, eid: int) -> Entity:
-        """Return the typed ``Entity`` for ``eid`` (raises ``KeyError`` if missing)."""
+    def get_entity(
+        self, eid: int, *, scope: MemoryScope | None = None
+    ) -> Entity:
+        """Return the typed ``Entity`` for ``eid`` in ``scope`` (raises ``KeyError`` if missing)."""
+        eff_scope = self._eff_scope(scope)
         row = self._backend.fetchone(
-            "SELECT id, entity_type, name, properties, valid_from, valid_to, "
-            "recorded_at FROM knowledge_entities WHERE id = ?",
-            (eid,),
+            f"SELECT {_ENTITY_COLS} FROM knowledge_entities "
+            "WHERE id = ? AND tenant_id = ? AND principal_id = ? AND namespace = ?",
+            (
+                eid,
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+            ),
         )
         if row is None:
             raise KeyError(f"no knowledge entity with id={eid}")
         return self._row_to_entity(row)
 
-    def retire_entity(self, eid: int, *, valid_to: str | None = None) -> None:
+    def retire_entity(
+        self,
+        eid: int,
+        *,
+        valid_to: str | None = None,
+        scope: MemoryScope | None = None,
+    ) -> None:
         """Retire an entity by setting ``valid_to`` while preserving the row."""
-        self.get_entity(eid)
+        eff_scope = self._eff_scope(scope)
+        self.get_entity(eid, scope=eff_scope)
         valid_to_iso = (
             to_storage(valid_to) if valid_to is not None else to_storage(now_utc())
         )
         with self._backend.transaction():
             self._backend.execute(
-                "UPDATE knowledge_entities SET valid_to = ? WHERE id = ?",
-                (valid_to_iso, eid),
+                "UPDATE knowledge_entities SET valid_to = ? "
+                "WHERE id = ? AND tenant_id = ? AND principal_id = ? AND namespace = ?",
+                (
+                    valid_to_iso,
+                    eid,
+                    eff_scope.tenant_id,
+                    eff_scope.principal_id,
+                    eff_scope.namespace,
+                ),
             )
 
     def create_relation(
@@ -121,18 +189,25 @@ class KnowledgeGraph:
         properties: dict[str, object] | None = None,
         *,
         valid_from: str | None = None,
+        scope: MemoryScope | None = None,
     ) -> Relation:
-        """Create a KG relation, honoring ``UNIQUE(source_id, target_id, relation_type)``."""
+        """Create a KG relation in ``scope`` with uniqueness per scope."""
+        eff_scope = self._eff_scope(scope)
+        self.get_entity(source_id, scope=eff_scope)
+        self.get_entity(target_id, scope=eff_scope)
         props = json.dumps(properties or {}, ensure_ascii=False, separators=(",", ":"))
         now_iso = to_storage(now_utc())
         valid_from_iso = to_storage(valid_from) if valid_from is not None else now_iso
         with self._backend.transaction():
             row = self._backend.fetchone(
                 "INSERT INTO knowledge_relations "
-                "(source_id, target_id, relation_type, confidence, properties, "
-                " valid_from, valid_to, recorded_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, NULL, ?) RETURNING id",
+                "(tenant_id, principal_id, namespace, source_id, target_id, "
+                " relation_type, confidence, properties, valid_from, valid_to, recorded_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?) RETURNING id",
                 (
+                    eff_scope.tenant_id,
+                    eff_scope.principal_id,
+                    eff_scope.namespace,
                     source_id,
                     target_id,
                     relation_type,
@@ -144,30 +219,51 @@ class KnowledgeGraph:
             )
         if row is None:
             raise RuntimeError("relation INSERT did not return an id")
-        return self.get_relation(int(row["id"]))
+        return self.get_relation(int(row["id"]), scope=eff_scope)
 
-    def get_relation(self, rid: int) -> Relation:
-        """Return the typed ``Relation`` for ``rid`` (raises ``KeyError`` if missing)."""
+    def get_relation(
+        self, rid: int, *, scope: MemoryScope | None = None
+    ) -> Relation:
+        """Return the typed ``Relation`` for ``rid`` in ``scope``."""
+        eff_scope = self._eff_scope(scope)
         row = self._backend.fetchone(
-            "SELECT id, source_id, target_id, relation_type, confidence, "
-            "properties, valid_from, valid_to, recorded_at "
-            "FROM knowledge_relations WHERE id = ?",
-            (rid,),
+            f"SELECT {_REL_COLS} FROM knowledge_relations "
+            "WHERE id = ? AND tenant_id = ? AND principal_id = ? AND namespace = ?",
+            (
+                rid,
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+            ),
         )
         if row is None:
             raise KeyError(f"no knowledge relation with id={rid}")
         return self._row_to_relation(row)
 
-    def retire_relation(self, rid: int, *, valid_to: str | None = None) -> None:
+    def retire_relation(
+        self,
+        rid: int,
+        *,
+        valid_to: str | None = None,
+        scope: MemoryScope | None = None,
+    ) -> None:
         """Retire a relation by setting ``valid_to`` while preserving the row."""
-        self.get_relation(rid)
+        eff_scope = self._eff_scope(scope)
+        self.get_relation(rid, scope=eff_scope)
         valid_to_iso = (
             to_storage(valid_to) if valid_to is not None else to_storage(now_utc())
         )
         with self._backend.transaction():
             self._backend.execute(
-                "UPDATE knowledge_relations SET valid_to = ? WHERE id = ?",
-                (valid_to_iso, rid),
+                "UPDATE knowledge_relations SET valid_to = ? "
+                "WHERE id = ? AND tenant_id = ? AND principal_id = ? AND namespace = ?",
+                (
+                    valid_to_iso,
+                    rid,
+                    eff_scope.tenant_id,
+                    eff_scope.principal_id,
+                    eff_scope.namespace,
+                ),
             )
 
     def find_valid_entities(
@@ -176,28 +272,41 @@ class KnowledgeGraph:
         kg_cfg: KgConfig,
         *,
         entity_type: str | None = None,
+        scope: MemoryScope | None = None,
     ) -> list[Entity]:
-        """Return currently-valid entities whose normalized name equals ``name``."""
+        """Return currently-valid entities in ``scope`` whose normalized name equals ``name``."""
+        eff_scope = self._eff_scope(scope)
         forms = expand_aliases([name], kg_cfg)
         if not forms:
             return []
         placeholders = ",".join("?" for _ in forms)
         if entity_type is None:
             rows = self._backend.fetchall(
-                f"SELECT id, entity_type, name, properties, valid_from, valid_to, "
-                f"recorded_at FROM knowledge_entities "
-                f"WHERE valid_to IS NULL AND canonical_name IN ({placeholders}) "
+                f"SELECT {_ENTITY_COLS} FROM knowledge_entities "
+                f"WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
+                f"AND valid_to IS NULL AND canonical_name IN ({placeholders}) "
                 f"ORDER BY id ASC",
-                forms,
+                (
+                    eff_scope.tenant_id,
+                    eff_scope.principal_id,
+                    eff_scope.namespace,
+                    *forms,
+                ),
             )
         else:
             rows = self._backend.fetchall(
-                f"SELECT id, entity_type, name, properties, valid_from, valid_to, "
-                f"recorded_at FROM knowledge_entities "
-                f"WHERE valid_to IS NULL AND entity_type = ? "
+                f"SELECT {_ENTITY_COLS} FROM knowledge_entities "
+                f"WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
+                f"AND valid_to IS NULL AND entity_type = ? "
                 f"AND canonical_name IN ({placeholders}) "
                 f"ORDER BY id ASC",
-                (entity_type, *forms),
+                (
+                    eff_scope.tenant_id,
+                    eff_scope.principal_id,
+                    eff_scope.namespace,
+                    entity_type,
+                    *forms,
+                ),
             )
         return [self._row_to_entity(r) for r in rows]
 
@@ -205,45 +314,74 @@ class KnowledgeGraph:
         self,
         source_id: int,
         relation_type: str | None = None,
+        *,
+        scope: MemoryScope | None = None,
     ) -> list[Relation]:
-        """Return currently-valid relations out of ``source_id``."""
+        """Return currently-valid relations out of ``source_id`` in ``scope``."""
+        eff_scope = self._eff_scope(scope)
         if relation_type is None:
             rows = self._backend.fetchall(
-                "SELECT id, source_id, target_id, relation_type, confidence, "
-                "properties, valid_from, valid_to, recorded_at "
-                "FROM knowledge_relations "
-                "WHERE valid_to IS NULL AND source_id = ? ORDER BY id ASC",
-                (source_id,),
+                f"SELECT {_REL_COLS} FROM knowledge_relations "
+                "WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
+                "AND valid_to IS NULL AND source_id = ? ORDER BY id ASC",
+                (
+                    eff_scope.tenant_id,
+                    eff_scope.principal_id,
+                    eff_scope.namespace,
+                    source_id,
+                ),
             )
         else:
             rows = self._backend.fetchall(
-                "SELECT id, source_id, target_id, relation_type, confidence, "
-                "properties, valid_from, valid_to, recorded_at "
-                "FROM knowledge_relations "
-                "WHERE valid_to IS NULL AND source_id = ? AND relation_type = ? "
+                f"SELECT {_REL_COLS} FROM knowledge_relations "
+                "WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
+                "AND valid_to IS NULL AND source_id = ? AND relation_type = ? "
                 "ORDER BY id ASC",
-                (source_id, relation_type),
+                (
+                    eff_scope.tenant_id,
+                    eff_scope.principal_id,
+                    eff_scope.namespace,
+                    source_id,
+                    relation_type,
+                ),
             )
         return [self._row_to_relation(r) for r in rows]
 
     def find_relation_by_triple(
-        self, source_id: int, target_id: int, relation_type: str
+        self,
+        source_id: int,
+        target_id: int,
+        relation_type: str,
+        *,
+        scope: MemoryScope | None = None,
     ) -> Relation | None:
-        """Return the row for one exact triple regardless of validity, or ``None``."""
+        """Return the row for one exact triple in ``scope`` regardless of validity, or ``None``."""
+        eff_scope = self._eff_scope(scope)
         row = self._backend.fetchone(
-            "SELECT id, source_id, target_id, relation_type, confidence, "
-            "properties, valid_from, valid_to, recorded_at "
-            "FROM knowledge_relations "
-            "WHERE source_id = ? AND target_id = ? AND relation_type = ?",
-            (source_id, target_id, relation_type),
+            f"SELECT {_REL_COLS} FROM knowledge_relations "
+            "WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
+            "AND source_id = ? AND target_id = ? AND relation_type = ?",
+            (
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+                source_id,
+                target_id,
+                relation_type,
+            ),
         )
         return None if row is None else self._row_to_relation(row)
 
     def reopen_relation(
-        self, rid: int, *, valid_from: str | None = None
+        self,
+        rid: int,
+        *,
+        valid_from: str | None = None,
+        scope: MemoryScope | None = None,
     ) -> Relation:
         """Re-assert a retired relation from ``valid_from`` (default: now)."""
-        rel = self.get_relation(rid)
+        eff_scope = self._eff_scope(scope)
+        rel = self.get_relation(rid, scope=eff_scope)
         if rel.valid_to is None:
             return rel
         now_iso = to_storage(now_utc())
@@ -258,8 +396,14 @@ class KnowledgeGraph:
                 )
                 self._backend.execute(
                     "UPDATE knowledge_relations SET valid_from = ?, valid_to = NULL "
-                    "WHERE id = ?",
-                    (start, rid),
+                    "WHERE id = ? AND tenant_id = ? AND principal_id = ? AND namespace = ?",
+                    (
+                        start,
+                        rid,
+                        eff_scope.tenant_id,
+                        eff_scope.principal_id,
+                        eff_scope.namespace,
+                    ),
                 )
             else:
                 self._backend.execute(
@@ -270,14 +414,25 @@ class KnowledgeGraph:
                 )
                 self._backend.execute(
                     "UPDATE knowledge_relations SET valid_from = ?, valid_to = NULL, "
-                    "recorded_at = ? WHERE id = ?",
-                    (new_from, now_iso, rid),
+                    "recorded_at = ? "
+                    "WHERE id = ? AND tenant_id = ? AND principal_id = ? AND namespace = ?",
+                    (
+                        new_from,
+                        now_iso,
+                        rid,
+                        eff_scope.tenant_id,
+                        eff_scope.principal_id,
+                        eff_scope.namespace,
+                    ),
                 )
-        return self.get_relation(rid)
+        return self.get_relation(rid, scope=eff_scope)
 
-    def relation_intervals(self, rid: int) -> list[tuple[str, str | None]]:
-        """Return every validity interval of ``rid``, oldest first."""
-        rel = self.get_relation(rid)
+    def relation_intervals(
+        self, rid: int, *, scope: MemoryScope | None = None
+    ) -> list[tuple[str, str | None]]:
+        """Return every validity interval of ``rid`` in ``scope``, oldest first."""
+        eff_scope = self._eff_scope(scope)
+        rel = self.get_relation(rid, scope=eff_scope)
         rows = self._backend.fetchall(
             "SELECT valid_from, valid_to FROM knowledge_relation_history "
             "WHERE relation_id = ? ORDER BY id ASC",
@@ -287,8 +442,28 @@ class KnowledgeGraph:
             (str(r["valid_from"]), str(r["valid_to"])) for r in rows
         ] + [(rel.valid_from, rel.valid_to)]
 
-    def link_entity_frame(self, entity_id: int, frame_id: int) -> None:
-        """Write a ``kg_entity_frames`` bridge row linking ``entity_id`` to ``frame_id``."""
+    def link_entity_frame(
+        self,
+        entity_id: int,
+        frame_id: int,
+        *,
+        scope: MemoryScope | None = None,
+    ) -> None:
+        """Write a ``kg_entity_frames`` bridge row in ``scope``."""
+        eff_scope = self._eff_scope(scope)
+        self.get_entity(entity_id, scope=eff_scope)
+        frame_row = self._backend.fetchone(
+            "SELECT id FROM memory_frames "
+            "WHERE id = ? AND tenant_id = ? AND principal_id = ? AND namespace = ?",
+            (
+                frame_id,
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+            ),
+        )
+        if frame_row is None:
+            raise KeyError(f"no memory_frame with id={frame_id} in scope")
         with self._backend.transaction():
             self._backend.execute(
                 "INSERT INTO kg_entity_frames(entity_id, frame_id) "
@@ -296,50 +471,108 @@ class KnowledgeGraph:
                 (entity_id, frame_id),
             )
 
-    def frame_ids_for_entity(self, entity_id: int) -> list[int]:
-        """Return the ``frame_id``s linked to ``entity_id``."""
+    def frame_ids_for_entity(
+        self, entity_id: int, *, scope: MemoryScope | None = None
+    ) -> list[int]:
+        """Return the ``frame_id``s linked to ``entity_id`` in ``scope``."""
+        eff_scope = self._eff_scope(scope)
         rows = self._backend.fetchall(
-            "SELECT frame_id FROM kg_entity_frames WHERE entity_id = ? "
-            "ORDER BY frame_id ASC",
-            (entity_id,),
+            "SELECT kef.frame_id AS frame_id "
+            "FROM kg_entity_frames kef "
+            "JOIN knowledge_entities e ON e.id = kef.entity_id "
+            "JOIN memory_frames m ON m.id = kef.frame_id "
+            "WHERE kef.entity_id = ? "
+            "AND e.tenant_id = ? AND e.principal_id = ? AND e.namespace = ? "
+            "AND m.tenant_id = ? AND m.principal_id = ? AND m.namespace = ? "
+            "ORDER BY kef.frame_id ASC",
+            (
+                entity_id,
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+            ),
         )
         return [int(r["frame_id"]) for r in rows]
 
-    def entity_ids_for_frame(self, frame_id: int) -> list[int]:
-        """Return the ``entity_id``s linked to ``frame_id``."""
+    def entity_ids_for_frame(
+        self, frame_id: int, *, scope: MemoryScope | None = None
+    ) -> list[int]:
+        """Return the ``entity_id``s linked to ``frame_id`` in ``scope``."""
+        eff_scope = self._eff_scope(scope)
         rows = self._backend.fetchall(
-            "SELECT entity_id FROM kg_entity_frames WHERE frame_id = ? "
-            "ORDER BY entity_id ASC",
-            (frame_id,),
+            "SELECT kef.entity_id AS entity_id "
+            "FROM kg_entity_frames kef "
+            "JOIN knowledge_entities e ON e.id = kef.entity_id "
+            "JOIN memory_frames m ON m.id = kef.frame_id "
+            "WHERE kef.frame_id = ? "
+            "AND e.tenant_id = ? AND e.principal_id = ? AND e.namespace = ? "
+            "AND m.tenant_id = ? AND m.principal_id = ? AND m.namespace = ? "
+            "ORDER BY kef.entity_id ASC",
+            (
+                frame_id,
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+            ),
         )
         return [int(r["entity_id"]) for r in rows]
 
-    def as_of(self, iso: str) -> KgSnapshot:
-        """Reconstruct the KG state valid at time ``T = iso``."""
+    def as_of(
+        self, iso: str, *, scope: MemoryScope | None = None
+    ) -> KgSnapshot:
+        """Reconstruct the KG state in ``scope`` valid at time ``T = iso``."""
+        eff_scope = self._eff_scope(scope)
         t = utc_key(iso)
         ent_rows = self._backend.fetchall(
-            "SELECT id, entity_type, name, properties, valid_from, valid_to, "
-            "recorded_at FROM knowledge_entities "
-            "WHERE REPLACE(valid_from, ' ', 'T') <= ? "
+            f"SELECT {_ENTITY_COLS} FROM knowledge_entities "
+            "WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
+            "AND REPLACE(valid_from, ' ', 'T') <= ? "
             "AND (valid_to IS NULL OR REPLACE(valid_to, ' ', 'T') > ?) "
             "ORDER BY id ASC",
-            (t, t),
+            (
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+                t,
+                t,
+            ),
         )
         rel_rows = self._backend.fetchall(
             "SELECT id, source_id, target_id, relation_type, confidence, "
-            "properties, valid_from, valid_to, recorded_at "
+            "properties, valid_from, valid_to, recorded_at, "
+            "tenant_id, principal_id, namespace "
             "FROM knowledge_relations "
-            "WHERE REPLACE(valid_from, ' ', 'T') <= ? "
+            "WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
+            "AND REPLACE(valid_from, ' ', 'T') <= ? "
             "AND (valid_to IS NULL OR REPLACE(valid_to, ' ', 'T') > ?) "
             "UNION ALL "
             "SELECT r.id, r.source_id, r.target_id, r.relation_type, r.confidence, "
-            "r.properties, h.valid_from, h.valid_to, h.recorded_at "
+            "r.properties, h.valid_from, h.valid_to, h.recorded_at, "
+            "r.tenant_id, r.principal_id, r.namespace "
             "FROM knowledge_relation_history h "
             "JOIN knowledge_relations r ON r.id = h.relation_id "
-            "WHERE REPLACE(h.valid_from, ' ', 'T') <= ? "
+            "WHERE r.tenant_id = ? AND r.principal_id = ? AND r.namespace = ? "
+            "AND REPLACE(h.valid_from, ' ', 'T') <= ? "
             "AND REPLACE(h.valid_to, ' ', 'T') > ? "
             "ORDER BY 1 ASC",
-            (t, t, t, t),
+            (
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+                t,
+                t,
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+                t,
+                t,
+            ),
         )
         entities = [
             e
@@ -355,8 +588,15 @@ class KnowledgeGraph:
         ]
         return KgSnapshot(entities=entities, relations=relations)
 
-    def seed_entities(self, query: str, kg_cfg: KgConfig) -> list[int]:
-        """Seed KG entities from ``query`` via word-boundary token matching."""
+    def seed_entities(
+        self,
+        query: str,
+        kg_cfg: KgConfig,
+        *,
+        scope: MemoryScope | None = None,
+    ) -> list[int]:
+        """Seed KG entities in ``scope`` from ``query`` via word-boundary token matching."""
+        eff_scope = self._eff_scope(scope)
         allow = {t.lower() for t in kg_cfg.tech_allowlist}
         min_len = kg_cfg.seed_min_len
 
@@ -373,21 +613,49 @@ class KnowledgeGraph:
         placeholders = ",".join("?" for _ in forms)
         rows = self._backend.fetchall(
             f"SELECT id FROM knowledge_entities "
-            f"WHERE valid_to IS NULL AND canonical_name IN ({placeholders}) "
+            f"WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
+            f"AND valid_to IS NULL AND canonical_name IN ({placeholders}) "
             f"ORDER BY id ASC",
-            forms,
+            (
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+                *forms,
+            ),
         )
         return [int(r["id"]) for r in rows]
 
-    def bfs_distances(self, seeds: list[int], depth: int) -> dict[int, int]:
-        """Symmetric BFS over the currently-valid relation subgraph."""
+    def bfs_distances(
+        self,
+        seeds: list[int],
+        depth: int,
+        *,
+        scope: MemoryScope | None = None,
+    ) -> dict[int, int]:
+        """Symmetric BFS over the currently-valid relation subgraph in ``scope``."""
         if depth < 0 or not seeds:
+            return {}
+        eff_scope = self._eff_scope(scope)
+        seed_ph = ",".join("?" for _ in seeds)
+        valid_seed_rows = self._backend.fetchall(
+            f"SELECT id FROM knowledge_entities "
+            f"WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
+            f"AND valid_to IS NULL AND id IN ({seed_ph}) "
+            f"ORDER BY id ASC",
+            (
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+                *[int(s) for s in seeds],
+            ),
+        )
+        scoped_seeds = [int(r["id"]) for r in valid_seed_rows]
+        if not scoped_seeds:
             return {}
 
         dist: dict[int, int] = {}
         frontier: list[int] = []
-        for s in seeds:
-            sid = int(s)
+        for sid in scoped_seeds:
             if sid not in dist:
                 dist[sid] = 0
                 frontier.append(sid)
@@ -398,9 +666,16 @@ class KnowledgeGraph:
             ph = ",".join("?" for _ in frontier)
             rows = self._backend.fetchall(
                 f"SELECT source_id, target_id FROM knowledge_relations "
-                f"WHERE valid_to IS NULL "
+                f"WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
+                f"AND valid_to IS NULL "
                 f"AND (source_id IN ({ph}) OR target_id IN ({ph}))",
-                (*frontier, *frontier),
+                (
+                    eff_scope.tenant_id,
+                    eff_scope.principal_id,
+                    eff_scope.namespace,
+                    *frontier,
+                    *frontier,
+                ),
             )
             next_frontier: list[int] = []
             for r in rows:
@@ -418,28 +693,40 @@ class KnowledgeGraph:
         *,
         recent_entities: list[int] | None = None,
         depth: int,
+        scope: MemoryScope | None = None,
     ) -> dict[int, int]:
-        """Map each candidate frame to its minimum BFS distance from the query."""
+        """Map each candidate frame in ``scope`` to its minimum BFS distance from the query."""
         eff_depth = int(depth)
         if eff_depth < 0:
             return {}
+        eff_scope = self._eff_scope(scope)
 
-        seeds: set[int] = set(self.seed_entities(query, kg_cfg))
+        seeds: set[int] = set(self.seed_entities(query, kg_cfg, scope=eff_scope))
         if recent_entities:
             seeds.update(int(e) for e in recent_entities)
         if not seeds:
             return {}
 
-        distances = self.bfs_distances(sorted(seeds), eff_depth)
+        distances = self.bfs_distances(
+            sorted(seeds), eff_depth, scope=eff_scope
+        )
         if not distances:
             return {}
 
         reached_ids = sorted(distances)
         ph = ",".join("?" for _ in reached_ids)
         rows = self._backend.fetchall(
-            f"SELECT entity_id, frame_id FROM kg_entity_frames "
-            f"WHERE entity_id IN ({ph})",
-            reached_ids,
+            f"SELECT kef.entity_id AS entity_id, kef.frame_id AS frame_id "
+            f"FROM kg_entity_frames kef "
+            f"JOIN memory_frames m ON m.id = kef.frame_id "
+            f"WHERE kef.entity_id IN ({ph}) "
+            f"AND m.tenant_id = ? AND m.principal_id = ? AND m.namespace = ?",
+            (
+                *reached_ids,
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+            ),
         )
         frame_distance: dict[int, int] = {}
         for row in rows:
@@ -455,6 +742,7 @@ class KnowledgeGraph:
 
     def _row_to_entity(self, row: Mapping[str, Any] | Sequence[Any]) -> Entity:
         if isinstance(row, Mapping):
+            keys = set(row.keys())
             return Entity(
                 id=int(row["id"]),
                 entity_type=row["entity_type"],
@@ -463,6 +751,11 @@ class KnowledgeGraph:
                 valid_from=row["valid_from"],
                 valid_to=row["valid_to"],
                 recorded_at=row["recorded_at"],
+                tenant_id=str(row["tenant_id"]) if "tenant_id" in keys else "local",
+                principal_id=(
+                    str(row["principal_id"]) if "principal_id" in keys else "default"
+                ),
+                namespace=str(row["namespace"]) if "namespace" in keys else "personal",
             )
         v = tuple(row)
         return Entity(
@@ -473,10 +766,14 @@ class KnowledgeGraph:
             valid_from=v[4],
             valid_to=v[5],
             recorded_at=v[6],
+            tenant_id=str(v[7]) if len(v) > 7 else "local",
+            principal_id=str(v[8]) if len(v) > 8 else "default",
+            namespace=str(v[9]) if len(v) > 9 else "personal",
         )
 
     def _row_to_relation(self, row: Mapping[str, Any] | Sequence[Any]) -> Relation:
         if isinstance(row, Mapping):
+            keys = set(row.keys())
             return Relation(
                 id=int(row["id"]),
                 source_id=int(row["source_id"]),
@@ -487,6 +784,11 @@ class KnowledgeGraph:
                 valid_from=row["valid_from"],
                 valid_to=row["valid_to"],
                 recorded_at=row["recorded_at"],
+                tenant_id=str(row["tenant_id"]) if "tenant_id" in keys else "local",
+                principal_id=(
+                    str(row["principal_id"]) if "principal_id" in keys else "default"
+                ),
+                namespace=str(row["namespace"]) if "namespace" in keys else "personal",
             )
         v = tuple(row)
         return Relation(
@@ -499,6 +801,9 @@ class KnowledgeGraph:
             valid_from=v[6],
             valid_to=v[7],
             recorded_at=v[8],
+            tenant_id=str(v[9]) if len(v) > 9 else "local",
+            principal_id=str(v[10]) if len(v) > 10 else "default",
+            namespace=str(v[11]) if len(v) > 11 else "personal",
         )
 
 

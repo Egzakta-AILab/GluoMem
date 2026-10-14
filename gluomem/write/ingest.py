@@ -15,6 +15,7 @@ from gluomem.kg.graph import KnowledgeGraph
 from gluomem.kg.normalizer import predicate_family
 from gluomem.llm.outputs import ExtractionError
 from gluomem.storage.db import MindDB
+from gluomem.storage.scope import MemoryScope, resolve_scope
 from gluomem.write.cognify import (
     ResolvedGraph,
     cognify_texts,
@@ -163,13 +164,15 @@ def find_subject_frames(
     kg: KnowledgeGraph,
     store: FrameStore,
     cfg: AppConfig,
+    scope: MemoryScope | None = None,
 ) -> list[Frame]:
     """Return non-deprecated I-frames in ``gop`` sharing >= threshold entities."""
     if not entity_ids:
         return []
+    s = resolve_scope(scope, default=store.scope)
     overlap: dict[int, int] = {}
     for eid in entity_ids:
-        for fid in kg.frame_ids_for_entity(eid):
+        for fid in kg.frame_ids_for_entity(eid, scope=s):
             overlap[fid] = overlap.get(fid, 0) + 1
 
     candidate_ids = [
@@ -179,7 +182,7 @@ def find_subject_frames(
     ]
     if not candidate_ids:
         return []
-    frames_by_id = store.get_frames(candidate_ids)
+    frames_by_id = store.get_frames(candidate_ids, scope=s)
 
     scored: list[tuple[int, int, Frame]] = []
     for fid in candidate_ids:
@@ -200,9 +203,12 @@ def find_base_frame(
     kg: KnowledgeGraph,
     store: FrameStore,
     cfg: AppConfig,
+    scope: MemoryScope | None = None,
 ) -> Frame | None:
     """Return the highest-overlap same-subject base I-frame in ``gop``."""
-    frames = find_subject_frames(entity_ids, gop, kg=kg, store=store, cfg=cfg)
+    frames = find_subject_frames(
+        entity_ids, gop, kg=kg, store=store, cfg=cfg, scope=scope
+    )
     return frames[0] if frames else None
 
 
@@ -213,22 +219,26 @@ def find_edge_conflict_frames(
     kg: KnowledgeGraph,
     store: FrameStore,
     cfg: AppConfig,
+    scope: MemoryScope | None = None,
 ) -> list[Frame]:
     """Return contradiction candidate I-frames in ``gop`` from KG edge conflicts."""
+    s = resolve_scope(scope, default=store.scope)
     frames: list[Frame] = []
     seen: set[int] = set()
     for rel in relations:
         for rtype in predicate_family(rel.relation_type, cfg.kg):
-            for existing in kg.find_valid_relations(rel.source_id, rtype):
+            for existing in kg.find_valid_relations(
+                rel.source_id, rtype, scope=s
+            ):
                 if existing.id == rel.id or existing.target_id == rel.target_id:
                     continue
-                source_fids = set(kg.frame_ids_for_entity(rel.source_id))
-                target_fids = kg.frame_ids_for_entity(existing.target_id)
+                source_fids = set(kg.frame_ids_for_entity(rel.source_id, scope=s))
+                target_fids = kg.frame_ids_for_entity(existing.target_id, scope=s)
                 fids = [f for f in target_fids if f in source_fids] or target_fids
                 ordered = [f for f in sorted(fids, reverse=True) if f not in seen]
                 if not ordered:
                     continue
-                frames_by_id = store.get_frames(ordered)
+                frames_by_id = store.get_frames(ordered, scope=s)
                 for fid in ordered:
                     seen.add(fid)
                     frame = frames_by_id.get(fid)
@@ -282,7 +292,9 @@ def _admit_observation(
     cfg: AppConfig,
     report: IngestReport,
     deduper: SemanticDeduper | None = None,
+    scope: MemoryScope | None = None,
 ) -> None:
+    s = resolve_scope(scope, default=store.scope)
     gop = _lane_gop(conv_id, obs)
     event_time = _event_time_for(obs, session_iso)
     created_at = session_iso if cfg.write.backdate_created_at else None
@@ -295,7 +307,7 @@ def _admit_observation(
     )
 
     subject_frames = find_subject_frames(
-        graph.entity_ids, gop, kg=kg, store=store, cfg=cfg
+        graph.entity_ids, gop, kg=kg, store=store, cfg=cfg, scope=s
     )
     base = subject_frames[0] if subject_frames else None
     importance = lane_importance(obs.lane, cfg)
@@ -308,6 +320,7 @@ def _admit_observation(
         source="agent_inferred",
         entity_ids=graph.entity_ids,
         created_at=created_at,
+        scope=s,
     )
 
     mode = cfg.write.frame_model
@@ -318,7 +331,7 @@ def _admit_observation(
             candidates.extend(subject_frames)
         if trigger in ("kg_edge_conflict", "both"):
             for frame in find_edge_conflict_frames(
-                graph.relations, gop, kg=kg, store=store, cfg=cfg
+                graph.relations, gop, kg=kg, store=store, cfg=cfg, scope=s
             ):
                 if all(frame.id != c.id for c in candidates):
                     candidates.append(frame)
@@ -378,16 +391,18 @@ def _admit_observation(
         if all(hit.id != f.id for f in stale_frames):
             stale_frames.append(hit)
         for stale in stale_frames:
-            store.set_importance(stale.id, "deprecated")
+            store.set_importance(stale.id, "deprecated", scope=s)
             report.demoted += 1
-            for child in store.frames_based_on(stale.id):
+            for child in store.frames_based_on(stale.id, scope=s):
                 if child.frame_type == "P":
-                    store.set_importance(child.id, "deprecated")
+                    store.set_importance(child.id, "deprecated", scope=s)
                     report.demoted += 1
 
     if cfg.write.cognify.enabled and cfg.write.cognify.retire_conflicting_edges:
         report.retired_edges += len(
-            retire_conflicting_relations(graph.relations, kg=kg, kg_cfg=cfg.kg)
+            retire_conflicting_relations(
+                graph.relations, kg=kg, kg_cfg=cfg.kg, scope=s
+            )
         )
 
 
@@ -399,8 +414,10 @@ def ingest_conversation(
     store: FrameStore,
     kg: KnowledgeGraph,
     cfg: AppConfig,
+    scope: MemoryScope | None = None,
 ) -> IngestReport:
     """Ingest one conversation through the admission gate."""
+    s = resolve_scope(scope, default=store.scope)
     report = IngestReport(conversations=1, sessions=len(conv.sessions))
 
     deduper = (
@@ -434,6 +451,7 @@ def ingest_conversation(
                     created_at=(
                         session_iso if cfg.write.backdate_created_at else None
                     ),
+                    scope=s,
                 )
                 _count_frame(result, report)
                 excluded = (not result.admitted) or result.trust == "quarantined"
@@ -480,6 +498,7 @@ def ingest_conversation(
                 _event_time_for(observations[i], session_iso) for i in clean_idx
             ],
             max_workers=cfg.write.parallelism,
+            scope=s,
         )
         graphs: list[ResolvedGraph | Exception] = [
             ResolvedGraph() for _ in observations
@@ -507,6 +526,7 @@ def ingest_conversation(
                     cfg=cfg,
                     report=report,
                     deduper=deduper,
+                    scope=s,
                 )
             except ExtractionError as exc:
                 report.extraction_errors.append(
@@ -516,7 +536,7 @@ def ingest_conversation(
             touched.add(_lane_gop(conv.conv_id, obs))
 
         for gop in sorted(touched):
-            store.compact(gop, cfg)
+            store.compact(gop, cfg, scope=s)
 
     return report
 
@@ -528,20 +548,28 @@ def ingest_path(
     facade: Extractors,
     db_path: str | Path | None = None,
     embedder: Embedder | None = None,
+    scope: MemoryScope | None = None,
 ) -> IngestReport:
     """Wire storage and gate, then ingest every conversation in a LoCoMo file."""
     conversations = load_locomo(path)
     db = MindDB(db_path or cfg.storage.path, dim=cfg.storage.vector_dim)
     if embedder is None:
         embedder = make_embedder(cfg)
-    store = FrameStore(db, embedder=embedder, chunking=cfg.chunking)
-    kg = KnowledgeGraph(db)
+    s = resolve_scope(scope)
+    store = FrameStore(db, embedder=embedder, chunking=cfg.chunking, scope=s)
+    kg = KnowledgeGraph(db, scope=s)
     scanner = InjectionScanner(cfg.safety)
 
     total = IngestReport()
     for conv in conversations:
         report = ingest_conversation(
-            conv, facade=facade, scanner=scanner, store=store, kg=kg, cfg=cfg
+            conv,
+            facade=facade,
+            scanner=scanner,
+            store=store,
+            kg=kg,
+            cfg=cfg,
+            scope=s,
         )
         for attr in (
             "conversations",

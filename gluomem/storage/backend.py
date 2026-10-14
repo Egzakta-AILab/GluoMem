@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from gluomem.storage.scope import MemoryScope
 
 
 class VectorDimMismatchError(ValueError):
@@ -78,7 +81,14 @@ class VectorStore(Protocol):
         self, items: list[tuple[int, np.ndarray]], *, commit: bool = True
     ) -> None: ...
 
-    def search(self, query: np.ndarray, k: int) -> list[tuple[int, float]]: ...
+    def search(
+        self,
+        query: np.ndarray,
+        k: int,
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+    ) -> list[tuple[int, float]]: ...
 
     def delete(self, rowid: int, *, commit: bool = True) -> None: ...
 
@@ -103,9 +113,23 @@ class FtsStore(Protocol):
 
     def delete(self, rowid: int, *, commit: bool = False) -> None: ...
 
-    def search(self, sanitized_query: str, limit: int) -> list[int]: ...
+    def search(
+        self,
+        sanitized_query: str,
+        limit: int,
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+    ) -> list[int]: ...
 
-    def search_like(self, query: str | list[str], limit: int) -> list[int]: ...
+    def search_like(
+        self,
+        query: str | list[str],
+        limit: int,
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+    ) -> list[int]: ...
 
     def get_content(self, rowid: int) -> str | None: ...
 

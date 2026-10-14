@@ -181,6 +181,67 @@ def _entries() -> tuple[BenchmarkEntry, ...]:
             sha256="1192a402561bcf606dca2b32d67c29f4fc641c1d6b7dc35e9ce81aaffea4c183",
         ),
         BenchmarkEntry(
+            id="sr_en_kvark_v1",
+            version=1,
+            title="Generated Serbian/English KVARK replay fixture",
+            revision="gluomem/bench/fixtures/sr_en_kvark_v1.json",
+            source_ancestry=("gluomem-generated:sr_en_kvark_v1",),
+            mode="adapted",
+            scorers=("evidence_hit@k", "context_substring_match@k", "current_over_stale@k"),
+            scorer_note=(
+                "retrieval-only across Serbian Cyrillic, Serbian Latin with diacritics, "
+                "ASCII-folded Serbian, and English"
+            ),
+            logical_clock="event_order",
+            capabilities=(
+                "accurate_retrieval",
+                "conflict_resolution",
+                "cross_script_multilingual",
+            ),
+            split_unit="history",
+            model_roles=("embedder",),
+            rights="Apache-2.0, authored for GluoMem; bilingual Serbian/English fixture",
+            readiness="fixture",
+            readiness_note="bilingual contract fixture; not an official external benchmark result",
+            run_status="fixture_only",
+            official=False,
+            budget_usd=0.0,
+            sha256="d6e140556ceab3d6dcafe08baaaab61d778bc6c9dcda7c4d55cf6ae9e1e95bb0",
+        ),
+        BenchmarkEntry(
+            id="minja_adversarial_v1",
+            version=1,
+            title="Generated MINJA-inspired adversarial memory poisoning fixture",
+            revision="gluomem/bench/fixtures/minja_adversarial_v1.json",
+            source_ancestry=("gluomem-generated:minja_adversarial_v1",),
+            mode="adapted",
+            scorers=(
+                "poison_admission_rate",
+                "poison_recall_leak_rate@k",
+                "clean_recall_retention@k",
+            ),
+            scorer_note=(
+                "admission quarantine rate, recall leak rate, and clean memory retention "
+                "under prompt injection, bridging-step redirection, authority spoofing, "
+                "and Serbian injection"
+            ),
+            logical_clock="event_order",
+            capabilities=(
+                "adversarial_safety",
+                "memory_poisoning",
+                "multilingual_safety",
+            ),
+            split_unit="history",
+            model_roles=("embedder",),
+            rights="Apache-2.0, authored for GluoMem; MINJA-inspired safety fixture",
+            readiness="fixture",
+            readiness_note="adversarial safety fixture; not an official external benchmark result",
+            run_status="fixture_only",
+            official=False,
+            budget_usd=0.0,
+            sha256="4ec3141904da31dfe2e41c52eb358b7506dde8e28e04b44a67de3b6976b62342",
+        ),
+        BenchmarkEntry(
             id="memoryagentbench",
             version=1,
             title="MemoryAgentBench (arXiv:2507.05257)",

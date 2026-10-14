@@ -21,7 +21,16 @@ from gluomem.search.sanitize import sanitize
 from gluomem.search.scoring import relevance
 from gluomem.storage.backend import FtsStore, VectorStore
 from gluomem.storage.db import MindDB
-from gluomem.timeutil import Clock, parse_utc, utc_key, utc_now
+from gluomem.storage.scope import MemoryScope, resolve_scope
+from gluomem.timeutil import (
+    Clock,
+    parse_utc,
+    utc_key,
+    utc_now,
+)
+from gluomem.timeutil import (
+    now_iso as format_now_iso,
+)
 
 __all__ = ["AbstentionDecision", "HybridSearch", "SearchHit", "SearchResult"]
 
@@ -82,12 +91,16 @@ class HybridSearch:
         reranker: Reranker | None = None,
         kg: KnowledgeGraph | None = None,
         clock: Clock | None = None,
+        scope: MemoryScope | None = None,
     ) -> None:
         self._db: MindDB = db
         self._clock: Clock = clock or utc_now
         self._conn: sqlite3.Connection = db.conn
         self._store: FrameStore = store
         self._cfg: AppConfig = cfg
+        self._scope: MemoryScope = (
+            resolve_scope(scope) if scope is not None else store.scope
+        )
         if embedder is None:
             embedder = store.embedder
         elif embedder is not store.embedder:
@@ -105,6 +118,10 @@ class HybridSearch:
         self._frames_vec: VectorStore = db.frame_vec
         self._chunks_vec: VectorStore = db.chunk_vec
 
+    @property
+    def scope(self) -> MemoryScope:
+        return self._scope
+
     def search(
         self,
         query: str,
@@ -113,9 +130,12 @@ class HybridSearch:
         limit: int = 10,
         since: str | None = None,
         until: str | None = None,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
     ) -> SearchResult:
         """Run a hybrid BM25 + vector search and return a :class:`SearchResult`."""
         cfg = self._cfg
+        s = resolve_scope(scope, default=self._scope)
         prof_name = profile or cfg.search.default_profile
         weights = cfg.scoring.profiles[prof_name].weights
 
@@ -126,9 +146,15 @@ class HybridSearch:
             else cfg.search.lane_fetch_mult
         )
         lane_fetch = max(1, limit) * int(mult)
+        if now_iso is not None:
+            now = parse_utc(now_iso)
+            now_str = format_now_iso(now)
+        else:
+            now = self._clock()
+            now_str = format_now_iso(now)
 
-        fts_ids = self._fts_lane(query, lane_fetch)
-        vec_ids = self._vec_lane(query, lane_fetch)
+        fts_ids = self._fts_lane(query, lane_fetch, scope=s, now_iso=now_str)
+        vec_ids = self._vec_lane(query, lane_fetch, scope=s, now_iso=now_str)
 
         rrf_k = int(cfg.search.rrf_k)
         rrf: dict[int, float] = {}
@@ -142,22 +168,21 @@ class HybridSearch:
         if self._kg is not None:
             try:
                 ctx_map = self._kg.contextual(
-                    query, cfg.kg, depth=cfg.scoring.bfs_depth
+                    query, cfg.kg, depth=cfg.scoring.bfs_depth, scope=s
                 )
             except Exception:
                 kg_lane_errors += 1
                 ctx_map = {}
 
         beyond_depth = cfg.scoring.bfs_depth + 1
-        now = self._clock()
 
-        frames_by_id = self._store.get_frames(list(rrf.keys()))
+        frames_by_id = self._store.get_frames(list(rrf.keys()), scope=s)
         hits: list[SearchHit] = []
         for fid, rrf_score in rrf.items():
             frame = frames_by_id.get(fid)
             if frame is None:
                 continue
-            if not is_recall_eligible(frame.trust):
+            if not is_recall_eligible(frame, now=now):
                 continue
             if not _event_time_in_range(frame.event_time, since, until):
                 continue
@@ -231,20 +256,42 @@ class HybridSearch:
             candidates=len(hits),
         )
 
-    def _fts_lane(self, query: str, lane_fetch: int) -> list[int]:
+    def _fts_lane(
+        self,
+        query: str,
+        lane_fetch: int,
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+    ) -> list[int]:
         """BM25 lane: sanitize query and run FTS MATCH (with LIKE fallback)."""
+        s = resolve_scope(scope, default=self._scope)
         sanitized = sanitize(query)
         if not sanitized:
-            return self._fts.search_like(query, int(lane_fetch))
-        return self._fts.search(sanitized, int(lane_fetch))
+            return self._fts.search_like(
+                query, int(lane_fetch), scope=s, now_iso=now_iso
+            )
+        return self._fts.search(
+            sanitized, int(lane_fetch), scope=s, now_iso=now_iso
+        )
 
-    def _vec_lane(self, query: str, lane_fetch: int) -> list[int]:
+    def _vec_lane(
+        self,
+        query: str,
+        lane_fetch: int,
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+    ) -> list[int]:
         """Vector lane: chunk-level KNN primary, whole-frame KNN fallback."""
+        s = resolve_scope(scope, default=self._scope)
         qvec = self._embedder.embed(query)
-        chunk_hits = self._chunks_vec.search(qvec, int(lane_fetch))
+        chunk_hits = self._chunks_vec.search(
+            qvec, int(lane_fetch), scope=s, now_iso=now_iso
+        )
         if chunk_hits:
             chunk_ids = [int(cid) for cid, _dist in chunk_hits]
-            chunk_to_frame = self._store.resolve_chunk_frames(chunk_ids)
+            chunk_to_frame = self._store.resolve_chunk_frames(chunk_ids, scope=s)
             ids: list[int] = []
             seen: set[int] = set()
             for cid in chunk_ids:
@@ -253,13 +300,25 @@ class HybridSearch:
                     seen.add(fid)
                     ids.append(fid)
             if ids:
-                return self._eligible(ids)
-        frame_hits = self._frames_vec.search(qvec, int(lane_fetch))
-        return self._eligible([int(fid) for fid, _dist in frame_hits])
+                return self._eligible(ids, scope=s, now_iso=now_iso)
+        frame_hits = self._frames_vec.search(
+            qvec, int(lane_fetch), scope=s, now_iso=now_iso
+        )
+        return self._eligible(
+            [int(fid) for fid, _dist in frame_hits], scope=s, now_iso=now_iso
+        )
 
-    def _eligible(self, ids: list[int]) -> list[int]:
+    def _eligible(
+        self,
+        ids: list[int],
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+    ) -> list[int]:
         """Drop recall-ineligible frame ids, preserving lane order."""
-        eligible = self._store.filter_eligible_ids(ids)
+        eligible = self._store.filter_eligible_ids(
+            ids, scope=scope, now_iso=now_iso
+        )
         return [fid for fid in ids if fid in eligible]
 
     def _rerank_pool(

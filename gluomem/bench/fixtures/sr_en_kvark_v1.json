@@ -1,0 +1,122 @@
+{
+  "fixture": "sr_en_kvark_v1",
+  "version": 1,
+  "generated": true,
+  "official": false,
+  "license": "Apache-2.0; authored for GluoMem; bilingual Serbian (Cyrillic/Latin/ASCII-folded) and English KVARK workspace replay fixture",
+  "shape": "Ordered replay histories across Serbian Cyrillic, Serbian Latin with diacritics, ASCII-folded Serbian, and English; competencies accurate_retrieval, conflict_resolution, and cross_script_multilingual",
+  "histories": [
+    {
+      "history_id": "beograd_infrastruktura",
+      "events": [
+        {
+          "event_id": "bg:e1",
+          "seq": 1,
+          "at": "2026-03-01T09:00:00Z",
+          "text": "Продукциони кластер у Београду користи PostgreSQL 18 са pgvector екстензијом за меморијске оквире."
+        },
+        {
+          "event_id": "bg:e2",
+          "seq": 2,
+          "at": "2026-03-01T09:10:00Z",
+          "text": "Rezervni ključ za šifrovanje čuva se u trezoru Đerdap-2 na portu 8443."
+        },
+        {
+          "event_id": "bg:e3",
+          "seq": 3,
+          "at": "2026-03-02T11:00:00Z",
+          "text": "The weekly deployment window for the Belgrade gateway is Tuesday at 19:00 UTC."
+        },
+        {
+          "event_id": "bg:e4",
+          "seq": 4,
+          "at": "2026-03-28T15:30:00Z",
+          "text": "Izmena odluke: Rezervni ključ za šifrovanje sada je prebačen i čuva se u trezoru Avala-9 na portu 9443."
+        }
+      ],
+      "probes": [
+        {
+          "probe_id": "bg:p1",
+          "after_seq": 2,
+          "at": "2026-03-01T12:00:00Z",
+          "competency": "cross_script_multilingual",
+          "question": "Koju bazu koristi produkcioni klaster u Beogradu za memorijske okvire?",
+          "answers": ["PostgreSQL 18"],
+          "evidence": ["bg:e1"]
+        },
+        {
+          "probe_id": "bg:p2",
+          "after_seq": 2,
+          "at": "2026-03-01T12:05:00Z",
+          "competency": "cross_script_multilingual",
+          "question": "Gde se cuva rezervni kljuc za sifrovanje i na kom portu?",
+          "answers": ["Đerdap-2", "8443"],
+          "evidence": ["bg:e2"]
+        },
+        {
+          "probe_id": "bg:p3",
+          "after_seq": 3,
+          "at": "2026-03-03T08:00:00Z",
+          "competency": "accurate_retrieval",
+          "question": "When is the weekly deployment window for the Belgrade gateway?",
+          "answers": ["Tuesday", "19:00 UTC"],
+          "evidence": ["bg:e3"]
+        },
+        {
+          "probe_id": "bg:p4",
+          "after_seq": 4,
+          "at": "2026-03-29T09:00:00Z",
+          "competency": "conflict_resolution",
+          "question": "Nakon izmene odluke, u kom trezoru je sada prebacen rezervni kljuc za sifrovanje?",
+          "answers": ["Avala-9", "9443"],
+          "evidence": ["bg:e4"],
+          "stale": ["bg:e2"]
+        }
+      ]
+    },
+    {
+      "history_id": "novi_sad_nabavka",
+      "events": [
+        {
+          "event_id": "ns:e1",
+          "seq": 1,
+          "at": "2026-04-01T08:00:00Z",
+          "text": "Izveštaj o održavanju mreže u Čačku i Nišu potpisao je inženjer Željko Ćirić."
+        },
+        {
+          "event_id": "ns:e2",
+          "seq": 2,
+          "at": "2026-04-01T08:30:00Z",
+          "text": "Уговор за оптичке каблове у Новом Саду вреди 140.000 евра."
+        },
+        {
+          "event_id": "ns:e3",
+          "seq": 3,
+          "at": "2026-04-28T10:00:00Z",
+          "text": "Ажурирање уговора: Сада уговор за оптичке каблове у Новом Саду вреди 185.000 евра."
+        }
+      ],
+      "probes": [
+        {
+          "probe_id": "ns:p1",
+          "after_seq": 2,
+          "at": "2026-04-02T09:00:00Z",
+          "competency": "cross_script_multilingual",
+          "question": "Ko je potpisao izvestaj o odrzavanju mreze u Cacku i Nisu?",
+          "answers": ["Željko Ćirić"],
+          "evidence": ["ns:e1"]
+        },
+        {
+          "probe_id": "ns:p2",
+          "after_seq": 3,
+          "at": "2026-04-29T09:00:00Z",
+          "competency": "conflict_resolution",
+          "question": "Koliko sada nakon azuriranja ugovora vredi ugovor za opticke kablove u Novom Sadu?",
+          "answers": ["185.000"],
+          "evidence": ["ns:e3"],
+          "stale": ["ns:e2"]
+        }
+      ]
+    }
+  ]
+}

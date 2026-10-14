@@ -5,7 +5,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-__all__ = ["Clock", "now_utc", "parse_utc", "to_storage", "utc_key", "utc_now"]
+__all__ = [
+    "Clock",
+    "now_iso",
+    "now_utc",
+    "now_utc_iso",
+    "parse_utc",
+    "to_storage",
+    "utc_key",
+    "utc_now",
+]
 
 Clock = Callable[[], datetime]
 
@@ -18,6 +27,18 @@ def utc_now() -> datetime:
 
 
 now_utc = utc_now
+
+
+def now_utc_iso() -> str:
+    """Return current UTC time formatted as ``YYYY-MM-DDTHH:MM:SS``."""
+    return utc_now().strftime(_KEY_FMT)
+
+
+def now_iso(value: str | datetime | None = None) -> str:
+    """Return UTC sort key ``YYYY-MM-DDTHH:MM:SS`` for ``value`` (or current UTC time)."""
+    if value is None:
+        return now_utc_iso()
+    return utc_key(value)
 
 
 def parse_utc(value: str | datetime) -> datetime:

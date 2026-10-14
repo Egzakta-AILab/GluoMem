@@ -26,6 +26,14 @@ EXTRAS: dict[str, tuple[tuple[str, ...], str]] = {
         ("psycopg", "pgvector"),
         "PostgreSQL + pgvector storage backend",
     ),
+    "tune": (
+        ("optuna",),
+        "Offline retrieval parameter tuning with Optuna",
+    ),
+    "service": (
+        ("fastapi", "uvicorn", "httpx"),
+        "Authenticated FastAPI service and GluoMemClient SDK",
+    ),
 }
 
 

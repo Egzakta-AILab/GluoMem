@@ -22,6 +22,7 @@ from gluomem.bench.types import Score
 from gluomem.embedding.fingerprint import fingerprint_of
 from gluomem.frames.store import FrameStore
 from gluomem.search.hybrid import HybridSearch
+from gluomem.search.multilingual import fold_multilingual_text
 from gluomem.storage.db import MindDB
 from gluomem.timeutil import parse_utc
 from gluomem.write.gate import InjectionScanner, admit
@@ -31,7 +32,10 @@ if TYPE_CHECKING:
     from gluomem.embedding.base import Embedder
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
-REPLAY_FIXTURES: dict[str, Path] = {"mab_fixture": FIXTURES_DIR / "mab_tiny.json"}
+REPLAY_FIXTURES: dict[str, Path] = {
+    "mab_fixture": FIXTURES_DIR / "mab_tiny.json",
+    "sr_en_kvark_v1": FIXTURES_DIR / "sr_en_kvark_v1.json",
+}
 
 NOT_OFFICIAL_LABEL = (
     "GENERATED MAB-SHAPED FIXTURE: a contract test of the replay protocol, "
@@ -175,7 +179,14 @@ def _probe_scores(
     out: dict[str, float | None] = {
         f"evidence_hit@{k}": 1.0 if any(eid in evidence for eid, _ in top) else 0.0,
         f"context_substring_match@{k}": (
-            1.0 if any(a in text.lower() for a in answers for _, text in top) else 0.0
+            1.0
+            if any(
+                a in text.lower()
+                or fold_multilingual_text(a) in fold_multilingual_text(text)
+                for a in answers
+                for _, text in top
+            )
+            else 0.0
         ),
     }
     if stale:

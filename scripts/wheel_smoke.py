@@ -69,7 +69,7 @@ def main() -> int:
 
     extra_status = extras.status()
     if args.expect_core_only:
-        if extra_status["llm"] or extra_status["embeddings"] or extra_status["postgres"]:
+        if any(extra_status.values()):
             print(f"FAIL: expected a core-only install, got {extra_status}", file=sys.stderr)
             return 1
         try:

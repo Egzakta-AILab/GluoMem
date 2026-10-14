@@ -370,6 +370,29 @@ def _default_scanner_patterns() -> list[ScannerPattern]:
         ScannerPattern(regex=r"(?i)system prompt", weight=1.0),
         ScannerPattern(regex=r"<\|im_start\|>", weight=1.0),
         ScannerPattern(regex=r"(?i)\bBEGIN (ADMIN|SYSTEM)\b", weight=1.0),
+        ScannerPattern(
+            regex=(
+                r"(?i)\b(override|overwrite) (all )?"
+                r"(stored|verified|system|user|prior) "
+                r"(memory|memories|fact|facts|record|records)\b"
+            ),
+            weight=1.0,
+        ),
+        ScannerPattern(
+            regex=r"(?i)\b(ADMIN|SYSTEM|SECURITY)[_ -](OVERRIDE|DIRECTIVE|INJECTION)\b",
+            weight=1.0,
+        ),
+        ScannerPattern(
+            regex=r"(?i)\bwhen asked about\b.+\balways (answer|respond|reply|state)\b",
+            weight=1.0,
+        ),
+        ScannerPattern(
+            regex=(
+                r"(?i)\b(ignorisi|zanemari) (sva )?"
+                r"(prethodna|ranija) (uputstva|instrukcije|pravila)\b"
+            ),
+            weight=1.0,
+        ),
     ]
 
 

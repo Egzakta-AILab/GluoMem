@@ -10,10 +10,18 @@ from gluomem.frames.eligibility import can_merge_into
 
 if TYPE_CHECKING:
     from gluomem.frames.store import FrameStore
+    from gluomem.storage.scope import MemoryScope
 
 
-def compact(store: FrameStore, gop: str, cfg: AppConfig) -> None:
+def compact(
+    store: FrameStore,
+    gop: str,
+    cfg: AppConfig,
+    *,
+    scope: MemoryScope | None = None,
+) -> None:
     """Compact a GOP's P-frames into their base I-frame when count exceeds trigger."""
+    eff_scope = store._eff_scope(scope)
     comp = cfg.write.compaction
     trigger = int(comp.p_frame_trigger)
     keep = int(comp.keep_recent)
@@ -26,9 +34,15 @@ def compact(store: FrameStore, gop: str, cfg: AppConfig) -> None:
     backend = store.db.backend
     rows = backend.fetchall(
         "SELECT id, base_frame_id FROM memory_frames "
-        "WHERE gop_id = ? AND frame_type = 'P' AND base_frame_id IS NOT NULL "
+        "WHERE tenant_id = ? AND principal_id = ? AND namespace = ? "
+        "AND gop_id = ? AND frame_type = 'P' AND base_frame_id IS NOT NULL "
         "ORDER BY id ASC",
-        (gop,),
+        (
+            eff_scope.tenant_id,
+            eff_scope.principal_id,
+            eff_scope.namespace,
+            gop,
+        ),
     )
     by_base: dict[int, list[int]] = {}
     for pid, bid in rows:
@@ -39,14 +53,15 @@ def compact(store: FrameStore, gop: str, cfg: AppConfig) -> None:
         if len(p_ids) <= trigger:
             continue
         try:
-            base = store.get_frame(base_id)
+            base = store.get_frame(base_id, scope=eff_scope)
         except KeyError:
             continue
 
         compatible = [
             p
-            for p in (store.get_frame(pid) for pid in p_ids)
-            if can_merge_into(base, p) and not store.frames_based_on(p.id)
+            for p in (store.get_frame(pid, scope=eff_scope) for pid in p_ids)
+            if can_merge_into(base, p)
+            and not store.frames_based_on(p.id, scope=eff_scope)
         ]
         if len(compatible) <= trigger:
             continue

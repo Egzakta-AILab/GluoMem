@@ -39,7 +39,7 @@ _FAKES = {
 @pytest.fixture
 def no_model_packages(monkeypatch: pytest.MonkeyPatch) -> None:
     real = importlib.util.find_spec
-    hidden = {"dspy", "sentence_transformers"}
+    hidden = {"dspy", "sentence_transformers", "optuna"}
 
     def fake_find_spec(name: str, *args: object, **kwargs: object):  # noqa: ANN202
         if name in hidden:
@@ -60,7 +60,7 @@ def extras_missing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_status_lists_every_extra() -> None:
-    assert set(extras.status()) == {"llm", "embeddings", "postgres"}
+    assert set(extras.status()) == {"llm", "embeddings", "postgres", "tune", "service"}
 
 
 def test_require_names_the_extra(no_model_packages: None) -> None:

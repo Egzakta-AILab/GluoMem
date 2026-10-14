@@ -14,6 +14,8 @@ from gluomem.frames.store import (
     Importance,
     Trust,
 )
+from gluomem.search.multilingual import fold_to_ascii
+from gluomem.storage.scope import FrameStatus, MemoryKind, MemoryScope, resolve_scope
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -43,8 +45,12 @@ class InjectionScanner:
     def scan(self, content: str, *, context: str = "") -> ScanVerdict:  # noqa: ARG002
         matched: list[str] = []
         score = 0.0
+        folded = fold_to_ascii(content)
         for pattern, weight in self._patterns:
-            if pattern.search(content) is not None:
+            if (
+                pattern.search(content) is not None
+                or pattern.search(folded) is not None
+            ):
                 matched.append(pattern.pattern)
                 score = max(score, weight)
         return ScanVerdict(score=score, matched=matched)
@@ -81,8 +87,16 @@ def admit(
     entity_ids: Sequence[int] = (),
     created_at: str | None = None,
     deduper: SemanticDeduper | None = None,
+    scope: MemoryScope | None = None,
+    kind: MemoryKind = "fact",
+    status: FrameStatus = "active",
+    confidence: float = 1.0,
+    expires_at: str | None = None,
+    pinned: bool = False,
+    verified_by_user: bool = False,
 ) -> AdmitResult:
     """Admit one write: scan, dedup, create frame, and link KG entities."""
+    s = resolve_scope(scope, default=store.scope)
     verdict = scanner.scan(content, context=source)
     if verdict.score >= cfg.safety.block_threshold:
         if cfg.safety.fail_mode == "reject":
@@ -90,10 +104,10 @@ def admit(
                 admitted=False, frame=None, verdict=verdict, trust=trust
             )
         trust = "quarantined"
-    if not is_recall_eligible(trust):
+    if not is_recall_eligible(trust, status=status, expires_at=expires_at):
         deduper = None
 
-    existing = store.find_frame_by_hash(gop, content)
+    existing = store.find_frame_by_hash(gop, content, scope=s)
     if existing is not None:
         store.ensure_indexed(existing)
         return AdmitResult(
@@ -104,20 +118,20 @@ def admit(
             deduped=True,
         )
 
-    probe = deduper.probe(gop, content) if deduper is not None else None
+    probe = deduper.probe(gop, content, scope=s) if deduper is not None else None
     superseded_id: int | None = None
     if deduper is not None and probe is not None and probe.is_dup and probe.matched_id is not None:
         try:
-            matched = store.get_frame(probe.matched_id)
+            matched = store.get_frame(probe.matched_id, scope=s)
         except KeyError:
-            deduper.forget(gop, probe.matched_id)
+            deduper.forget(gop, probe.matched_id, scope=s)
         else:
             if (
                 cfg.write.dedup.on_hit == "keep_longest"
                 and len(content) > len(matched.content)
             ):
-                store.set_importance(matched.id, "deprecated")
-                deduper.forget(gop, matched.id)
+                store.set_importance(matched.id, "deprecated", scope=s)
+                deduper.forget(gop, matched.id, scope=s)
                 superseded_id = matched.id
             else:
                 store.ensure_indexed(matched)
@@ -138,6 +152,13 @@ def admit(
             event_time=event_time,
             trust=trust,
             created_at=created_at,
+            scope=s,
+            kind=kind,
+            status=status,
+            confidence=confidence,
+            expires_at=expires_at,
+            pinned=pinned,
+            verified_by_user=verified_by_user,
         )
     elif frame_type == "P":
         if base_id is None:
@@ -151,6 +172,13 @@ def admit(
             event_time=event_time,
             trust=trust,
             created_at=created_at,
+            scope=s,
+            kind=kind,
+            status=status,
+            confidence=confidence,
+            expires_at=expires_at,
+            pinned=pinned,
+            verified_by_user=verified_by_user,
         )
     elif frame_type == "B":
         if base_id is None:
@@ -164,16 +192,23 @@ def admit(
             event_time=event_time,
             trust=trust,
             created_at=created_at,
+            scope=s,
+            kind=kind,
+            status=status,
+            confidence=confidence,
+            expires_at=expires_at,
+            pinned=pinned,
+            verified_by_user=verified_by_user,
         )
     else:  # pragma: no cover
         raise ValueError(f"unknown frame_type {frame_type!r}")
 
     if deduper is not None and probe is not None:
-        deduper.record(gop, frame.id, probe.vector)
+        deduper.record(gop, frame.id, probe.vector, scope=s)
 
-    if kg is not None and is_recall_eligible(trust):
+    if kg is not None and is_recall_eligible(trust, expires_at=expires_at):
         for eid in entity_ids:
-            kg.link_entity_frame(eid, frame.id)
+            kg.link_entity_frame(eid, frame.id, scope=s)
 
     return AdmitResult(
         admitted=True,

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from gluomem.kg.normalizer import predicate_family
+from gluomem.storage.scope import MemoryScope
 from gluomem.timeutil import utc_key
 
 if TYPE_CHECKING:
@@ -41,7 +42,11 @@ def _allow_set(cfg: AppConfig) -> frozenset[str]:
 
 
 def _resolve_entity(
-    candidate: KGEntity, *, kg: KnowledgeGraph, cfg: AppConfig
+    candidate: KGEntity,
+    *,
+    kg: KnowledgeGraph,
+    cfg: AppConfig,
+    scope: MemoryScope | None = None,
 ) -> int | None:
     """Resolve one entity candidate to a valid KG entity ID (create if new)."""
     entity_type = candidate.entity_type
@@ -50,25 +55,34 @@ def _resolve_entity(
             if cfg.kg.entity_type_mode == "drop":
                 return None
             entity_type = cfg.kg.retype_to
-    existing = kg.find_valid_entities(candidate.name, cfg.kg, entity_type=entity_type)
+    existing = kg.find_valid_entities(
+        candidate.name, cfg.kg, entity_type=entity_type, scope=scope
+    )
     if existing:
         return existing[0].id
     created = kg.create_entity(
         entity_type,
         candidate.name,
         properties=dict(candidate.properties) or None,
+        scope=scope,
     )
     return created.id
 
 
-def _resolve_endpoint(name: str, *, kg: KnowledgeGraph, cfg: AppConfig) -> int | None:
+def _resolve_endpoint(
+    name: str,
+    *,
+    kg: KnowledgeGraph,
+    cfg: AppConfig,
+    scope: MemoryScope | None = None,
+) -> int | None:
     """Resolve a relation endpoint by name regardless of type (create untyped)."""
-    existing = kg.find_valid_entities(name, cfg.kg)
+    existing = kg.find_valid_entities(name, cfg.kg, scope=scope)
     if existing:
         return existing[0].id
     if cfg.kg.entity_type_mode == "drop":
         return None
-    return kg.create_entity(_UNTYPED, name).id
+    return kg.create_entity(_UNTYPED, name, scope=scope).id
 
 
 def cognify_text(
@@ -78,12 +92,13 @@ def cognify_text(
     kg: KnowledgeGraph,
     cfg: AppConfig,
     valid_from: str | None = None,
+    scope: MemoryScope | None = None,
 ) -> ResolvedGraph:
     """Extract and resolve entities and relations from ``text`` into the KG."""
     if not cfg.write.cognify.enabled:
         return ResolvedGraph()
     return resolve_cognify_result(
-        facade.cognify(text), kg=kg, cfg=cfg, valid_from=valid_from
+        facade.cognify(text), kg=kg, cfg=cfg, valid_from=valid_from, scope=scope
     )
 
 
@@ -95,6 +110,7 @@ def cognify_texts(
     cfg: AppConfig,
     valid_from_list: Sequence[str | None],
     max_workers: int,
+    scope: MemoryScope | None = None,
 ) -> list[ResolvedGraph | Exception]:
     """Batch cognify: LLM calls fan out; KG resolution stays sequential."""
     if not cfg.write.cognify.enabled:
@@ -128,7 +144,9 @@ def cognify_texts(
             out.append(result)
             continue
         out.append(
-            resolve_cognify_result(result, kg=kg, cfg=cfg, valid_from=valid_from)
+            resolve_cognify_result(
+                result, kg=kg, cfg=cfg, valid_from=valid_from, scope=scope
+            )
         )
     return out
 
@@ -139,12 +157,13 @@ def resolve_cognify_result(
     kg: KnowledgeGraph,
     cfg: AppConfig,
     valid_from: str | None = None,
+    scope: MemoryScope | None = None,
 ) -> ResolvedGraph:
     """Resolve one extraction result into KG IDs (single-threaded DB phase)."""
     entity_ids: list[int] = []
     name_to_id: dict[str, int] = {}
     for candidate in result.entities:
-        eid = _resolve_entity(candidate, kg=kg, cfg=cfg)
+        eid = _resolve_entity(candidate, kg=kg, cfg=cfg, scope=scope)
         if eid is None:
             continue
         if eid not in entity_ids:
@@ -156,12 +175,12 @@ def resolve_cognify_result(
     for rel in result.relations:
         source_id = name_to_id.get(rel.source)
         if source_id is None:
-            source_id = _resolve_endpoint(rel.source, kg=kg, cfg=cfg)
+            source_id = _resolve_endpoint(rel.source, kg=kg, cfg=cfg, scope=scope)
             if source_id is not None:
                 name_to_id[rel.source] = source_id
         target_id = name_to_id.get(rel.target)
         if target_id is None:
-            target_id = _resolve_endpoint(rel.target, kg=kg, cfg=cfg)
+            target_id = _resolve_endpoint(rel.target, kg=kg, cfg=cfg, scope=scope)
             if target_id is not None:
                 name_to_id[rel.target] = target_id
         if source_id is None or target_id is None:
@@ -173,24 +192,29 @@ def resolve_cognify_result(
                 rel.relation_type,
                 confidence=rel.confidence,
                 valid_from=valid_from,
+                scope=scope,
             )
         except Exception as exc:
             if not _is_integrity_error(exc):
                 raise
             existing = [
                 r
-                for r in kg.find_valid_relations(source_id, rel.relation_type)
+                for r in kg.find_valid_relations(
+                    source_id, rel.relation_type, scope=scope
+                )
                 if r.target_id == target_id
             ]
             if existing:
                 created = existing[0]
             else:
                 retired_row = kg.find_relation_by_triple(
-                    source_id, target_id, rel.relation_type
+                    source_id, target_id, rel.relation_type, scope=scope
                 )
                 if retired_row is None:
                     raise
-                created = kg.reopen_relation(retired_row.id, valid_from=valid_from)
+                created = kg.reopen_relation(
+                    retired_row.id, valid_from=valid_from, scope=scope
+                )
         if created.id not in relation_ids:
             relation_ids.append(created.id)
             relations.append(created)
@@ -205,6 +229,7 @@ def retire_conflicting_relations(
     *,
     kg: KnowledgeGraph,
     kg_cfg: KgConfig | None = None,
+    scope: MemoryScope | None = None,
 ) -> list[int]:
     """Functional-edge invalidation for ``(s, rtype, t_old != t_new)`` ordered by valid time."""
     retired: list[int] = []
@@ -214,7 +239,9 @@ def retire_conflicting_relations(
         else:
             rtypes = (rel.relation_type,)
         for rtype in rtypes:
-            for existing in kg.find_valid_relations(rel.source_id, rtype):
+            for existing in kg.find_valid_relations(
+                rel.source_id, rtype, scope=scope
+            ):
                 if (
                     existing.id == rel.id
                     or existing.target_id == rel.target_id
@@ -223,9 +250,13 @@ def retire_conflicting_relations(
                 ):
                     continue
                 if utc_key(rel.valid_from) >= utc_key(existing.valid_from):
-                    kg.retire_relation(existing.id, valid_to=rel.valid_from)
+                    kg.retire_relation(
+                        existing.id, valid_to=rel.valid_from, scope=scope
+                    )
                     retired.append(existing.id)
                 else:
-                    kg.retire_relation(rel.id, valid_to=existing.valid_from)
+                    kg.retire_relation(
+                        rel.id, valid_to=existing.valid_from, scope=scope
+                    )
                     retired.append(rel.id)
     return retired

@@ -11,7 +11,14 @@ from typing import Any, Literal
 import numpy as np
 
 from gluomem.extras import require
+from gluomem.search.multilingual import (
+    fold_multilingual_text,
+    fold_query_text,
+    fold_to_ascii,
+)
 from gluomem.storage.backend import assert_dim
+from gluomem.storage.scope import MemoryScope, resolve_scope
+from gluomem.timeutil import now_utc_iso, utc_key
 
 _PG_SCHEMA_PATH: Path = Path(__file__).with_name("schema_postgres.sql")
 _ALLOWED_VEC_TABLES: frozenset[str] = frozenset(
@@ -222,14 +229,51 @@ class PgVectorStore:
         if commit:
             self._backend.commit()
 
-    def search(self, query: np.ndarray, k: int) -> list[tuple[int, float]]:
+    def search(
+        self,
+        query: np.ndarray,
+        k: int,
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+    ) -> list[tuple[int, float]]:
         if k <= 0:
             return []
         f32 = assert_dim(query, self.dim)
+        eff_scope = resolve_scope(scope)
+        eff_now = utc_key(now_iso) if now_iso is not None else now_utc_iso()
+        if self.table == "memory_frames_vec":
+            sql = (
+                "SELECT v.rowid AS rowid, (v.embedding <-> ?) AS distance "
+                "FROM memory_frames_vec v "
+                "JOIN memory_frames m ON m.id = v.rowid "
+                "WHERE m.tenant_id = ? AND m.principal_id = ? AND m.namespace = ? "
+                "AND m.status = 'active' AND m.trust != 'quarantined' "
+                "AND (m.pinned = 1 OR m.expires_at IS NULL OR REPLACE(m.expires_at, ' ', 'T') > ?) "
+                "ORDER BY v.embedding <-> ? ASC, v.rowid ASC LIMIT ?"
+            )
+        else:
+            sql = (
+                "SELECT v.rowid AS rowid, (v.embedding <-> ?) AS distance "
+                "FROM memory_frame_chunks_vec v "
+                "JOIN memory_frame_chunks c ON c.id = v.rowid "
+                "JOIN memory_frames m ON m.id = c.frame_id "
+                "WHERE m.tenant_id = ? AND m.principal_id = ? AND m.namespace = ? "
+                "AND m.status = 'active' AND m.trust != 'quarantined' "
+                "AND (m.pinned = 1 OR m.expires_at IS NULL OR REPLACE(m.expires_at, ' ', 'T') > ?) "
+                "ORDER BY v.embedding <-> ? ASC, v.rowid ASC LIMIT ?"
+            )
         rows = self._backend.fetchall(
-            f"SELECT rowid, (embedding <-> ?) AS distance FROM {self.table} "
-            f"ORDER BY embedding <-> ? ASC, rowid ASC LIMIT ?",
-            (f32, f32, int(k)),
+            sql,
+            (
+                f32,
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+                eff_now,
+                f32,
+                int(k),
+            ),
         )
         return [(int(r["rowid"]), float(r["distance"])) for r in rows]
 
@@ -279,10 +323,17 @@ class PgTsVectorStore:
     def upsert(
         self, rowid: int, content: str, *, commit: bool = False
     ) -> None:
+        folded = fold_multilingual_text(content)
         self._backend.execute(
-            "INSERT INTO memory_frames_fts(rowid, content) VALUES (?, ?) "
-            "ON CONFLICT (rowid) DO UPDATE SET content = EXCLUDED.content",
-            (int(rowid), content),
+            "UPDATE memory_frames SET folded_content = ? WHERE id = ?",
+            (folded, int(rowid)),
+        )
+        self._backend.execute(
+            "INSERT INTO memory_frames_fts(rowid, content, folded_content) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT (rowid) DO UPDATE SET "
+            "content = EXCLUDED.content, folded_content = EXCLUDED.folded_content",
+            (int(rowid), content, folded),
         )
         if commit:
             self._backend.commit()
@@ -294,40 +345,97 @@ class PgTsVectorStore:
         if commit:
             self._backend.commit()
 
-    def search(self, sanitized_query: str, limit: int) -> list[int]:
+    def search(
+        self,
+        sanitized_query: str,
+        limit: int,
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+    ) -> list[int]:
         if not sanitized_query or limit <= 0:
             return []
         plain_terms = sanitized_query.replace('"', " ").strip()
         if not plain_terms:
             return []
+        folded_terms = fold_query_text(plain_terms) or plain_terms
+        eff_scope = resolve_scope(scope)
+        eff_now = utc_key(now_iso) if now_iso is not None else now_utc_iso()
+        tsq_expr = (
+            "(websearch_to_tsquery('simple', ?) || websearch_to_tsquery('english', ?))"
+        )
         rows = self._backend.fetchall(
-            "SELECT f.rowid AS rowid FROM memory_frames_fts f "
-            "JOIN memory_frames m ON m.id = f.rowid "
-            "WHERE f.tsv @@ websearch_to_tsquery('english', ?) "
-            "AND m.trust != 'quarantined' "
-            "ORDER BY ts_rank_cd(f.tsv, websearch_to_tsquery('english', ?)) DESC, f.rowid ASC "
-            "LIMIT ?",
-            (plain_terms, plain_terms, int(limit)),
+            f"SELECT f.rowid AS rowid FROM memory_frames_fts f "
+            f"JOIN memory_frames m ON m.id = f.rowid "
+            f"WHERE f.tsv @@ {tsq_expr} "
+            f"AND m.tenant_id = ? AND m.principal_id = ? AND m.namespace = ? "
+            f"AND m.status = 'active' AND m.trust != 'quarantined' "
+            f"AND (m.pinned = 1 OR m.expires_at IS NULL OR REPLACE(m.expires_at, ' ', 'T') > ?) "
+            f"ORDER BY ts_rank_cd(f.tsv, {tsq_expr}) DESC, f.rowid ASC "
+            f"LIMIT ?",
+            (
+                folded_terms,
+                plain_terms,
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+                eff_now,
+                folded_terms,
+                plain_terms,
+                int(limit),
+            ),
         )
         return [int(r["rowid"]) for r in rows]
 
-    def search_like(self, query: str | list[str], limit: int) -> list[int]:
+    def search_like(
+        self,
+        query: str | list[str],
+        limit: int,
+        *,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+    ) -> list[int]:
         if limit <= 0:
             return []
         tokens = [query] if isinstance(query, str) else query
         if not tokens:
             return []
-        clauses = " AND ".join(
-            "content LIKE ? ESCAPE '\\'" for _ in tokens
+        eff_scope = resolve_scope(scope)
+        eff_now = utc_key(now_iso) if now_iso is not None else now_utc_iso()
+
+        def _esc(s: str) -> str:
+            return (
+                "%"
+                + s.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+                + "%"
+            )
+
+        clause_parts: list[str] = []
+        params: list[Any] = []
+        for t in tokens:
+            raw_pat = _esc(t)
+            folded_pat = _esc(fold_to_ascii(t) or t)
+            clause_parts.append(
+                "(content LIKE ? ESCAPE '\\' OR folded_content LIKE ? ESCAPE '\\')"
+            )
+            params.extend([raw_pat, folded_pat])
+
+        clauses = " AND ".join(clause_parts)
+        params.extend(
+            [
+                eff_scope.tenant_id,
+                eff_scope.principal_id,
+                eff_scope.namespace,
+                eff_now,
+                int(limit),
+            ]
         )
-        params: list[Any] = [
-            "%" + t.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_") + "%"
-            for t in tokens
-        ]
-        params.append(int(limit))
         rows = self._backend.fetchall(
             f"SELECT id FROM memory_frames "
-            f"WHERE {clauses} AND trust != 'quarantined' "
+            f"WHERE {clauses} "
+            f"AND tenant_id = ? AND principal_id = ? AND namespace = ? "
+            f"AND status = 'active' AND trust != 'quarantined' "
+            f"AND (pinned = 1 OR expires_at IS NULL OR REPLACE(expires_at, ' ', 'T') > ?) "
             f"ORDER BY id ASC LIMIT ?",
             params,
         )
