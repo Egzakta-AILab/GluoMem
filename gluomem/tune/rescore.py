@@ -1,17 +1,16 @@
-"""Pure offline rescoring and IR metrics (`DESIGN.md` §9).
-
-Contains zero database, network, or model calls. Given a query's cached
-:class:`CandidateRow` list and a :class:`ParamVector`, :func:`rescore`
-recomputes RRF fusion and relevance weights in microseconds.
-"""
+"""Pure offline rescoring and IR metrics."""
 
 from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+from numpy.typing import NDArray
+
+from gluomem.search.scoring import contextual, importance, popularity, rrf, temporal
 from gluomem.tune.candidate_cache import CandidateCache, CandidateRow
 
 if TYPE_CHECKING:
@@ -72,9 +71,7 @@ class ParamVector:
         weights = cfg.scoring.profiles[prof_name].weights
         scoring = cfg.scoring
         resolved_pool = (
-            int(pool_size)
-            if pool_size is not None
-            else int(cfg.search.rerank.pool or 100)
+            int(pool_size) if pool_size is not None else int(cfg.search.rerank.pool or 100)
         )
         return cls(
             w_t=float(weights.temporal),
@@ -92,30 +89,14 @@ class ParamVector:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "w_t": self.w_t,
-            "w_p": self.w_p,
-            "w_c": self.w_c,
-            "w_i": self.w_i,
-            "rrf_k": self.rrf_k,
-            "half_life_days": self.half_life_days,
-            "flat_boost_days": self.flat_boost_days,
-            "log_coef": self.log_coef,
-            "bfs_steps": list(self.bfs_steps),
-            "bfs_depth": self.bfs_depth,
-            "importance_mult": dict(self.importance_mult),
-            "pool_size": self.pool_size,
-            "use_fts": self.use_fts,
-            "use_vec": self.use_vec,
-            "use_relevance": self.use_relevance,
-        }
+        return asdict(self)
 
     def to_config_overrides(self, profile: str = "balanced") -> dict[str, Any]:
         """Return dotted `AppConfig` overrides corresponding to this parameter vector."""
         return {
             "search.rrf_k": int(self.rrf_k),
-            "scoring.half_life_days": int(round(self.half_life_days)),
-            "scoring.flat_boost_days": int(round(self.flat_boost_days)),
+            "scoring.half_life_days": self.half_life_days,
+            "scoring.flat_boost_days": self.flat_boost_days,
             "scoring.log_coef": float(self.log_coef),
             "scoring.bfs_steps": [float(x) for x in self.bfs_steps],
             "scoring.bfs_depth": int(self.bfs_depth),
@@ -127,54 +108,26 @@ class ParamVector:
         }
 
 
-def _temporal(days: float, p: ParamVector) -> float:
-    if days <= p.flat_boost_days:
-        return 1.0
-    if p.half_life_days <= 0:
-        return 0.0
-    return 0.5 ** (days / p.half_life_days)
-
-
-def _popularity(access_count: int, p: ParamVector) -> float:
-    return 1.0 + math.log10(1 + max(0, access_count)) * p.log_coef
-
-
-def _contextual(distance: int, p: ParamVector) -> float:
-    if 0 <= distance <= p.bfs_depth and distance < len(p.bfs_steps):
-        return float(p.bfs_steps[distance])
-    return 0.0
-
-
-def _importance(level: str, p: ParamVector) -> float:
-    return float(p.importance_mult.get(level, 1.0))
-
-
-def rescore_scores(
-    rows: Sequence[CandidateRow], p: ParamVector
-) -> list[tuple[str, float]]:
+def rescore_scores(rows: Sequence[CandidateRow], p: ParamVector) -> list[tuple[str, float]]:
     """Compute `(doc_id, final_score)` sorted descending for `rows` under `p`."""
     scored: list[tuple[str, float, int]] = []
     for idx, r in enumerate(rows):
-        rrf = 0.0
-        if p.use_fts and r.fts_rank is not None and r.fts_rank >= 0:
-            rrf += 1.0 / (p.rrf_k + r.fts_rank)
-        if p.use_vec and r.vec_rank is not None and r.vec_rank >= 0:
-            rrf += 1.0 / (p.rrf_k + r.vec_rank)
-        if rrf <= 0.0:
+        fusion = rrf(r.fts_rank if p.use_fts else None, r.vec_rank if p.use_vec else None, p.rrf_k)
+        if fusion <= 0.0:
             continue
 
         if p.use_relevance:
             rel = (
-                p.w_t * _temporal(r.days_since_created, p)
-                + p.w_p * _popularity(r.access_count, p)
-                + p.w_c * _contextual(r.bfs_distance, p)
-                + p.w_i * _importance(r.importance_level, p)
+                p.w_t * temporal(r.days_since_created, p)
+                + p.w_p * popularity(r.access_count, p)
+                + p.w_c * contextual(r.bfs_distance, p)
+                + p.w_i * importance(r.importance_level, p)
             )
         else:
             rel = 1.0
 
         tie_id = r.frame_id if r.frame_id is not None else idx
-        scored.append((r.doc_id, rrf * rel, -int(tie_id)))
+        scored.append((r.doc_id, fusion * rel, -int(tie_id)))
 
     scored.sort(key=lambda item: (item[1], item[2]), reverse=True)
     limit = max(0, int(p.pool_size))
@@ -200,9 +153,7 @@ def _unique_top_k(ranked_doc_ids: Sequence[str], k: int) -> list[str]:
     return out
 
 
-def ndcg_at_k(
-    ranked_doc_ids: Sequence[str], qrel: Mapping[str, int], k: int
-) -> float:
+def ndcg_at_k(ranked_doc_ids: Sequence[str], qrel: Mapping[str, int], k: int) -> float:
     """Normalized Discounted Cumulative Gain at rank `k`."""
     positive_grades = sorted((int(g) for g in qrel.values() if int(g) > 0), reverse=True)
     if not positive_grades or k <= 0:
@@ -222,9 +173,7 @@ def ndcg_at_k(
     return dcg / idcg if idcg > 0.0 else 0.0
 
 
-def recall_at_k(
-    ranked_doc_ids: Sequence[str], qrel: Mapping[str, int], k: int
-) -> float:
+def recall_at_k(ranked_doc_ids: Sequence[str], qrel: Mapping[str, int], k: int) -> float:
     """Fraction of positive-grade documents retrieved in top `k`."""
     relevant = {doc_id for doc_id, grade in qrel.items() if int(grade) > 0}
     if not relevant or k <= 0:
@@ -233,9 +182,7 @@ def recall_at_k(
     return len(top_docs & relevant) / len(relevant)
 
 
-def hit_at_k(
-    ranked_doc_ids: Sequence[str], qrel: Mapping[str, int], k: int
-) -> float:
+def hit_at_k(ranked_doc_ids: Sequence[str], qrel: Mapping[str, int], k: int) -> float:
     """1.0 if at least one positive-grade document appears in top `k`, else 0.0."""
     relevant = {doc_id for doc_id, grade in qrel.items() if int(grade) > 0}
     if not relevant or k <= 0:
@@ -244,9 +191,7 @@ def hit_at_k(
     return 1.0 if (top_docs & relevant) else 0.0
 
 
-def mrr_at_k(
-    ranked_doc_ids: Sequence[str], qrel: Mapping[str, int], k: int
-) -> float:
+def mrr_at_k(ranked_doc_ids: Sequence[str], qrel: Mapping[str, int], k: int) -> float:
     """Mean Reciprocal Rank at `k`."""
     relevant = {doc_id for doc_id, grade in qrel.items() if int(grade) > 0}
     if not relevant or k <= 0:
@@ -258,25 +203,58 @@ def mrr_at_k(
     return 0.0
 
 
+def rescore_array_scores(cache: CandidateCache, p: ParamVector) -> NDArray[np.float64]:
+    """Score precomputed query arrays using the shared runtime signals."""
+    a = cache.arrays()
+    absent = np.full_like(a.fts, np.inf)
+    fusion = rrf(a.fts if p.use_fts else absent, a.vec if p.use_vec else absent, p.rrf_k)
+    if p.use_relevance and a.importance_levels:
+        imp = np.asarray([importance(level, p) for level in a.importance_levels])[a.importance]
+        rel = (
+            p.w_t * temporal(a.days, p)
+            + p.w_p * popularity(a.access, p)
+            + p.w_c * contextual(a.distance, p)
+            + p.w_i * imp
+        )
+        fusion = fusion * rel
+    present = ((a.fts < np.inf) & p.use_fts) | ((a.vec < np.inf) & p.use_vec)
+    return np.where(a.valid & present, fusion, -np.inf)
+
+
+def rescore_cache(cache: CandidateCache, p: ParamVector) -> dict[str, list[str]]:
+    """Rank all cached query arrays in one vectorized pass."""
+    scores = rescore_array_scores(cache, p)
+    order = np.lexsort((cache.arrays().ties, -scores), axis=1)
+    out = {}
+    for i, qid in enumerate(cache.query_ids()):
+        indices = order[i, : max(0, p.pool_size)]
+        indices = indices[np.isfinite(scores[i, indices])]
+        out[qid] = cache.arrays().doc_ids[i, indices].tolist()
+
+    return out
+
+
 def evaluate_cache(
     cache: CandidateCache,
     p: ParamVector,
     *,
     k: int = 10,
+    query_ids: Sequence[str] | None = None,
 ) -> dict[str, float]:
     """Compute mean `ndcg@k`, `recall@k`, `hit@k`, and `mrr@k` across `cache`."""
-    qids = cache.query_ids()
+    qids = list(query_ids) if query_ids is not None else cache.query_ids()
     if not qids:
         return {"ndcg": 0.0, "recall": 0.0, "hit": 0.0, "mrr": 0.0}
     ndcgs: list[float] = []
     recalls: list[float] = []
     hits: list[float] = []
     mrrs: list[float] = []
+    rankings = rescore_cache(cache, p)
     for qid in qids:
         qrel = cache.qrel(qid)
         if not qrel:
             continue
-        ranked = rescore(cache.rows(qid), p)
+        ranked = rankings[qid]
         ndcgs.append(ndcg_at_k(ranked, qrel, k))
         recalls.append(recall_at_k(ranked, qrel, k))
         hits.append(hit_at_k(ranked, qrel, k))

@@ -11,19 +11,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from gluomem.bench.fixture_helpers import contains_folded, fresh_store, load_pinned_fixture
 from gluomem.bench.metrics import MetricRegistry, objective_tag
 from gluomem.bench.registry import (
     BenchmarkEntry,
-    get_entry,
     manifest_record,
     protocol_id,
 )
 from gluomem.bench.types import Score
 from gluomem.embedding.fingerprint import fingerprint_of
-from gluomem.frames.store import FrameStore
 from gluomem.search.hybrid import HybridSearch
-from gluomem.search.multilingual import fold_multilingual_text
-from gluomem.storage.db import MindDB
 from gluomem.timeutil import parse_utc
 from gluomem.write.gate import InjectionScanner, admit
 
@@ -157,16 +154,9 @@ def load_replay_fixture(path: str | Path) -> tuple[list[ReplayHistory], str]:
 
 def load_registered_fixture(benchmark_id: str) -> tuple[BenchmarkEntry, list[ReplayHistory], str]:
     """Load a registry fixture and verify its pinned hash."""
-    entry = get_entry(benchmark_id)
-    path = REPLAY_FIXTURES.get(entry.id)
-    if path is None:
-        raise ReplayFixtureError(f"benchmark '{entry.id}' has no replay fixture")
-    histories, sha = load_replay_fixture(path)
-    if sha != entry.sha256:
-        raise ReplayFixtureError(
-            f"{path}: sha256 {sha} does not match the registry pin {entry.sha256}"
-        )
-    return entry, histories, sha
+    return load_pinned_fixture(
+        benchmark_id, REPLAY_FIXTURES, load_replay_fixture, ReplayFixtureError
+    )
 
 
 def _probe_scores(
@@ -179,14 +169,7 @@ def _probe_scores(
     out: dict[str, float | None] = {
         f"evidence_hit@{k}": 1.0 if any(eid in evidence for eid, _ in top) else 0.0,
         f"context_substring_match@{k}": (
-            1.0
-            if any(
-                a in text.lower()
-                or fold_multilingual_text(a) in fold_multilingual_text(text)
-                for a in answers
-                for _, text in top
-            )
-            else 0.0
+            1.0 if any(contains_folded(a, text) for a in answers for _, text in top) else 0.0
         ),
     }
     if stale:
@@ -218,17 +201,11 @@ class ReplayRunner:
         self._ks = tuple(sorted(set(ks)))
 
     def _history_rows(self, h: ReplayHistory) -> tuple[list[dict[str, Any]], int]:
-        db_path = self._work_dir / self._candidate / f"{h.history_id}.mind"
-        if db_path.exists():
-            raise FileExistsError(
-                f"{db_path} already exists; each candidate and history replays "
-                f"into a fresh store"
-            )
-        db_path.parent.mkdir(parents=True, exist_ok=True)
         cfg = self._cfg
-        db = MindDB(db_path, dim=cfg.storage.vector_dim)
-        try:
-            store = FrameStore(db, embedder=self._embedder, chunking=cfg.chunking)
+        with fresh_store(self._work_dir / self._candidate, h.history_id, cfg, self._embedder) as (
+            db,
+            store,
+        ):
             scanner = InjectionScanner(cfg.safety)
             frame_event: dict[int, str] = {}
             visible: list[str] = []
@@ -255,9 +232,7 @@ class ReplayRunner:
                         quarantined += 1
                     visible.append(event.event_id)
                     cursor += 1
-                not_ready = sorted(
-                    fid for fid in frame_event if not store.index_state(fid).ready
-                )
+                not_ready = sorted(fid for fid in frame_event if not store.index_state(fid).ready)
                 if not_ready:
                     raise ReplayNotReadyError(
                         f"{h.history_id}: frames {not_ready} are not indexed; "
@@ -283,15 +258,11 @@ class ReplayRunner:
                         "ready": True,
                         "retrieved": [eid for eid, _ in retrieved],
                         "abstained": result.abstained,
-                        "abstention": (
-                            result.abstention.as_dict() if result.abstention else None
-                        ),
+                        "abstention": (result.abstention.as_dict() if result.abstention else None),
                         "scores": dict(sorted(scores.items())),
                     }
                 )
             return rows, quarantined
-        finally:
-            db.close()
 
     def run(
         self, histories: Sequence[ReplayHistory], *, entry: BenchmarkEntry, dataset_sha: str
@@ -333,7 +304,14 @@ class ReplayRunner:
                 )
 
         return {
-            "label": NOT_OFFICIAL_LABEL if not entry.official else entry.title,
+            "label": NOT_OFFICIAL_LABEL
+            if entry.id == "mab_fixture"
+            else entry.title
+            + (
+                " (generated fixture; not an official benchmark result)"
+                if not entry.official
+                else ""
+            ),
             "official": entry.official,
             "benchmark": manifest_record(entry),
             "dataset_sha": dataset_sha,

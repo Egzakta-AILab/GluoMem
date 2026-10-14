@@ -34,9 +34,7 @@ SplitUnit = Literal["question", "history", "subtask_family"]
 Readiness = Literal["ready", "fixture", "blocked"]
 RunStatus = Literal["unrun", "fixture_only", "historical_unrescored"]
 
-WITHIN_HISTORY_LABEL = (
-    "within-history question sample (NOT independent-history generalization)"
-)
+WITHIN_HISTORY_LABEL = "within-history question sample (NOT independent-history generalization)"
 GROUPED_LABEL = "grouped by {unit}; independent only across source-disjoint entries"
 
 
@@ -74,6 +72,41 @@ class BenchmarkEntry:
     budget_usd: float | None
     dataset_key: str | None = None
     sha256: str | None = None
+
+
+def _generated_fixture(
+    entry_id: str,
+    title: str,
+    filename: str,
+    sha256: str,
+    *,
+    scorers: tuple[str, ...],
+    note: str,
+    capabilities: tuple[str, ...],
+) -> BenchmarkEntry:
+    if len(sha256) != 64:
+        raise RegistryError("generated fixtures require a sha256 pin")
+    return BenchmarkEntry(
+        id=entry_id,
+        version=1,
+        title=title,
+        revision=f"gluomem/bench/fixtures/{filename}",
+        source_ancestry=(f"gluomem-generated:{entry_id}",),
+        mode="adapted",
+        scorers=scorers,
+        scorer_note=note,
+        logical_clock="event_order",
+        capabilities=capabilities,
+        split_unit="history",
+        model_roles=("embedder",),
+        rights="Apache-2.0, authored for GluoMem; no external benchmark text",
+        readiness="fixture",
+        readiness_note="generated contract fixture; not an official benchmark result",
+        run_status="fixture_only",
+        official=False,
+        budget_usd=0.0,
+        sha256=sha256,
+    )
 
 
 def _entries() -> tuple[BenchmarkEntry, ...]:
@@ -156,90 +189,39 @@ def _entries() -> tuple[BenchmarkEntry, ...]:
             budget_usd=None,
             dataset_key="longmemeval_s",
         ),
-        BenchmarkEntry(
-            id="mab_fixture",
-            version=1,
-            title="Generated MemoryAgentBench-shaped replay fixture",
-            revision="gluomem/bench/fixtures/mab_tiny.json",
-            source_ancestry=("gluomem-generated:mab_tiny",),
-            mode="adapted",
+        _generated_fixture(
+            "mab_fixture",
+            "Generated MemoryAgentBench-shaped replay fixture",
+            "mab_tiny.json",
+            "1192a402561bcf606dca2b32d67c29f4fc641c1d6b7dc35e9ce81aaffea4c183",
             scorers=("evidence_hit@k", "context_substring_match@k", "current_over_stale@k"),
-            scorer_note=(
-                "retrieval-only: no reader model; substring match of accepted "
-                "answers against retrieved context, not MAB's reader-output scorers"
-            ),
-            logical_clock="event_order",
+            note="Retrieval-only replay; substring matches are not reader-output QA scores",
             capabilities=("accurate_retrieval", "conflict_resolution"),
-            split_unit="history",
-            model_roles=("embedder",),
-            rights="Apache-2.0, authored for GluoMem; contains no MemoryAgentBench text",
-            readiness="fixture",
-            readiness_note="contract fixture; not a benchmark result",
-            run_status="fixture_only",
-            official=False,
-            budget_usd=0.0,
-            sha256="1192a402561bcf606dca2b32d67c29f4fc641c1d6b7dc35e9ce81aaffea4c183",
         ),
-        BenchmarkEntry(
-            id="sr_en_kvark_v1",
-            version=1,
-            title="Generated Serbian/English KVARK replay fixture",
-            revision="gluomem/bench/fixtures/sr_en_kvark_v1.json",
-            source_ancestry=("gluomem-generated:sr_en_kvark_v1",),
-            mode="adapted",
+        _generated_fixture(
+            "sr_en_kvark_v1",
+            "Generated Serbian/English KVARK replay fixture",
+            "sr_en_kvark_v1.json",
+            "46898f31fcbb798478188ebb59f32397cb8f18d880fac86e7589b8c2a90cbbe4",
             scorers=("evidence_hit@k", "context_substring_match@k", "current_over_stale@k"),
-            scorer_note=(
-                "retrieval-only across Serbian Cyrillic, Serbian Latin with diacritics, "
-                "ASCII-folded Serbian, and English"
-            ),
-            logical_clock="event_order",
-            capabilities=(
-                "accurate_retrieval",
-                "conflict_resolution",
-                "cross_script_multilingual",
-            ),
-            split_unit="history",
-            model_roles=("embedder",),
-            rights="Apache-2.0, authored for GluoMem; bilingual Serbian/English fixture",
-            readiness="fixture",
-            readiness_note="bilingual contract fixture; not an official external benchmark result",
-            run_status="fixture_only",
-            official=False,
-            budget_usd=0.0,
-            sha256="d6e140556ceab3d6dcafe08baaaab61d778bc6c9dcda7c4d55cf6ae9e1e95bb0",
+            note="Retrieval-only across Serbian Cyrillic/Latin/ASCII and English",
+            capabilities=("accurate_retrieval", "conflict_resolution", "cross_script_multilingual"),
         ),
-        BenchmarkEntry(
-            id="minja_adversarial_v1",
-            version=1,
-            title="Generated MINJA-inspired adversarial memory poisoning fixture",
-            revision="gluomem/bench/fixtures/minja_adversarial_v1.json",
-            source_ancestry=("gluomem-generated:minja_adversarial_v1",),
-            mode="adapted",
+        _generated_fixture(
+            "minja_adversarial_v1",
+            "Generated MINJA-inspired adversarial memory poisoning fixture",
+            "minja_adversarial_v1.json",
+            "08d8bf6d2a79dddddd504bb1d2ee15bd2753bb8e6b86981007c27e618f82169c",
             scorers=(
                 "poison_admission_rate",
+                "unquarantined_persistence_rate@k",
                 "poison_recall_leak_rate@k",
+                "quarantine_recall_leak_rate@k",
                 "clean_recall_retention@k",
+                "benign_quarantine_rate",
             ),
-            scorer_note=(
-                "admission quarantine rate, recall leak rate, and clean memory retention "
-                "under prompt injection, bridging-step redirection, authority spoofing, "
-                "and Serbian injection"
-            ),
-            logical_clock="event_order",
-            capabilities=(
-                "adversarial_safety",
-                "memory_poisoning",
-                "multilingual_safety",
-            ),
-            split_unit="history",
-            model_roles=("embedder",),
-            rights="Apache-2.0, authored for GluoMem; MINJA-inspired safety fixture",
-            readiness="fixture",
-            readiness_note="adversarial safety fixture; not an official external benchmark result",
-            run_status="fixture_only",
-            official=False,
-            budget_usd=0.0,
-            sha256="4ec3141904da31dfe2e41c52eb358b7506dde8e28e04b44a67de3b6976b62342",
+            note="Poison admission/recall, quarantine leakage, retention and false positives",
+            capabilities=("adversarial_safety", "memory_poisoning", "multilingual_safety"),
         ),
         BenchmarkEntry(
             id="memoryagentbench",
@@ -319,17 +301,14 @@ def get_entry(benchmark_id: str) -> BenchmarkEntry:
     entry = REGISTRY.get(benchmark_id)
     if entry is None:
         raise RegistryError(
-            f"benchmark '{benchmark_id}' is not registered; known: "
-            f"{', '.join(sorted(REGISTRY))}"
+            f"benchmark '{benchmark_id}' is not registered; known: {', '.join(sorted(REGISTRY))}"
         )
     return entry
 
 
 def require_runnable(entry: BenchmarkEntry) -> None:
     if entry.readiness == "blocked":
-        raise RegistryError(
-            f"benchmark '{entry.id}' is blocked: {entry.readiness_note}"
-        )
+        raise RegistryError(f"benchmark '{entry.id}' is blocked: {entry.readiness_note}")
 
 
 def protocol_id(entry: BenchmarkEntry) -> str:

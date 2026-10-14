@@ -46,10 +46,11 @@ class InjectionScanner:
         matched: list[str] = []
         score = 0.0
         folded = fold_to_ascii(content)
+        needs_folded_pass = folded != content.lower()
         for pattern, weight in self._patterns:
             if (
                 pattern.search(content) is not None
-                or pattern.search(folded) is not None
+                or (needs_folded_pass and pattern.search(folded) is not None)
             ):
                 matched.append(pattern.pattern)
                 score = max(score, weight)

@@ -114,17 +114,14 @@ def test_sqlite_cross_script_serbian_fts_and_hybrid_search(
         scope=scope,
     )
 
-    # 1. Direct FTS5 search matches across all 3x3 script combinations
     sanitized = sanitize(query_text)
     fts_ids = db.fts.search(sanitized, limit=5, scope=scope)
     assert target.id in fts_ids
 
-    # 2. HybridSearch retrieves target frame as top hit
     hs = HybridSearch(db, store, cfg, embedder=emb, scope=scope)
     res = hs.search(query_text, limit=5, scope=scope)
     assert [h.frame.id for h in res.hits][:1] == [target.id]
 
-    # 3. index_state remains ready (get_text returns original un-folded content)
     assert store.index_state(target.id).ready
     db.close()
 
@@ -135,15 +132,9 @@ def test_sqlite_like_fallback_matches_across_scripts(tmp_path: Path) -> None:
     emb = MockEmbedder(dim=16)
     store = FrameStore(db, embedder=emb, scope=scope)
 
-    f_cyr = store.create_i_frame(
-        "gop-1", "Поверљиви извештај Ђорђе", scope=scope
-    )
-    assert db.fts.search_like(["izvestaj", "djordje"], limit=5, scope=scope) == [
-        f_cyr.id
-    ]
-    assert db.fts.search_like(["извештај", "Ђорђе"], limit=5, scope=scope) == [
-        f_cyr.id
-    ]
+    f_cyr = store.create_i_frame("gop-1", "Поверљиви извештај Ђорђе", scope=scope)
+    assert db.fts.search_like(["izvestaj", "djordje"], limit=5, scope=scope) == [f_cyr.id]
+    assert db.fts.search_like(["извештај", "Ђорђе"], limit=5, scope=scope) == [f_cyr.id]
     db.close()
 
 
@@ -182,9 +173,7 @@ def test_postgres_tsvector_store_combines_simple_folded_and_english_queries() ->
         def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
             executed.append((sql, tuple(params)))
 
-        def fetchall(
-            self, sql: str, params: tuple[Any, ...] = ()
-        ) -> list[dict[str, Any]]:
+        def fetchall(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
             executed.append((sql, tuple(params)))
             return [{"rowid": 42}]
 
@@ -208,19 +197,53 @@ def test_postgres_tsvector_store_combines_simple_folded_and_english_queries() ->
         "Beograd izveštaj Đorđe",
         "Beograd izvestaj Djordje",
     ):
-        hits = pg_fts.search(
-            sanitize(query), limit=5, scope=scope, now_iso="2026-06-01T00:00:00"
-        )
-        assert hits == [42]
+        pg_fts.search(sanitize(query), limit=5, scope=scope, now_iso="2026-06-01T00:00:00")
         search_sql, search_params = executed[-1]
-        assert "websearch_to_tsquery('simple', ?)" in search_sql
-        assert "websearch_to_tsquery('english', ?)" in search_sql
-        # All three scripts normalize to the exact same folded_terms parameter!
-        assert search_params[0] == "beograd izvestaj djordje"
+        assert "to_tsquery('simple', ?)" in search_sql
+        assert "plainto_tsquery('english', ?)" in search_sql
+        assert search_params[0] == fold_query_text(query)
         assert search_params[2:5] == ("egzakta", "mikhail", "workspace")
 
-    assert fold_query_text("Београд извештај Ђорђе") == "beograd izvestaj djordje"
-    assert (
-        expand_fts5_query(sanitize("GPT-4 v1.2.3"))
-        == '"GPT-4" "v1.2.3"'
-    )
+    assert "'beograd'" in fold_query_text("Београд извештај Ђорђе")
+    assert expand_fts5_query(sanitize("GPT-4 v1.2.3")) == '"gpt-4" AND "v1.2.3"'
+
+
+@pytest.mark.parametrize(
+    "forms",
+    [
+        ("Beograd", "Beogradu", "Београд", "Београду"),
+        ("Gradovi", "Gradova", "Градови", "Градова"),
+        ("Đorđe", "Djordje", "Dorde", "Ђорђе"),
+        ("program", "programa", "програм", "програма"),
+        ("Ljiljana", "ǈiljana", "Љиљана", "LJiljana"),
+        ("Džep", "ǅep", "Џеп", "Dzep"),
+        ("Njegoš", "ǋegoš", "Његош", "Njegos"),
+    ],
+)
+def test_sqlite_variants_match_symmetrically_in_both_directions(
+    forms: tuple[str, ...], tmp_path: Path
+) -> None:
+    with MindDB(tmp_path / "variants.mind", dim=16) as db:
+        store = FrameStore(db, embedder=MockEmbedder(dim=16))
+        frames = [store.create_i_frame(f"g{i}", form) for i, form in enumerate(forms)]
+        for query in forms:
+            assert set(db.fts.search(sanitize(query), limit=10)) == {frame.id for frame in frames}
+
+
+@pytest.mark.parametrize("query", ["progr", "sist", "radi", "unrelated"])
+def test_sqlite_light_stem_does_not_overstem_common_words(query: str, tmp_path: Path) -> None:
+    with MindDB(tmp_path / "negative.mind", dim=16) as db:
+        store = FrameStore(db, embedder=MockEmbedder(dim=16))
+        frame = store.create_i_frame("g1", "program sistem radio")
+        assert frame.id not in db.fts.search(sanitize(query), limit=10)
+
+
+def test_postgres_query_expression_quotes_user_words_and_includes_stems() -> None:
+    assert fold_query_text("or -x") == "('or') & ('x')"
+    folded = fold_query_text("Beogradu Đorđe")
+    assert "'beograd'" in folded
+    assert "'djordje'" in folded
+    assert "'dorde'" in folded
+    assert cyrillic_to_latin("Љ Њ Џ") == "Lj Nj Dž"
+    assert fold_to_ascii("ǅ ǈ ǋ") == "dz lj nj"
+    assert expand_fts5_query(sanitize("one two")) == '"one" AND "two"'

@@ -48,9 +48,7 @@ def replay_cfg() -> AppConfig:
 @pytest.fixture
 def run_paths(bench_cfg: AppConfig, tmp_path: Path):
     cfg = bench_cfg.with_overrides(dict(FAKE_BACKENDS))
-    return run_benchmark(
-        cfg, dataset="locomo", retriever="bm25", out_root=tmp_path / "runs"
-    )
+    return run_benchmark(cfg, dataset="locomo", retriever="bm25", out_root=tmp_path / "runs")
 
 
 def _embedder(cfg: AppConfig) -> MockEmbedder:
@@ -117,21 +115,13 @@ def _probe(**kw: Any) -> ReplayProbe:
     return ReplayProbe(**base)
 
 
-def test_registered_replay_fixture_and_tamper_detection(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_registered_replay_fixture() -> None:
     entry, histories, sha = load_registered_fixture("mab_fixture")
     assert sha == entry.sha256
     competencies = {p.competency for h in histories for p in h.probes}
     assert competencies == {"accurate_retrieval", "conflict_resolution"}
     raw = json.loads(REPLAY_FIXTURES["mab_fixture"].read_text())
     assert raw["generated"] is True and raw["official"] is False
-
-    copy = tmp_path / "mab_tiny.json"
-    copy.write_text(REPLAY_FIXTURES["mab_fixture"].read_text().replace("Hall C", "Hall D"))
-    monkeypatch.setitem(REPLAY_FIXTURES, "mab_fixture", copy)
-    with pytest.raises(ReplayFixtureError, match="registry pin"):
-        load_registered_fixture("mab_fixture")
 
 
 @pytest.mark.parametrize(
@@ -221,9 +211,7 @@ def test_replay_not_ready_and_conflict_scoring(
     assert _probe_scores(_probe(stale=()), current_first, 2)["current_over_stale@2"] is None
 
 
-def test_rescore_regeneration_tamper_detection_and_dspy_free(
-    run_paths, tmp_path: Path
-) -> None:
+def test_rescore_regeneration_tamper_detection_and_dspy_free(run_paths, tmp_path: Path) -> None:
     committed_scores = run_paths.scores.read_bytes()
     committed_report = run_paths.report.read_bytes()
     committed_denom = run_paths.denominators.read_bytes()

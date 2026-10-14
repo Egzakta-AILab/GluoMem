@@ -372,10 +372,12 @@ class PgTsVectorStore:
         plain_terms = sanitized_query.replace('"', " ").strip()
         if not plain_terms:
             return []
-        folded_terms = fold_query_text(plain_terms) or plain_terms
+        folded_terms = fold_query_text(plain_terms)
+        if not folded_terms:
+            return []
         eff_scope = resolve_scope(scope)
         eff_now = format_now_iso(now_iso)
-        tsq_expr = "(websearch_to_tsquery('simple', ?) || websearch_to_tsquery('english', ?))"
+        tsq_expr = "(to_tsquery('simple', ?) || plainto_tsquery('english', ?))"
         rows = self._backend.fetchall(
             f"SELECT f.rowid AS rowid FROM memory_frames_fts f "
             f"JOIN memory_frames m ON m.id = f.rowid "

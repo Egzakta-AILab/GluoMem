@@ -2,7 +2,7 @@
 
 ``gluomem ingest``, ``gluomem bench``, ``gluomem components`` (effective
 component readiness) and ``gluomem index`` (explicit embedding rebuild/adopt)
-are live; ``tune``/``ablate`` remain stubs. The module top stays dspy-free —
+are live; ``tune``/``ablate`` rescore cached candidates offline. The module top stays dspy-free —
 LLM backends are resolved lazily inside handlers (``make_extractors`` for
 ingest, the runner's backend dispatch for bench), so fake/none backends run fully offline, and the
 ``bench rescore``/``gate``/``sample``/``fetch`` handlers never touch dspy at
@@ -565,7 +565,8 @@ def _resolve_tune_cache(args: argparse.Namespace, cfg: AppConfig):  # noqa: ANN2
             db_dir=args.db_dir,
             dataset_name=getattr(args, "dataset", "locomo") or "locomo",
             sample_manifest=getattr(args, "sample_manifest", None),
-            lane_fetch=int(getattr(args, "lane_fetch", 100)),
+            lane_fetch=getattr(args, "lane_fetch", None),
+            limit=int(getattr(args, "limit", 10)),
         )
         if cache_dir is not None:
             cache.save(cache_dir)
@@ -591,7 +592,7 @@ def _cmd_tune(args: argparse.Namespace) -> int:
             metric=str(args.metric),
             profile=str(args.profile or cfg.search.default_profile),
             seed=int(args.seed),
-            enable_pruner=not bool(args.no_prune),
+            held_out_fraction=float(args.held_out_fraction),
         )
         result = run_optuna_tune(
             cache,
@@ -607,7 +608,7 @@ def _cmd_tune(args: argparse.Namespace) -> int:
         f"tuned {result.n_trials} trial(s) on {len(cache.query_ids())} query(s): "
         f"incumbent {result.metric}@{result.k}={result.incumbent_score:.4f} -> "
         f"best={result.best_score:.4f} (+{result.improvement:.4f}, "
-        f"trial #{result.best_trial_number}, {result.elapsed_ms:.1f}ms, model_calls=0)"
+        f"trial #{result.best_trial_number}, model_calls=0)"
     )
     return 0
 
@@ -640,13 +641,16 @@ def _cmd_ablate(args: argparse.Namespace) -> int:
 
 def _add_tune_and_ablate_parsers(sub: argparse._SubParsersAction) -> None:
     tune = sub.add_parser(
-        "tune", help="offline Tier-1 retrieval parameter tuning (Optuna TPE + Hyperband)"
+        "tune", help="offline Tier-1 retrieval parameter tuning (seeded Optuna TPE)"
     )
     tune.add_argument("--cache", default=None, help="candidate cache directory")
     tune.add_argument("--db-dir", default=None, help="per-conversation .mind dir to build cache")
     tune.add_argument("--dataset", default="locomo", help="dataset name when building cache")
     tune.add_argument("--sample-manifest", default=None, help="optional sample manifest JSON")
-    tune.add_argument("--lane-fetch", type=int, default=100, help="per-lane candidate pool size")
+    tune.add_argument(
+        "--lane-fetch", type=int, default=None,
+        help="per-lane pool (default: limit × multiplier)",
+    )
     tune.add_argument("--rebuild-cache", action="store_true", help="force cache rebuild")
     tune.add_argument("--out", default=None, help="output dir for manifest/trials/best_params")
     tune.add_argument("--trials", type=int, default=200, help="number of Optuna trials")
@@ -659,7 +663,10 @@ def _add_tune_and_ablate_parsers(sub: argparse._SubParsersAction) -> None:
     )
     tune.add_argument("--profile", default=None, help="scoring profile to tune")
     tune.add_argument("--seed", type=int, default=42, help="deterministic RNG seed")
-    tune.add_argument("--no-prune", action="store_true", help="disable Hyperband pruner")
+    tune.add_argument(
+        "--held-out-fraction", type=float, default=0.3, help="held-out query fraction"
+    )
+    tune.add_argument("--limit", type=int, default=10, help="cache retrieval limit")
     _add_config_args(tune)
 
     ablate = sub.add_parser(
@@ -669,7 +676,11 @@ def _add_tune_and_ablate_parsers(sub: argparse._SubParsersAction) -> None:
     ablate.add_argument("--db-dir", default=None, help="per-conversation .mind dir to build cache")
     ablate.add_argument("--dataset", default="locomo", help="dataset name when building cache")
     ablate.add_argument("--sample-manifest", default=None, help="optional sample manifest JSON")
-    ablate.add_argument("--lane-fetch", type=int, default=100, help="per-lane candidate pool size")
+    ablate.add_argument(
+        "--lane-fetch", type=int, default=None,
+        help="per-lane pool (default: limit × multiplier)",
+    )
+    ablate.add_argument("--limit", type=int, default=10, help="cache retrieval limit")
     ablate.add_argument("--rebuild-cache", action="store_true", help="force cache rebuild")
     ablate.add_argument("--out", default=None, help="output dir for ablation_report.json")
     ablate.add_argument("--k", type=int, default=10, help="cutoff k for metrics@k")

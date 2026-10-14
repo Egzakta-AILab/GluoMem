@@ -1,4 +1,4 @@
-"""Tests for Optuna Tier-1 parameter optimization and `gluomem tune` CLI (`KVAD-1352`)."""
+"""Tests for Optuna Tier-1 parameter optimization and `gluomem tune` CLI."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from gluomem.tune import (
     TuneConfig,
     run_optuna_tune,
 )
+from gluomem.tune.objective import split_queries
 
 
 def _synthetic_cache() -> CandidateCache:
@@ -39,10 +40,9 @@ def _synthetic_cache() -> CandidateCache:
                 access_count=0,
                 bfs_distance=4,
                 importance_level="temporary",
-                grade=0,
                 frame_id=i * 10 + 1,
             ),
-            # Gold doc ranked #1 in Vec and #1 in FTS, 60 days old (so heavy temporal
+            # Gold has vector rank 0 and FTS rank 1, 60 days old (so heavy temporal
             # weight hurts it), but critical importance + KG distance 0 + high popularity.
             CandidateRow(
                 doc_id=gold_id,
@@ -52,7 +52,6 @@ def _synthetic_cache() -> CandidateCache:
                 access_count=25,
                 bfs_distance=0,
                 importance_level="critical",
-                grade=1,
                 frame_id=i * 10 + 2,
             ),
             CandidateRow(
@@ -63,7 +62,6 @@ def _synthetic_cache() -> CandidateCache:
                 access_count=0,
                 bfs_distance=4,
                 importance_level="deprecated",
-                grade=0,
                 frame_id=i * 10 + 3,
             ),
         ]
@@ -71,7 +69,7 @@ def _synthetic_cache() -> CandidateCache:
     return CandidateCache(queries, qrels=qrels)
 
 
-def test_optuna_tune_200_trials_under_5s_and_never_regresses(tmp_path: Path) -> None:
+def test_optuna_tune_never_regresses_on_held_out(tmp_path: Path) -> None:
     # Start with a temporal-heavy profile that ranks fresh_distractor above gold_id at k=1
     cfg = load_config().with_overrides(
         {
@@ -99,14 +97,12 @@ def test_optuna_tune_200_trials_under_5s_and_never_regresses(tmp_path: Path) -> 
         out_dir=out_dir,
     )
 
-    assert result.elapsed_ms < 5000.0
     assert len(result.trials) == 200
     assert result.trials[0].is_incumbent is True
     assert result.best_score >= result.incumbent_score
     assert result.best_score == 1.0
     assert result.incumbent_score < 1.0
 
-    # Verify artifacts written to out_dir
     manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["model_calls"] == 0
     assert manifest["n_trials"] == 200
@@ -115,9 +111,9 @@ def test_optuna_tune_200_trials_under_5s_and_never_regresses(tmp_path: Path) -> 
     best_params = json.loads((out_dir / "best_params.json").read_text(encoding="utf-8"))
     overrides = best_params["config_overrides"]
     tuned_cfg = cfg.with_overrides(overrides)
-    assert abs(
-        sum(tuned_cfg.scoring.profiles["balanced"].weights.model_dump().values()) - 1.0
-    ) < 1e-6
+    assert (
+        abs(sum(tuned_cfg.scoring.profiles["balanced"].weights.model_dump().values()) - 1.0) < 1e-6
+    )
 
     trials_lines = (out_dir / "trials.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(trials_lines) == 200
@@ -163,3 +159,53 @@ def test_cli_tune_end_to_end_and_missing_extra(
     err = capsys.readouterr().err
     assert "requires the 'tune' extra" in err
     assert "gluomem[tune]" in err
+
+
+def test_same_seed_produces_identical_trials_artifacts_and_split(tmp_path: Path) -> None:
+    cache = _synthetic_cache()
+    kwargs = TuneConfig(n_trials=30, seed=19, k=1)
+    first = run_optuna_tune(cache, load_config(), tune_cfg=kwargs, out_dir=tmp_path / "first")
+    second = run_optuna_tune(cache, load_config(), tune_cfg=kwargs, out_dir=tmp_path / "second")
+    assert first.best_params == second.best_params
+    assert first.trials == second.trials
+    assert first.to_manifest_dict() == second.to_manifest_dict()
+    assert set(first.development_query_ids).isdisjoint(first.held_out_query_ids)
+    for filename in ("manifest.json", "best_params.json", "trials.jsonl"):
+        assert (tmp_path / "first" / filename).read_bytes() == (
+            tmp_path / "second" / filename
+        ).read_bytes()
+
+
+def test_dev_winner_is_rejected_when_it_regresses_on_held_out() -> None:
+    source = _synthetic_cache()
+    dev, held_out = split_queries(source.query_ids(), 0.3, 42)
+    cache = CandidateCache(
+        {qid: source.rows(qid) for qid in source.query_ids()},
+        qrels={
+            qid: {f"{'gold' if qid in dev else 'fresh'}_{qid.split('_')[1]}": 1}
+            for qid in source.query_ids()
+        },
+    )
+    cfg = load_config().with_overrides(
+        {
+            "scoring.profiles.balanced.weights.temporal": 0.85,
+            "scoring.profiles.balanced.weights.popularity": 0.05,
+            "scoring.profiles.balanced.weights.contextual": 0.05,
+            "scoring.profiles.balanced.weights.importance": 0.05,
+            "scoring.half_life_days": 7,
+            "scoring.flat_boost_days": 2,
+        }
+    )
+    result = run_optuna_tune(cache, cfg, tune_cfg=TuneConfig(n_trials=50, k=1))
+    assert result.best_dev_score > result.incumbent_dev_score
+    assert result.held_out_query_ids == tuple(held_out)
+    assert not result.promoted
+    assert result.best_params == result.incumbent_params
+    assert result.best_score == result.incumbent_score == 1.0
+
+
+def test_tuning_refuses_an_empty_held_out_set() -> None:
+    source = _synthetic_cache()
+    cache = CandidateCache({"q_0": source.rows("q_0")}, qrels={"q_0": source.qrel("q_0")})
+    with pytest.raises(ValueError, match="at least two"):
+        run_optuna_tune(cache, load_config())

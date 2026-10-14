@@ -246,8 +246,8 @@ def _default_scoring_profiles() -> dict[str, ScoringProfile]:
 
 
 class ScoringConfig(BaseModel):
-    half_life_days: int = 30
-    flat_boost_days: int = 7
+    half_life_days: float = 30
+    flat_boost_days: float = 7
     log_coef: float = 0.1
     bfs_steps: list[float] = Field(
         default_factory=lambda: [1.0, 0.7, 0.4, 0.2, 0.0]
@@ -358,43 +358,33 @@ class ScannerPattern(BaseModel):
 
 
 def _default_scanner_patterns() -> list[ScannerPattern]:
-    return [
-        ScannerPattern(
-            regex=r"(?i)ignore (all )?(previous|prior) (instructions|context)",
-            weight=1.0,
+    patterns = (
+        (
+            r"(?i)\b(?:ignore|disregard)\s+(?:(?:all|the|any|previous|prior|earlier|above)"
+            r"\s+)*(?:instructions?|context|rules|prompts?)\b"
         ),
-        ScannerPattern(regex=r"(?i)disregard (all )?(previous|prior)", weight=1.0),
-        ScannerPattern(
-            regex=r"(?i)you are now (in )?(developer|dan) mode", weight=1.0
+        r"(?i)\bforget\s+everything\s+(?:you were told|above|before)\b",
+        r"(?i)\byou are now (?:in )?(?:developer|dan) mode\b",
+        r"<\|im_start\|>",
+        r"(?i)\bBEGIN (?:ADMIN|SYSTEM)\b|\[(?:SYSTEM|ADMIN)\]|\bas the administrator\b",
+        r"(?i)\b(?:ADMIN|SYSTEM|SECURITY)[_ -](?:OVERRIDE|DIRECTIVE|INJECTION)\b",
+        (
+            r"(?i)\b(?:override|overwrite|replace)\s+(?:all\s+)?(?:stored|verified|system|"
+            r"user|prior)\s+(?:memory|memories|facts?|records?)\b"
         ),
-        ScannerPattern(regex=r"(?i)system prompt", weight=1.0),
-        ScannerPattern(regex=r"<\|im_start\|>", weight=1.0),
-        ScannerPattern(regex=r"(?i)\bBEGIN (ADMIN|SYSTEM)\b", weight=1.0),
-        ScannerPattern(
-            regex=(
-                r"(?i)\b(override|overwrite) (all )?"
-                r"(stored|verified|system|user|prior) "
-                r"(memory|memories|fact|facts|record|records)\b"
-            ),
-            weight=1.0,
+        (
+            r"(?i)\b(?:before|first|to verify|when asked)\b.{0,160}\b(?:exfiltrate|send|"
+            r"upload|override|overwrite|replace|redirect)\b.{0,100}\b(?:secrets?|"
+            r"credentials?|keys?|tokens?|answers?|memory|memories|records?)\b"
         ),
-        ScannerPattern(
-            regex=r"(?i)\b(ADMIN|SYSTEM|SECURITY)[_ -](OVERRIDE|DIRECTIVE|INJECTION)\b",
-            weight=1.0,
+        (
+            r"(?i)\b(?:ignorisi|zanemari|ne obaziri se na)\s+(?:(?:sve|sva|sva ta)\s+)"
+            r"?(?:prethodn[ae]|ranij[ae])\s+(?:instrukcije|uputstva|kontekst|promptove|"
+            r"pravila\s+(?:asistenta|bota|sistema))\b"
         ),
-        ScannerPattern(
-            regex=r"(?i)\bwhen asked about\b.+\balways (answer|respond|reply|state)\b",
-            weight=1.0,
-        ),
-        ScannerPattern(
-            regex=(
-                r"(?i)\b(ignorisi|zanemari) (sva )?"
-                r"(prethodna|ranija) (uputstva|instrukcije|pravila)\b"
-            ),
-            weight=1.0,
-        ),
-    ]
-
+        r"(?i)\bzaboravi sve (?:sto ti je receno|iznad|ranije)\b",
+    )
+    return [ScannerPattern(regex=pattern, weight=1.0) for pattern in patterns]
 
 class ScannerConfig(BaseModel):
     patterns: list[ScannerPattern] = Field(
