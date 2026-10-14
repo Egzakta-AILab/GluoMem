@@ -1,6 +1,6 @@
 """gluomem.bench.rescore — offline headline reproduction. NEVER imports dspy.
 
-Re-derives ``scores.json`` and ``report.md`` from a run directory's
+Re-derives ``scores.json``, ``denominators.json`` and ``report.md`` from a run directory's
 committed ``manifest.json`` + ``predictions.jsonl`` + ``judgments.jsonl``
 through the SAME ``compute_score_entries`` path the runner used — zero
 network, zero model calls, no dataset file needed (prediction rows are
@@ -17,9 +17,16 @@ import json
 from pathlib import Path
 from typing import Any
 
+from gluomem.bench.metrics import compute_denominators
 from gluomem.bench.report import render_report
 from gluomem.bench.runner import compute_score_entries
-from gluomem.bench.types import JudgeRecord, Prediction, RetrievedDoc, Sample
+from gluomem.bench.types import (
+    UNREGISTERED,
+    JudgeRecord,
+    Prediction,
+    RetrievedDoc,
+    Sample,
+)
 
 
 class RescoreMismatchError(RuntimeError):
@@ -48,6 +55,7 @@ def _prediction_from_row(row: dict[str, Any]) -> Prediction:
         completion_tokens=row["completion_tokens"],
         latency_ms=row["latency_ms"],
         abstention=row.get("abstention"),
+        failure=row.get("failure"),
     )
 
 
@@ -87,19 +95,36 @@ def rescore_run(run_dir: str | Path, *, check: bool = False) -> list[dict[str, A
                 f"written by different code"
             ) from exc
 
+    backbones = list(manifest["judge"]["backbones"])
+    # Pre-registry manifests carry neither key; their artifacts rescore as
+    # unregistered, with retrieval presumed applicable except full context.
+    protocol = manifest.get("protocol", UNREGISTERED)
+    retrieves = manifest.get("retrieves", manifest["retriever"] != "full_context")
     entries = compute_score_entries(
         predictions,
         records,
         samples,
-        backbones=list(manifest["judge"]["backbones"]),
+        backbones=backbones,
         judge_family=manifest["judge"]["family"],
         ks=list(manifest["retrieval_ks"]),
         dataset_sha=manifest["dataset_sha"],
+        protocol=protocol,
+        retrieves=retrieves,
+    )
+    denominators = compute_denominators(
+        predictions,
+        records,
+        samples,
+        backbones=backbones,
+        retrieves=retrieves,
+        excluded=manifest.get("excluded_from_pool"),
     )
     scores_text = json.dumps(entries, indent=2, sort_keys=True) + "\n"
-    report_text = render_report(entries, manifest)
+    denominators_text = json.dumps(denominators, indent=2, sort_keys=True) + "\n"
+    report_text = render_report(entries, manifest, denominators)
 
     scores_path = root / "scores.json"
+    denominators_path = root / "denominators.json"
     report_path = root / "report.md"
     if check:
         committed_scores = scores_path.read_text(encoding="utf-8")
@@ -109,6 +134,13 @@ def rescore_run(run_dir: str | Path, *, check: bool = False) -> list[dict[str, A
                 f"committed judgments re-derive — artifacts were tampered "
                 f"with or written by different code"
             )
+        if not denominators_path.is_file() or (
+            denominators_path.read_text(encoding="utf-8") != denominators_text
+        ):
+            raise RescoreMismatchError(
+                f"{denominators_path}: committed denominators are missing or "
+                f"diverge from what the committed predictions re-derive"
+            )
         committed_report = report_path.read_text(encoding="utf-8")
         if committed_report != report_text:
             raise RescoreMismatchError(
@@ -116,6 +148,7 @@ def rescore_run(run_dir: str | Path, *, check: bool = False) -> list[dict[str, A
             )
     else:
         scores_path.write_text(scores_text, encoding="utf-8")
+        denominators_path.write_text(denominators_text, encoding="utf-8")
         report_path.write_text(report_text, encoding="utf-8")
     return entries
 

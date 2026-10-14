@@ -401,6 +401,57 @@ def _cmd_bench_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_bench_replay(args: argparse.Namespace) -> int:
+    from gluomem.bench.registry import RegistryError
+    from gluomem.bench.replay import (
+        ReplayFixtureError,
+        ReplayNotReadyError,
+        run_replay_fixture,
+    )
+    from gluomem.embedding.providers import make_embedder
+
+    cfg = _config_from(args)
+    try:
+        receipt, digest = run_replay_fixture(
+            cfg,
+            benchmark_id=args.dataset,
+            embedder=make_embedder(cfg),
+            work_dir=args.work_dir,
+            out_dir=args.out,
+            candidate=args.candidate,
+        )
+    except (RegistryError, ReplayFixtureError, ReplayNotReadyError, FileExistsError) as exc:
+        print(f"gluomem bench: {exc}", file=sys.stderr)
+        return 1
+    print(receipt["label"])
+    print(f"receipt {args.out}/receipt.json sha256 {digest}")
+    return 0
+
+
+def _cmd_bench_registry(args: argparse.Namespace) -> int:  # noqa: ARG001
+    import json
+
+    from gluomem.bench.registry import (
+        REGISTRY,
+        manifest_record,
+        overlap_report,
+        registry_digest,
+    )
+
+    print(
+        json.dumps(
+            {
+                "digest": registry_digest(),
+                "entries": [manifest_record(e) for _, e in sorted(REGISTRY.items())],
+                "overlaps": overlap_report(REGISTRY),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _add_bench_parsers(sub: argparse._SubParsersAction) -> None:
     bench = sub.add_parser("bench", help="run / rescore benchmark evaluations")
     bench_sub = bench.add_subparsers(dest="bench_command")
@@ -487,8 +538,24 @@ def _add_bench_parsers(sub: argparse._SubParsersAction) -> None:
     )
     _add_config_args(verify)
 
+    replay = bench_sub.add_parser(
+        "replay",
+        help="replay a registered fixture in event order and write a receipt (offline)",
+    )
+    replay.add_argument("--dataset", default="mab_fixture", help="registry fixture id")
+    replay.add_argument("--work-dir", required=True, help="fresh dir for per-history stores")
+    replay.add_argument("--out", required=True, help="receipt output dir")
+    replay.add_argument("--candidate", default="baseline", help="candidate label")
+    _add_config_args(replay)
+
+    bench_sub.add_parser(
+        "registry", help="print the benchmark registry, digests and source overlaps"
+    )
+
 
 _BENCH_HANDLERS = {
+    "replay": _cmd_bench_replay,
+    "registry": _cmd_bench_registry,
     "run": _cmd_bench_run,
     "rescore": _cmd_bench_rescore,
     "gate": _cmd_bench_gate,

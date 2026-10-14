@@ -71,6 +71,13 @@ class Prediction:
     # gluomem adds the score contract (see ``AbstentionDecision``). Kept on
     # every prediction so no-evidence cases stay visible in the denominator.
     abstention: dict[str, Any] | None = None
+    # ``"error"`` or ``"timeout"`` when the retriever/reader raised; the
+    # sample stays in every denominator and scores zero.
+    failure: str | None = None
+
+
+# ProtocolTag.protocol for scores produced outside a registry entry.
+UNREGISTERED = "unregistered"
 
 
 @dataclass(frozen=True)
@@ -78,7 +85,9 @@ class ProtocolTag:
     """Provenance stamp on every Score; incompatible tags never aggregate.
 
     ``backbone`` is ``"none"`` for objective metrics, a registry name for
-    single judges, and the sorted ``+``-join for trio panels.
+    single judges, and the sorted ``+``-join for trio panels. ``protocol`` is
+    the registry stamp (``native:<id>@v<n>`` or ``adapted:<id>@v<n>``), so a
+    native and an adapted protocol over the same file never share a number.
     """
 
     metric_family: str
@@ -86,6 +95,7 @@ class ProtocolTag:
     judge_count: int
     backbone: str
     dataset_sha: str
+    protocol: str = UNREGISTERED
 
 
 @dataclass(frozen=True)
@@ -120,6 +130,7 @@ class RunPaths:
     judgments: Path
     scores: Path
     report: Path
+    denominators: Path
 
 
 @runtime_checkable
@@ -154,7 +165,9 @@ class DatasetAdapter(Protocol):
 @runtime_checkable
 class Retriever(Protocol):
     """Answers one Sample end-to-end (retrieve -> answer). gluomem + baselines
-    all implement this so they run under the identical harness."""
+    all implement this so they run under the identical harness. A retriever
+    that never retrieves (full context) sets ``retrieves = False`` so its
+    samples count as retrieval-not-applicable instead of zero."""
 
     name: str
 
@@ -171,6 +184,7 @@ class Judge(Protocol):
 
 
 __all__ = [
+    "UNREGISTERED",
     "AnswerFn",
     "DatasetAdapter",
     "Judge",

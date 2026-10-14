@@ -187,6 +187,20 @@ class LoCoMoAdapter:
             counts[s.category] = counts.get(s.category, 0) + 1
         return counts
 
+    def excluded_counts(self) -> dict[str, int]:
+        """Rows ``load`` drops, by reason (the pool-exclusion denominator)."""
+        counts = {"adversarial_category": 0, "missing_gold": 0}
+        for raw in self._raw_samples():
+            conv_id = str(raw.get("sample_id"))
+            for idx, row in enumerate(raw.get("qa", [])):
+                answer = row.get("answer")
+                gold = str(answer).strip() if answer is not None else ""
+                if self._parse_category(row, conv_id, idx) == 5:
+                    counts["adversarial_category"] += 1
+                elif not gold or gold.lower() == "undefined":
+                    counts["missing_gold"] += 1
+        return counts
+
     # --- conversation / dia bridges --------------------------------------------
 
     def conversations(self) -> list[Conversation]:

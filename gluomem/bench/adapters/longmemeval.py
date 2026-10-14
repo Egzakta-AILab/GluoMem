@@ -251,6 +251,10 @@ class LongMemEvalAdapter:
             counts[s.category] = counts.get(s.category, 0) + 1
         return counts
 
+    def excluded_counts(self) -> dict[str, int]:
+        """Every LongMemEval row is eligible; malformed rows raise instead."""
+        return {}
+
     # --- conversation / dia bridges -------------------------------------------
 
     def conversations(self) -> list[Conversation]:

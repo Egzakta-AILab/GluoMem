@@ -37,7 +37,8 @@ gluomem/
   kg/        graph.py  normalizer.py  temporal.py
   write/     gate.py  ingest.py  lanes.py  cognify.py                      # benchmark ingest only
   llm/       signatures.py  modules.py  router.py  judge.py  bootstrap.py  optimize.py
-  bench/     adapters/  retriever.py  judge.py  metrics.py  rescore.py  report.py  baselines.py
+  bench/     adapters/  fixtures/  registry.py  replay.py  retriever.py  judge.py  metrics.py
+             rescore.py  report.py  baselines.py
   tune/      candidate_cache.py  rescore.py  objective.py  two_tier.py  ltr.py
   cli.py  components.py  extras.py  timeutil.py
 conf/  artifacts/  benchmarks_data/  experiments/  tests/
@@ -298,16 +299,22 @@ class Retriever(Protocol):      def answer(self, s: Sample)->Prediction: ...   #
 class Judge(Protocol):          family:str; def score(self, s, p)->Score: ...
 
 @dataclass(frozen=True)
-class ProtocolTag: metric_family:str; judge_family:str; judge_count:int; backbone:str; dataset_sha:str
+class ProtocolTag: metric_family:str; judge_family:str; judge_count:int; backbone:str; dataset_sha:str; protocol:str
 @dataclass(frozen=True)
 class Score: value:float; tag:ProtocolTag; n:int
 
 class MetricRegistry:
     def aggregate(self, scores) -> Score:           # REFUSES to mix families
-        if len({(s.tag.metric_family,s.tag.judge_family,s.tag.backbone) for s in scores})>1:
+        if len({s.tag for s in scores})>1:          # protocol, family, judge, backbone, dataset
             raise IncompatibleMetricsError(...)
 ```
 **Baselines in-harness:** full-context (no memory), naive vector RAG, BM25-only. Offline rescore runs from committed `JudgeRecord`s plus the dataset SHA, offline against committed artifacts with no network or model calls. The report pivots on `ProtocolTag` (an F1 score cannot sit beside an LLM-judge accuracy). Tuning reuses these exact adapters and samples.
+
+**Registry.** `bench/registry.py` holds one versioned `BenchmarkEntry` per protocol: revision and hash (or the config key that pins it), source ancestry, `native` or `adapted` mode, scorer families, logical clock, capability tags, split unit, model roles, rights, readiness, run status and budget. A run copies the entry and its digest into `manifest.json`, and every `ProtocolTag.protocol` is `<mode>:<id>@v<version>`, so a native and an adapted protocol over the same file never share a number. Entries that share an ancestor (the LongMemEval variants with each other and with MemoryAgentBench) are reported by `overlap_report`, and `assert_disjoint` refuses them as each other's held-out set. Question-level samples from shared histories (LoCoMo, LongMemEval) are labeled within-history, never independent-history generalization. `blocked` entries (MemoryAgentBench, BEAM, MemoryArena) take part in overlap checks but the runner refuses them until a revision, hash and rights are pinned.
+
+**Denominators.** Every prediction is in the QA denominator, including a sample whose every judge call failed. Retrieval families cover every sample where retrieval applies; an empty result (no hits, abstention, reader failure) scores zero. Retrieval does not apply only when the sample has no evidence gold or the retriever never retrieves (full context); those counts, prediction failures by kind (`error`, `timeout`), abstentions by reason, missing judge records and adapter pool exclusions are written to `denominators.json` and rendered in the report. `bench rescore --check` re-derives and verifies the file.
+
+**Replay.** `bench/replay.py` runs sequential-ingestion protocols. For each probe it admits, through the normal write gate, only the events with `seq <= after_seq`; probe questions, accepted answers and later events never reach the write path. It refuses to query until every ingested frame's projections are ready, searches with the probe's logical time as the clock, and gives each (candidate, history) a fresh store. Scores are objective (`evidence_hit@k`, `context_substring_match@k`, and `current_over_stale@k` for conflicting updates), with no reader model. The bundled `mab_fixture` is generated MemoryAgentBench-shaped data under Apache-2.0; its receipt has no wall-clock fields and says it is not an official result. Interactive benchmarks need a trajectory runner; `TrajectoryEnvironment` names that seam (`reset`, `step`) and nothing implements it yet.
 
 ---
 
