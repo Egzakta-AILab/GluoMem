@@ -15,21 +15,30 @@ from pydantic_settings import (
     SettingsConfigDict,
 )
 
-from gluomem.config.variants import (
-    deep_merge,
-    dotted_to_nested,
-    merge_variant,
-    read_default_config,
-    read_yaml,
-)
-
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().with_name("default_config.yaml")
-_VARIANTS_DIR = _PROJECT_ROOT / "conf" / "variants"
 
 
-def _section_default(section: str, key: str) -> Any:
-    return read_default_config()[section][key]
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge ``override`` into a copy of ``base``."""
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def dotted_to_nested(overrides: dict[str, Any]) -> dict[str, Any]:
+    """Convert dotted keys (``"search.rrf_k"``) into a nested dict."""
+    nested: dict[str, Any] = {}
+    for dotted, value in overrides.items():
+        parts = dotted.split(".")
+        leaf: Any = value
+        for part in reversed(parts):
+            leaf = {part: leaf}
+        nested = _deep_merge(nested, leaf)
+    return nested
 
 
 class ModelEntry(BaseModel):
@@ -44,6 +53,73 @@ class ModelEntry(BaseModel):
     cost_per_1k_in: float | None = None
     cost_per_1k_out: float | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
+
+
+def _default_models() -> dict[str, ModelEntry]:
+    return {
+        "mock": ModelEntry(provider="fake", provider_model="sha256-pcg64", dim=None),
+        "minilm": ModelEntry(
+            provider="inprocess",
+            provider_model="sentence-transformers/all-MiniLM-L6-v2",
+            dim=384,
+        ),
+        "reranker": ModelEntry(
+            provider="inprocess",
+            provider_model="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        ),
+        "haiku": ModelEntry(
+            provider="openrouter",
+            provider_model="openrouter/anthropic/claude-haiku-4.5",
+            api_key_env="OPENROUTER_API_KEY",
+            cost_per_1k_in=0.001,
+            cost_per_1k_out=0.005,
+        ),
+        "sonnet": ModelEntry(
+            provider="openrouter",
+            provider_model="openrouter/anthropic/claude-sonnet-4.6",
+            api_key_env="OPENROUTER_API_KEY",
+        ),
+        "gpt4o": ModelEntry(
+            provider="openrouter",
+            provider_model="openrouter/openai/gpt-4o-2024-11-20",
+            api_key_env="OPENROUTER_API_KEY",
+        ),
+        "sonnet5": ModelEntry(
+            provider="openrouter",
+            provider_model="openrouter/anthropic/claude-sonnet-5",
+            api_key_env="OPENROUTER_API_KEY",
+            cost_per_1k_in=0.002,
+            cost_per_1k_out=0.010,
+        ),
+        "gpt5-mini": ModelEntry(
+            provider="openrouter",
+            provider_model="openrouter/openai/gpt-5.4-mini",
+            api_key_env="OPENROUTER_API_KEY",
+            cost_per_1k_in=0.00075,
+            cost_per_1k_out=0.0045,
+        ),
+        "qwen3": ModelEntry(
+            provider="openrouter",
+            provider_model="openrouter/qwen/qwen3.6-27b",
+            api_key_env="OPENROUTER_API_KEY",
+            cost_per_1k_in=0.000285,
+            cost_per_1k_out=0.0024,
+        ),
+        "deepseek-flash": ModelEntry(
+            provider="openrouter",
+            provider_model="openrouter/deepseek/deepseek-v4-flash",
+            api_key_env="OPENROUTER_API_KEY",
+            cost_per_1k_in=0.00009,
+            cost_per_1k_out=0.00018,
+        ),
+        "glm5": ModelEntry(
+            provider="openrouter",
+            provider_model="openrouter/z-ai/glm-5.2",
+            api_key_env="OPENROUTER_API_KEY",
+            cost_per_1k_in=0.00091,
+            cost_per_1k_out=0.00286,
+        ),
+    }
 
 
 class StorageConfig(BaseModel):
@@ -144,22 +220,50 @@ class ScoringProfile(BaseModel):
     weights: ProfileWeights = Field(default_factory=ProfileWeights)
 
 
+def _default_scoring_profiles() -> dict[str, ScoringProfile]:
+    return {
+        "balanced": ScoringProfile(
+            weights=ProfileWeights(
+                temporal=0.4, popularity=0.2, contextual=0.2, importance=0.2
+            )
+        ),
+        "recent": ScoringProfile(
+            weights=ProfileWeights(
+                temporal=0.6, popularity=0.1, contextual=0.2, importance=0.1
+            )
+        ),
+        "important": ScoringProfile(
+            weights=ProfileWeights(
+                temporal=0.1, popularity=0.1, contextual=0.2, importance=0.6
+            )
+        ),
+        "connected": ScoringProfile(
+            weights=ProfileWeights(
+                temporal=0.1, popularity=0.1, contextual=0.6, importance=0.2
+            )
+        ),
+    }
+
+
 class ScoringConfig(BaseModel):
     half_life_days: int = 30
     flat_boost_days: int = 7
     log_coef: float = 0.1
     bfs_steps: list[float] = Field(
-        default_factory=lambda: list(_section_default("scoring", "bfs_steps"))
+        default_factory=lambda: [1.0, 0.7, 0.4, 0.2, 0.0]
     )
     bfs_depth: int = 3
     importance_mult: dict[str, float] = Field(
-        default_factory=lambda: dict(_section_default("scoring", "importance_mult"))
+        default_factory=lambda: {
+            "critical": 2.0,
+            "important": 1.5,
+            "normal": 1.0,
+            "temporary": 0.7,
+            "deprecated": 0.3,
+        }
     )
     profiles: dict[str, ScoringProfile] = Field(
-        default_factory=lambda: {
-            k: ScoringProfile.model_validate(v)
-            for k, v in _section_default("scoring", "profiles").items()
-        }
+        default_factory=_default_scoring_profiles
     )
 
 
@@ -167,14 +271,42 @@ class KgConfig(BaseModel):
     seed_min_len: int = 2
     bfs_symmetric: bool = True
     alias_groups: list[list[str]] = Field(
-        default_factory=lambda: list(_section_default("kg", "alias_groups"))
+        default_factory=lambda: [
+            ["postgresql", "postgres", "pg"],
+            ["kubernetes", "k8s"],
+        ]
     )
     tech_allowlist: list[str] = Field(
-        default_factory=lambda: list(_section_default("kg", "tech_allowlist"))
+        default_factory=lambda: ["go", "ai", "ml", "db", "npm", "k8s"]
     )
     entity_type_mode: str = "retype"
     entity_type_allowlist: list[str] = Field(
-        default_factory=lambda: list(_section_default("kg", "entity_type_allowlist"))
+        default_factory=lambda: [
+            "person",
+            "organization",
+            "location",
+            "place",
+            "city",
+            "country",
+            "event",
+            "concept",
+            "object",
+            "activity",
+            "technology",
+            "product",
+            "group",
+            "animal",
+            "food",
+            "book",
+            "movie",
+            "artwork",
+            "game",
+            "project",
+            "skill",
+            "profession",
+            "vehicle",
+            "building",
+        ]
     )
     retype_to: str = "other"
     entity_type_prompt_enum: bool = False
@@ -225,12 +357,25 @@ class ScannerPattern(BaseModel):
     weight: float = Field(default=1.0, ge=0, le=1)
 
 
+def _default_scanner_patterns() -> list[ScannerPattern]:
+    return [
+        ScannerPattern(
+            regex=r"(?i)ignore (all )?(previous|prior) (instructions|context)",
+            weight=1.0,
+        ),
+        ScannerPattern(regex=r"(?i)disregard (all )?(previous|prior)", weight=1.0),
+        ScannerPattern(
+            regex=r"(?i)you are now (in )?(developer|dan) mode", weight=1.0
+        ),
+        ScannerPattern(regex=r"(?i)system prompt", weight=1.0),
+        ScannerPattern(regex=r"<\|im_start\|>", weight=1.0),
+        ScannerPattern(regex=r"(?i)\bBEGIN (ADMIN|SYSTEM)\b", weight=1.0),
+    ]
+
+
 class ScannerConfig(BaseModel):
     patterns: list[ScannerPattern] = Field(
-        default_factory=lambda: [
-            ScannerPattern.model_validate(p)
-            for p in _section_default("safety", "scanner")["patterns"]
-        ]
+        default_factory=_default_scanner_patterns
     )
 
 
@@ -363,6 +508,33 @@ class DspyTaskConfig(BaseModel):
     refine: dict[str, Any] | None = None
 
 
+def _default_dspy_tasks() -> dict[str, DspyTaskConfig]:
+    return {
+        "fact_extraction": DspyTaskConfig(
+            model="deepseek-flash",
+            module="predict",
+            temperature=0.0,
+            max_tokens=4096,
+        ),
+        "event_extraction": DspyTaskConfig(
+            model="deepseek-flash",
+            module="predict",
+            temperature=0.0,
+            refine={"enabled": False, "N": 2},
+        ),
+        "cognify": DspyTaskConfig(model="deepseek-flash", module="predict"),
+        "contradiction": DspyTaskConfig(
+            model="deepseek-flash", module="predict", temperature=0.0
+        ),
+        "answer": DspyTaskConfig(
+            model="deepseek-flash",
+            module="predict",
+            temperature=0.0,
+            max_tokens=1024,
+        ),
+    }
+
+
 class DspyOptimizerConfig(BaseModel):
     auto: str = "light"
 
@@ -379,12 +551,7 @@ class DspyConfig(BaseModel):
     reasoning_enabled: bool | None = False
     track_usage: bool = True
     cache: DspyCacheConfig = Field(default_factory=DspyCacheConfig)
-    tasks: dict[str, DspyTaskConfig] = Field(
-        default_factory=lambda: {
-            k: DspyTaskConfig.model_validate(v)
-            for k, v in _section_default("dspy", "tasks").items()
-        }
-    )
+    tasks: dict[str, DspyTaskConfig] = Field(default_factory=_default_dspy_tasks)
     optimizer: DspyOptimizerConfig = Field(default_factory=DspyOptimizerConfig)
     artifacts: DspyArtifactsConfig = Field(default_factory=DspyArtifactsConfig)
 
@@ -432,6 +599,26 @@ class BenchmarkDatasetEntry(BaseModel):
     file: str
 
 
+def _default_benchmark_datasets() -> dict[str, BenchmarkDatasetEntry]:
+    return {
+        "locomo": BenchmarkDatasetEntry(
+            url="https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json",
+            sha256="79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+            file="locomo10.json",
+        ),
+        "longmemeval_oracle": BenchmarkDatasetEntry(
+            url="https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json",
+            sha256="821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c",
+            file="longmemeval_oracle.json",
+        ),
+        "longmemeval_s": BenchmarkDatasetEntry(
+            url="https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json",
+            sha256="d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+            file="longmemeval_s_cleaned.json",
+        ),
+    }
+
+
 class BenchmarkFullContextConfig(BaseModel):
     max_chars: int = Field(default=120_000, ge=1)
     keep: str = "tail"
@@ -457,10 +644,7 @@ class BenchmarkConfig(BaseModel):
     )
     sample: BenchmarkSampleConfig = Field(default_factory=BenchmarkSampleConfig)
     datasets: dict[str, BenchmarkDatasetEntry] = Field(
-        default_factory=lambda: {
-            k: BenchmarkDatasetEntry.model_validate(v)
-            for k, v in _section_default("benchmark", "datasets").items()
-        }
+        default_factory=_default_benchmark_datasets
     )
     datasets_dir: str = "benchmarks_data"
     full_context: BenchmarkFullContextConfig = Field(
@@ -472,35 +656,38 @@ class BenchmarkConfig(BaseModel):
     ci_gate: BenchmarkCiGateConfig = Field(default_factory=BenchmarkCiGateConfig)
 
 
-class _DictSettingsSource(PydanticBaseSettingsSource):
-    """Settings source backed by a plain dict (used for the file/variant layer)."""
+class _PydanticDefaultsSource(PydanticBaseSettingsSource):
+    """Settings source backed by the Pydantic models' default values."""
 
-    def __init__(self, settings_cls: type[BaseSettings], data: dict[str, Any]) -> None:
+    def __init__(
+        self, settings_cls: type[BaseSettings], data: dict[str, Any]
+    ) -> None:
         super().__init__(settings_cls)
         self._data = data
 
     def get_field_value(
         self, field: Any, field_name: str
     ) -> tuple[Any, str, bool]:
-        value = self._data.get(field_name)
-        return value, field_name, value is not None
-
-    def prepare_field_value(
-        self,
-        field_name: str,
-        field: Any,
-        value: Any,
-        value_is_complex: bool,  # noqa: ARG002
-    ) -> Any:
-        return value
+        return self._data.get(field_name), field_name, False
 
     def __call__(self) -> dict[str, Any]:
-        out: dict[str, Any] = {}
-        for field_name in self.settings_cls.model_fields:
-            value = self._data.get(field_name)
-            if value is not None:
-                out[field_name] = value
-        return out
+        return dict(self._data)
+
+
+_PYDANTIC_DEFAULTS: dict[str, Any] = {
+    "models": {k: v.model_dump() for k, v in _default_models().items()},
+    "storage": StorageConfig().model_dump(),
+    "embedding": EmbeddingConfig().model_dump(),
+    "components": ComponentsConfig().model_dump(),
+    "chunking": ChunkingConfig().model_dump(),
+    "search": SearchConfig().model_dump(),
+    "scoring": ScoringConfig().model_dump(),
+    "kg": KgConfig().model_dump(),
+    "safety": SafetyConfig().model_dump(),
+    "write": WriteConfig().model_dump(),
+    "dspy": DspyConfig().model_dump(),
+    "benchmark": BenchmarkConfig().model_dump(),
+}
 
 
 class AppConfig(BaseSettings):
@@ -513,12 +700,7 @@ class AppConfig(BaseSettings):
         nested_model_default_partial_update=True,
     )
 
-    models: dict[str, ModelEntry] = Field(
-        default_factory=lambda: {
-            k: ModelEntry.model_validate(v)
-            for k, v in read_default_config()["models"].items()
-        }
-    )
+    models: dict[str, ModelEntry] = Field(default_factory=_default_models)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     components: ComponentsConfig = Field(default_factory=ComponentsConfig)
@@ -531,10 +713,24 @@ class AppConfig(BaseSettings):
     dspy: DspyConfig = Field(default_factory=DspyConfig)
     benchmark: BenchmarkConfig = Field(default_factory=BenchmarkConfig)
 
-    _load_path: Path | None = PrivateAttr(default=None)
-    _load_variant: str | None = PrivateAttr(default=None)
-    _load_variants_dir: Path | None = PrivateAttr(default=None)
     _load_overrides: dict[str, Any] = PrivateAttr(default_factory=dict)
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (
+            init_settings,
+            env_settings,
+            _PydanticDefaultsSource(settings_cls, _PYDANTIC_DEFAULTS),
+            dotenv_settings,
+            file_secret_settings,
+        )
 
     @model_validator(mode="after")
     def _validate_model_refs(self) -> AppConfig:
@@ -789,61 +985,19 @@ class AppConfig(BaseSettings):
     def with_overrides(self, overrides: dict[str, Any]) -> AppConfig:
         """Return a new validated ``AppConfig`` with dotted-key overrides on top."""
         merged = {**self._load_overrides, **overrides}
-        return load_config(
-            path=self._load_path,
-            variant=self._load_variant,
-            variants_dir=self._load_variants_dir,
-            overrides=merged,
-        )
+        return load_config(overrides=merged)
 
 
 def load_config(
-    path: str | Path | None = None,
-    variant: str | None = None,
     overrides: dict[str, Any] | None = None,
-    variants_dir: str | Path | None = None,
     env_file: str | Path | None = None,
 ) -> AppConfig:
-    """Load the typed ``AppConfig`` from the file layer + env + overrides."""
+    """Load the typed ``AppConfig`` from Pydantic defaults + env + overrides."""
     dotenv_path = Path(env_file) if env_file is not None else _PROJECT_ROOT / ".env"
     if dotenv_path.exists():
         dotenv.load_dotenv(dotenv_path, override=False)
 
-    yaml_path = Path(path) if path is not None else None
-    file_layer = read_default_config()
-    if yaml_path is not None:
-        file_layer = deep_merge(file_layer, read_yaml(yaml_path))
-
-    vdir = Path(variants_dir) if variants_dir is not None else _VARIANTS_DIR
-    if variant is not None:
-        file_layer = merge_variant(file_layer, variant, vdir)
-
     init_data = dotted_to_nested(overrides or {})
-    file_layer_final = file_layer
-
-    class _Cfg(AppConfig):
-        @classmethod
-        def settings_customise_sources(
-            cls,
-            settings_cls: type[BaseSettings],
-            init_settings: PydanticBaseSettingsSource,
-            env_settings: PydanticBaseSettingsSource,
-            dotenv_settings: PydanticBaseSettingsSource,
-            file_secret_settings: PydanticBaseSettingsSource,
-        ) -> tuple[PydanticBaseSettingsSource, ...]:
-            sources: list[PydanticBaseSettingsSource] = [
-                init_settings,
-                env_settings,
-            ]
-            if file_layer_final:
-                sources.append(_DictSettingsSource(settings_cls, file_layer_final))
-            sources.append(dotenv_settings)
-            sources.append(file_secret_settings)
-            return tuple(sources)
-
-    cfg = _Cfg(**init_data)
-    cfg._load_path = yaml_path
-    cfg._load_variant = variant
-    cfg._load_variants_dir = vdir
+    cfg = AppConfig(**init_data)
     cfg._load_overrides = dict(overrides or {})
     return cfg

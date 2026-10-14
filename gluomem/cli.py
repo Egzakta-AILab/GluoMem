@@ -51,7 +51,6 @@ def _parse_override(raw: str) -> tuple[str, object]:
 
 
 def _add_config_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--variant", default=None, help="config variant overlay name")
     parser.add_argument(
         "--override",
         action="append",
@@ -64,9 +63,7 @@ def _add_config_args(parser: argparse.ArgumentParser) -> None:
 def _config_from(args: argparse.Namespace) -> AppConfig:
     from gluomem.config.app_config import load_config
 
-    return load_config(
-        variant=args.variant, overrides=dict(args.override or [])
-    )
+    return load_config(overrides=dict(args.override or []))
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:

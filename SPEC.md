@@ -99,12 +99,12 @@ Out of scope: a production system. No production hardening, no SLAs, no multi-te
 
 ## 6. Configurability requirements (G2)
 
-- One typed config tree (`AppConfig`, pydantic-settings v2); sections `models, storage, embedding, chunking, search, scoring, kg, write, dspy, tuning, benchmark`.
-- Precedence: defaults < `conf/config.yaml` < variant overlays < env < CLI/override.
+- One typed config tree (`AppConfig`, pydantic-settings v2); sections `models, storage, embedding, chunking, search, scoring, kg, safety, write, dspy, benchmark`.
+- Precedence: Pydantic defaults < env < CLI/override.
 - **Model registry**: every embedder/LLM/judge by name. Profile weights are a validated simplex in config. Cross-validation (embedder dim == vector dim).
 - Ablations and sweeps inject overrides without editing files; each override is logged with its result row.
 
-The complete configuration surface is enumerated in `conf/config.yaml`.
+The complete configuration surface is defined in typed Pydantic models in `gluomem/config/app_config.py`.
 
 ## 7. LLM and tuning requirements (G3, G5)
 

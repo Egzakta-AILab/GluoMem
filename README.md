@@ -13,7 +13,7 @@ GluoMem is a research-stage Python library (version 0.0.1). It runs locally agai
 - **DSPy write path**: typed extraction behind an `Extractors` protocol, with deterministic fake extractors for offline tests, an admission gate (regex injection scanner, quarantine or reject), and an extraction cache. Quarantined frames are kept for inspection by id but excluded from search, current-state reads, graph linking and compaction ([eligibility rule](./gluomem/frames/eligibility.py)).
 - **Benchmark harness**: LoCoMo and LongMemEval (S and oracle) adapters, full-context, BM25 and vector-RAG baselines, an optional mem0 comparison, judge panels, protocol tags, offline rescore of a run directory, and usage accounting. A versioned [benchmark registry](./gluomem/bench/registry.py) records each protocol's source ancestry, native or adapted scorer, logical clock, split grouping, rights and readiness; scores from different protocols never aggregate, and overlapping sources (MemoryAgentBench reuses LongMemEval) are flagged. Every run writes `denominators.json`: an answerable sample with nothing retrieved scores zero, failures and timeouts stay in the denominator, and samples where retrieval does not apply are counted separately. `gluomem bench replay` replays a generated MemoryAgentBench-shaped fixture in event order into isolated stores and writes a reproducible receipt; it is a protocol test, not an official MemoryAgentBench result.
 - **Fail-closed components**: each embedder, reranker and LLM backend is built from the provider its config names, or construction raises; nothing falls back to the mock embedder. Test doubles (`provider: fake` embedders, `fake` backends) need `components.allow_fake: true`. A `.mind` file records the fingerprint of the embedder that wrote its vectors (implementation, model, revision, dim, preprocessing, index schema) and rejects any other embedder before reading or writing a vector. `gluomem components` prints the effective components and their readiness without secrets; `gluomem index rebuild` and `gluomem index adopt` are the explicit ways to change or record a file's embedder.
-- **Configuration**: one typed config tree (pydantic-settings, `GLUOMEM_` prefix). Precedence is `defaults < conf/config.yaml < variant < env < with_overrides()`.
+- **Configuration**: one typed config tree (`pydantic-settings`, `GLUOMEM_` prefix). Precedence is `Pydantic defaults < env < with_overrides()`.
 
 ## What is not implemented
 
@@ -36,7 +36,6 @@ The core package is small. Model-backed components are optional extras. When a c
 | `gluomem[embeddings]` | sentence-transformers MiniLM embedder and cross-encoder reranker | Downloads models from Hugging Face on first use |
 | `gluomem[postgres]` | `psycopg` and `pgvector` for PostgreSQL/pgvector storage backend | Connects via `storage.backend: postgres` and `storage.dsn` |
 | `gluomem[all]` | `llm`, `embeddings`, and `postgres` | All of the above |
-| `gluomem[mem0]` | mem0ai 2.0.11 comparison baseline | Benchmark comparison only |
 
 `gluomem.extras.status()` reports which extras are installed without importing or downloading anything.
 

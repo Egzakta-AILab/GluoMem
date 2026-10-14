@@ -10,7 +10,6 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.11",
     "pydantic-settings>=2.8",
-    "pyyaml>=6.0",
     "sqlite-vec>=0.1.6",
     "numpy>=1.26",
     "python-dotenv>=1.2.2",
@@ -26,9 +25,6 @@ llm = [
 ]
 embeddings = [
     "sentence-transformers>=3.0",
-]
-mem0 = [
-    "mem0ai==2.0.11",
 ]
 all = [
     "gluomem[postgres,llm,embeddings]",

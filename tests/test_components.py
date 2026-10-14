@@ -60,7 +60,7 @@ def extras_missing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_status_lists_every_extra() -> None:
-    assert set(extras.status()) == {"llm", "embeddings", "mem0", "postgres"}
+    assert set(extras.status()) == {"llm", "embeddings", "postgres"}
 
 
 def test_require_names_the_extra(no_model_packages: None) -> None:
