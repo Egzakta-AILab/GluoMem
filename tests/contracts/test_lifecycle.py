@@ -12,6 +12,7 @@ from gluomem.frames.lifecycle import (
     current_scope_generation,
     export_memories,
     forget_memory,
+    forget_scope,
     retract_source,
     version_lineage,
 )
@@ -387,3 +388,40 @@ def test_lineage_and_hash_are_scoped(frame_store, mind_db, mock_embedder):
         other.lineage(replacement.id)
     with pytest.raises(KeyError):
         other._content_hash_of(frame.id)
+
+
+def test_forget_scope_erases_all_scope_data_and_preserves_siblings(
+    frame_store, mind_db, mock_embedder, kg, cfg, assert_no_recall
+):
+    from gluomem.kg.graph import KnowledgeGraph
+    from gluomem.service.jobs import JobQueue
+
+    sibling_scope = MemoryScope("other", "user", "personal")
+    sibling_store = FrameStore(mind_db, mock_embedder, scope=sibling_scope)
+    sibling_kg = KnowledgeGraph(mind_db, scope=sibling_scope)
+    sibling_frame = ingest_source_event(
+        _evt("Sibling secret BETA.", "sib-1", scope=sibling_scope),
+        store=sibling_store,
+        cfg=cfg,
+    ).frames[0]
+    sibling_ent = sibling_kg.create_entity("secret", "BETA", scope=sibling_scope)
+    sibling_kg.link_entity_frame(sibling_ent.id, sibling_frame.id, scope=sibling_scope)
+
+    text = "Primary scope secret GAMMA."
+    evt = _evt(text, "pri-1")
+    frame = ingest_source_event(evt, store=frame_store, cfg=cfg).frames[0]
+    JobQueue(mind_db.backend).enqueue(dedup_key="pri-1:1", payload=evt.model_dump(mode="json"))
+    ent = kg.create_entity("secret", "GAMMA")
+    unlinked = kg.create_entity("project", "OrphanProject")
+    kg.link_entity_frame(ent.id, frame.id)
+    rel = kg.create_relation(unlinked.id, ent.id, "has_secret")
+
+    res = forget_scope(frame_store)
+    assert res.forgotten_frame_ids == [frame.id]
+    assert set(res.retired_entity_ids) == {ent.id, unlinked.id}
+    assert res.retired_relation_ids == [rel.id]
+    assert res.scope_generation == 1
+    assert_no_recall("GAMMA", db=mind_db, store=frame_store, kg=kg)
+    assert_no_recall("OrphanProject", db=mind_db, store=frame_store, kg=kg)
+    assert sibling_store.get_frame(sibling_frame.id).content == "Sibling secret BETA."
+    assert sibling_kg.get_entity(sibling_ent.id, scope=sibling_scope).name == "BETA"
