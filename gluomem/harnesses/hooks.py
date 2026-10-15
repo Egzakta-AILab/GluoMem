@@ -114,9 +114,7 @@ def handle_capture_hook(
         or payload.get("source_ref")
         or "hook:session"
     )
-    source_ref = (
-        session_id if ":" in session_id else f"session:{session_id}"
-    )
+    source_ref = session_id if ":" in session_id else f"session:{session_id}"
 
     messages: list[dict[str, Any]] = []
     raw_messages = payload.get("messages")

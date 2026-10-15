@@ -104,9 +104,7 @@ _DEFAULT_MEMORY_KIND: MemoryKind = "fact"
 class ExtractedClaimSpec(BaseModel):
     """One atomic, self-contained memory claim with its kind, provenance, and KG triples."""
 
-    text: str = Field(
-        description="Atomic statement that stands alone without unresolved pronouns."
-    )
+    text: str = Field(description="Atomic statement that stands alone without unresolved pronouns.")
     kind: MemoryKind = Field(
         default=_DEFAULT_MEMORY_KIND,
         description=(

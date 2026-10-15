@@ -64,8 +64,7 @@ def test_single_pass_source_event_extraction_and_kg_triples(frame_store, kg, cfg
                 message_id="m1",
                 role="user",
                 content=(
-                    "I always use dark mode in my IDEs. "
-                    "We decided to deploy Postgres 17 on Friday."
+                    "I always use dark mode in my IDEs. We decided to deploy Postgres 17 on Friday."
                 ),
             ),
             SourceEventMessage(

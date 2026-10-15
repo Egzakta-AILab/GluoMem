@@ -416,9 +416,7 @@ class SafetyConfig(BaseModel):
     block_threshold: float = 0.7
     fail_mode: str = "quarantine"
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
-    untrusted_sources: list[FrameSource] = Field(
-        default_factory=lambda: _REVIEWED_SOURCES.copy()
-    )
+    untrusted_sources: list[FrameSource] = Field(default_factory=lambda: _REVIEWED_SOURCES.copy())
 
 
 class CompactionConfig(BaseModel):
