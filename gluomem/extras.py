@@ -4,10 +4,10 @@ Core (SQLite, I/P/B frames, hybrid search, KG, scoring, fake extractors,
 mock embedder) needs no model packages. Model-backed and external storage
 features live behind optional extras declared in ``pyproject.toml``:
 
-- ``llm`` — DSPy extraction, QA answering, LLM judge, offline optimization
+- ``llm`` — DSPy extraction
 - ``embeddings`` — in-process MiniLM embeddings and cross-encoder reranking
+- ``classifier`` — zero-shot prompt-injection classifier (GLiNER2.5-multi)
 - ``postgres`` — PostgreSQL + pgvector storage and Alembic migrations
-- ``tune`` — offline retrieval tuning with Optuna
 - ``service`` — FastAPI service and HTTP client
 - ``all`` — all optional features
 """
@@ -19,19 +19,19 @@ import importlib.util
 EXTRAS: dict[str, tuple[tuple[str, ...], str]] = {
     "llm": (
         ("dspy",),
-        "DSPy extraction, QA answering, LLM judge, and prompt optimization",
+        "DSPy extraction",
     ),
     "embeddings": (
         ("sentence_transformers",),
         "in-process MiniLM embeddings and cross-encoder reranking",
     ),
+    "classifier": (
+        ("gliner2",),
+        "zero-shot prompt-injection classifier (GLiNER2.5-multi)",
+    ),
     "postgres": (
         ("psycopg", "pgvector", "alembic", "sqlalchemy"),
         "PostgreSQL + pgvector storage backend",
-    ),
-    "tune": (
-        ("optuna",),
-        "Offline retrieval parameter tuning with Optuna",
     ),
     "service": (
         ("fastapi", "uvicorn", "httpx"),

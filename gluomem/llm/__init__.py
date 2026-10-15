@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 from gluomem.llm.cache import CachedExtractors, ExtractionCacheMiss
 from gluomem.llm.fake import FakeExtractors, NullExtractors
 from gluomem.llm.outputs import (
-    AnswerResult,
     CognifyResult,
     ContradictionVerdict,
     ExtractedEvent,
@@ -24,7 +23,6 @@ from gluomem.llm.outputs import (
     Extractors,
     KGEntity,
     KGRelation,
-    Verdict,
 )
 
 if TYPE_CHECKING:
@@ -74,7 +72,6 @@ def make_extractors(cfg: AppConfig) -> Extractors:
 
 
 __all__ = [
-    "AnswerResult",
     "CachedExtractors",
     "CognifyResult",
     "ContradictionVerdict",
@@ -87,6 +84,5 @@ __all__ = [
     "KGEntity",
     "KGRelation",
     "NullExtractors",
-    "Verdict",
     "make_extractors",
 ]

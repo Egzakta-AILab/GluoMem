@@ -9,7 +9,7 @@ from gluomem.config.app_config import (
     AppConfig,
     reranker_calibration_id,
 )
-from gluomem.embedding.base import Embedder
+from gluomem.embedding.base import Embedder, embed_query_text
 from gluomem.embedding.compat import bind_embedder
 from gluomem.embedding.reranker import Reranker
 from gluomem.frames.eligibility import is_recall_eligible
@@ -312,7 +312,7 @@ class HybridSearch:
     ) -> list[int]:
         """Vector lane: chunk-level KNN primary, whole-frame KNN fallback."""
         s = resolve_scope(scope, default=self._scope)
-        qvec = self._embedder.embed(query)
+        qvec = embed_query_text(self._embedder, query)
         chunk_hits = self._chunks_vec.search(qvec, int(lane_fetch), scope=s, now_iso=now_iso)
         if chunk_hits:
             chunk_ids = [int(cid) for cid, _dist in chunk_hits]

@@ -165,20 +165,23 @@ def resolve_cognify_result(
         if eid not in entity_ids:
             entity_ids.append(eid)
         name_to_id.setdefault(candidate.name, eid)
+        name_to_id.setdefault(candidate.name.lower(), eid)
 
     relation_ids: list[int] = []
     relations: list[Relation] = []
     for rel in result.relations:
-        source_id = name_to_id.get(rel.source)
+        source_id = name_to_id.get(rel.source) or name_to_id.get(rel.source.lower())
         if source_id is None:
             source_id = _resolve_endpoint(rel.source, kg=kg, cfg=cfg, scope=scope)
             if source_id is not None:
                 name_to_id[rel.source] = source_id
-        target_id = name_to_id.get(rel.target)
+                name_to_id[rel.source.lower()] = source_id
+        target_id = name_to_id.get(rel.target) or name_to_id.get(rel.target.lower())
         if target_id is None:
             target_id = _resolve_endpoint(rel.target, kg=kg, cfg=cfg, scope=scope)
             if target_id is not None:
                 name_to_id[rel.target] = target_id
+                name_to_id[rel.target.lower()] = target_id
         if source_id is None or target_id is None:
             continue
         try:
@@ -244,3 +247,19 @@ def retire_conflicting_relations(
                     kg.retire_relation(rel.id, valid_to=existing.valid_from, scope=scope)
                     retired.append(rel.id)
     return retired
+
+
+def link_and_retire_resolved(
+    resolved: ResolvedGraph,
+    frame_id: int,
+    *,
+    kg: KnowledgeGraph,
+    cfg: AppConfig,
+    scope: MemoryScope | None = None,
+) -> list[int]:
+    """Link resolved entities and relations to ``frame_id`` and retire conflicting edges."""
+    for eid in resolved.entity_ids:
+        kg.link_entity_frame(eid, frame_id, scope=scope)
+    for rid in resolved.relation_ids:
+        kg.link_relation_frame(rid, frame_id, scope=scope)
+    return retire_conflicting_relations(resolved.relations, kg=kg, kg_cfg=cfg.kg, scope=scope)

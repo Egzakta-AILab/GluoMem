@@ -74,6 +74,71 @@ def test_lazy_construction_of_minilm_and_reranker() -> None:
     assert ce._model is None and isinstance(ce, Reranker)
 
 
+def test_multilingual_e5_small_registry_and_prefix_embedding() -> None:
+    cfg = AppConfig().with_overrides({"embedding.model": "multilingual_e5_small"})
+    entry = cfg.models["multilingual_e5_small"]
+    assert entry.provider == "inprocess"
+    assert entry.provider_model == "intfloat/multilingual-e5-small"
+    assert entry.dim == 384
+    assert entry.query_prefix == "query: "
+    assert entry.passage_prefix == "passage: "
+
+    emb = MockEmbedder(
+        dim=384,
+        query_prefix=entry.query_prefix,
+        passage_prefix=entry.passage_prefix,
+    )
+    plain = MockEmbedder(dim=384)
+    assert emb.fingerprint != plain.fingerprint
+    assert "query_prefix='query: '" in emb.fingerprint.preprocessing
+    assert "passage_prefix='passage: '" in emb.fingerprint.preprocessing
+
+    # embed() uses passage_prefix, embed_query() uses query_prefix
+    assert np.array_equal(emb.embed("hello"), plain.embed("passage: hello"))
+    assert np.array_equal(emb.embed_query("hello"), plain.embed("query: hello"))
+    assert not np.array_equal(emb.embed("hello"), emb.embed_query("hello"))
+    batch = emb.embed_batch(["alpha", "beta"])
+    assert np.array_equal(batch[0], plain.embed("passage: alpha"))
+    assert np.array_equal(batch[1], plain.embed("passage: beta"))
+
+
+def test_hybrid_search_uses_embed_query_for_prefixed_embedder(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    from pathlib import Path
+
+    from gluomem.frames.store import FrameStore
+    from gluomem.search.hybrid import HybridSearch
+    from gluomem.storage.db import MindDB
+
+    base_dir = Path(str(tmp_path))
+    db = MindDB(base_dir / "e5.mind", dim=384)
+    calls: list[tuple[str, str]] = []
+
+    class _TrackingPrefixedEmbedder(MockEmbedder):
+        def embed(self, text: str) -> np.ndarray:
+            calls.append(("passage", text))
+            return super().embed(text)
+
+        def embed_query(self, text: str) -> np.ndarray:
+            calls.append(("query", text))
+            return super().embed_query(text)
+
+    emb = _TrackingPrefixedEmbedder(
+        dim=384,
+        query_prefix="query: ",
+        passage_prefix="passage: ",
+    )
+    cfg = AppConfig().with_overrides({"search.rerank.enabled": False})
+    store = FrameStore(db, embedder=emb, chunking=cfg.chunking)
+    store.create_i_frame("g1", "Server backup runs at midnight UTC.")
+    hs = HybridSearch(db, store, cfg, embedder=emb)
+    res = hs.search("When does the backup run?", limit=3)
+    assert res.hits
+    assert ("query", "When does the backup run?") in calls
+    db.close()
+
+
 @pytest.mark.slow
 def test_real_minilm_and_crossencoder() -> None:
     emb = MiniLMEmbedder("sentence-transformers/all-MiniLM-L6-v2", dim=384)

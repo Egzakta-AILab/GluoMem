@@ -1,6 +1,6 @@
 # gluomem — Technical Design
 
-> Companion to `SPEC.md` and [`docs/research/PAPER.md`](./docs/research/PAPER.md). Scope is the memory package plus evaluation; production surfaces are out of scope (§11).
+> Companion to `SPEC.md` and the `gluomem-bench` evaluation repository (`docs/research/PAPER.md`). Scope is the memory engine; benchmark evaluation and tuning live in `gluomem-bench`.
 
 > **Implementation status (2026-10-14, version 0.0.1).** Tier-1 tuning (§9) and the `tune` and `ablate` commands are implemented; Tier-2 promotion and LambdaMART are not. Abstention lives in `search/hybrid.py`. Vector stores are `SqliteVecStore` (`storage/sqlite_vec.py`) and the pgvector HNSW store (`storage/postgres_backend.py`). The multi-principal service, worker and lifecycle (scope isolation, correct, forget, retract, review) are described in the README and `CONTEXT.md`. The `experiments/` run directories were never published. The README lists current scope and known limitations.
 

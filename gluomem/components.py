@@ -105,7 +105,13 @@ def _embedder_status(cfg: AppConfig) -> ComponentStatus:
         return ComponentStatus("embedder", "none", model=name, ready=False, reason=str(exc))
     base = {"provider": entry.provider, "model": entry.provider_model, "revision": entry.revision}
     if entry.provider == "fake":
-        fp = fingerprint_of(MockEmbedder(dim=dim)).as_dict()
+        fp = fingerprint_of(
+            MockEmbedder(
+                dim=dim,
+                query_prefix=entry.query_prefix,
+                passage_prefix=entry.passage_prefix,
+            )
+        ).as_dict()
         return ComponentStatus(
             "embedder",
             "gluomem.mock",
@@ -132,7 +138,13 @@ def _embedder_status(cfg: AppConfig) -> ComponentStatus:
             reason=f"model dim {entry.dim} != storage.vector_dim {dim}",
         )
     fp = fingerprint_of(
-        MiniLMEmbedder(entry.provider_model, dim=entry.dim, revision=entry.revision)
+        MiniLMEmbedder(
+            entry.provider_model,
+            dim=entry.dim,
+            revision=entry.revision,
+            query_prefix=entry.query_prefix,
+            passage_prefix=entry.passage_prefix,
+        )
     ).as_dict()
     if not is_available("embeddings"):
         return ComponentStatus(
@@ -144,6 +156,43 @@ def _embedder_status(cfg: AppConfig) -> ComponentStatus:
             fingerprint=fp,
         )
     return ComponentStatus("embedder", "sentence-transformers", **base, fingerprint=fp)
+
+
+def _classifier_status(cfg: AppConfig) -> ComponentStatus:
+    from gluomem.extras import is_available
+    from gluomem.write.gate import CLASSIFIER_PROVIDERS
+
+    clf = cfg.safety.scanner.classifier
+    if not clf.enabled:
+        return ComponentStatus("classifier", "disabled")
+    entry = cfg.models[clf.model]
+    base = {"provider": entry.provider, "model": entry.provider_model, "revision": entry.revision}
+    if entry.provider == "fake":
+        return ComponentStatus(
+            "classifier",
+            "gluomem.fake_classifier",
+            **base,
+            fake=True,
+            ready=False,
+            reason="test double (heuristic classifier)",
+        )
+    if entry.provider not in CLASSIFIER_PROVIDERS:
+        return ComponentStatus(
+            "classifier",
+            "none",
+            **base,
+            ready=False,
+            reason=f"provider {entry.provider!r} has no classifier implementation",
+        )
+    if not is_available("classifier"):
+        return ComponentStatus(
+            "classifier",
+            "gliner2.Classifier",
+            **base,
+            ready=False,
+            reason="'classifier' extra not installed",
+        )
+    return ComponentStatus("classifier", "gliner2.Classifier", **base)
 
 
 def _reranker_status(cfg: AppConfig) -> ComponentStatus:
@@ -211,22 +260,12 @@ def component_statuses(
 ) -> list[ComponentStatus]:
     """One status per active component role, without building any model."""
     env = os.environ if env is None else env
-    statuses = [_embedder_status(cfg), _reranker_status(cfg)]
-    answer = cfg.benchmark.answer
+    statuses = [_embedder_status(cfg), _reranker_status(cfg), _classifier_status(cfg)]
     for task, task_cfg in sorted(cfg.dspy.tasks.items()):
-        if task == answer.task:
-            continue
         statuses.append(
             _llm_status(
                 cfg, f"extraction:{task}", cfg.write.extraction_backend, task_cfg.model, env
             )
-        )
-    statuses.append(
-        _llm_status(cfg, "answer", answer.backend, cfg.dspy.tasks[answer.task].model, env)
-    )
-    for backbone in cfg.benchmark.judge.backbones:
-        statuses.append(
-            _llm_status(cfg, f"judge:{backbone}", cfg.benchmark.judge.backend, backbone, env)
         )
     return statuses
 

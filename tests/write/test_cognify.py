@@ -16,8 +16,8 @@ from gluomem.llm import (
     KGRelation,
 )
 from gluomem.write.cognify import cognify_text, retire_conflicting_relations
+from gluomem.write.conversation import Conversation, Session, Turn, ingest_conversation
 from gluomem.write.gate import InjectionScanner
-from gluomem.write.ingest import Conversation, Session, Turn, ingest_conversation
 
 
 def _facade(*results: CognifyResult) -> FakeExtractors:

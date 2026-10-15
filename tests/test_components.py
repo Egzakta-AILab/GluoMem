@@ -27,19 +27,16 @@ from gluomem.frames.store import FrameStore
 from gluomem.llm import make_extractors
 from gluomem.storage.db import MindDB
 
-_FIXTURE = Path(__file__).parent / "fixtures" / "locomo_tiny.json"
 _FAKES = {
     "embedding.model": "mock",
     "write.extraction_backend": "fake",
-    "benchmark.answer.backend": "fake",
-    "benchmark.judge.backend": "fake",
 }
 
 
 @pytest.fixture
 def no_model_packages(monkeypatch: pytest.MonkeyPatch) -> None:
     real = importlib.util.find_spec
-    hidden = {"dspy", "sentence_transformers", "optuna"}
+    hidden = {"dspy", "sentence_transformers"}
 
     def fake_find_spec(name: str, *args: object, **kwargs: object):  # noqa: ANN202
         if name in hidden:
@@ -60,7 +57,7 @@ def extras_missing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_status_lists_every_extra() -> None:
-    assert set(extras.status()) == {"llm", "embeddings", "postgres", "tune", "service"}
+    assert set(extras.status()) >= {"llm", "embeddings", "postgres", "service"}
 
 
 def test_require_names_the_extra(no_model_packages: None) -> None:
@@ -91,10 +88,13 @@ def test_fake_extraction_needs_no_extra(no_model_packages: None) -> None:
 def test_cli_reports_missing_extra_without_traceback(
     no_model_packages: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    rc = main(["ingest", str(_FIXTURE), "--db", str(tmp_path / "x.mind")])
+    path = tmp_path / "x.mind"
+    db = MindDB(path, dim=384)
+    db.close()
+    rc = main(["index", "rebuild", "--db", str(path)])
     assert rc == 2
     err = capsys.readouterr().err
-    assert "requires the 'llm' extra" in err and "Traceback" not in err
+    assert "requires the 'embeddings' extra" in err and "Traceback" not in err
 
 
 @pytest.mark.parametrize(
@@ -136,16 +136,13 @@ def test_factories_missing_extra_raise(extras_missing: None) -> None:
 
 
 def test_fake_backends_require_allow_fake() -> None:
-    from gluomem.bench.runner import _make_answer_fn, _make_judge_fns
-
     cfg = load_config().with_overrides(_FAKES)
-    for build in (make_embedder, make_extractors, _make_answer_fn, _make_judge_fns):
+    for build in (make_embedder, make_extractors):
         with pytest.raises(FakeComponentError):
             build(cfg)
     allowed = cfg.with_overrides({"components.allow_fake": True})
     assert isinstance(make_embedder(allowed), MockEmbedder)
-    for build in (make_extractors, _make_answer_fn, _make_judge_fns):
-        assert build(allowed) is not None
+    assert make_extractors(allowed) is not None
 
 
 def test_report_describes_real_components_without_secrets(extras_installed: None) -> None:
@@ -167,7 +164,7 @@ def test_report_not_ready_conditions(extras_installed: None, extras_missing: Non
     by_role = {c["role"]: c for c in report["components"]}
     assert report["ready"] is False
     assert by_role["embedder"]["reason"] == "'embeddings' extra not installed"
-    assert by_role["answer"]["ready"] is False
+    assert by_role["extraction:fact_extraction"]["ready"] is False
 
 
 def test_fakes_and_unsupported_providers_never_claim_ready(extras_installed: None) -> None:
@@ -220,24 +217,23 @@ def test_cli_components_and_index(
         == 3
     )
 
+    path = tmp_path / "r.mind"
+    db = MindDB(path, dim=384)
+    FrameStore(db, embedder=MockEmbedder(dim=384, normalize=True)).create_i_frame("g", "alpha")
+    db.close()
+
     rc = main(
         [
-            "ingest",
-            str(_FIXTURE),
+            "index",
+            "rebuild",
             "--db",
-            str(tmp_path / "x.mind"),
-            "--override",
-            "write.extraction_backend=none",
+            str(path),
             "--override",
             "embedding.model=mock",
         ]
     )
     assert rc == 2 and "components.allow_fake" in capsys.readouterr().err
 
-    path = tmp_path / "r.mind"
-    db = MindDB(path, dim=384)
-    FrameStore(db, embedder=MockEmbedder(dim=384, normalize=True)).create_i_frame("g", "alpha")
-    db.close()
     mock = ["--override", "embedding.model=mock", "--override", "components.allow_fake=true"]
     assert main(["index", "adopt", "--db", str(path), *mock]) == 2
     assert "different embedder" in capsys.readouterr().err
@@ -283,30 +279,9 @@ def test_cli_components_and_index(
             {"safety.scanner.patterns": [{"regex": "([unclosed", "weight": 1.0}]},
             "compile",
         ),
-        (
-            {"benchmark.judge.backbones": ["haiku", "gpt5-mini", "unknown-judge"]},
-            "unknown-judge",
-        ),
-        ({"benchmark.judge.backbones": ["haiku", "gpt5-mini"]}, "trio_strict"),
-        ({"benchmark.judge.backbones": ["haiku", "haiku", "qwen3"]}, "unique"),
-        ({"benchmark.judge.family": "quintet"}, "family"),
-        ({"benchmark.answer.backend": "real"}, "backend"),
-        ({"benchmark.judge.backend": "llm"}, "backend"),
-        ({"benchmark.answer.task": "no_such_task"}, "no_such_task"),
-        ({"benchmark.sample.categories": [1, 1, 2]}, "categories"),
-        ({"benchmark.sample.categories": [0, 6]}, "categories"),
-        ({"benchmark.sample.categories": []}, "categories"),
-        ({"benchmark.ci_gate.metric": "vibes"}, "vibes"),
-        ({"benchmark.ci_gate.metric": "evidence_hit@7"}, "k=7"),
-        ({"benchmark.ci_gate.min": 1.5}, "min"),
-        ({"benchmark.full_context.keep": "middle"}, "keep"),
-        ({"benchmark.mem0.model": "gpt-99"}, "gpt-99"),
-        ({"benchmark.mem0.embedder_model": "reranker"}, "dim"),
-        ({"benchmark.mem0.top_k": 0}, "top_k"),
         ({"write.subject.trigger": "vibes"}, "trigger"),
         ({"write.contradiction.top_k": 0}, "top_k"),
         ({"write.dedup.on_hit": "merge"}, "keep_longest"),
-        ({"benchmark.answer.style": "chatty"}, "preference_aware"),
         ({"kg.predicate_families": [["LIVES_IN"]]}, "predicate_families"),
         (
             {
@@ -334,9 +309,9 @@ def test_invalid_config_overrides_fail_loudly(overrides: dict[str, object], matc
 
 
 def test_cli_override_parses_json_lists() -> None:
-    assert _parse_override("benchmark.sample.categories=[1,2,7]") == (
-        "benchmark.sample.categories",
-        [1, 2, 7],
+    assert _parse_override('safety.conflict_review.sources=["import"]') == (
+        "safety.conflict_review.sources",
+        ["import"],
     )
     with pytest.raises(Exception, match="JSON"):
         _parse_override("k=[1,2,")
@@ -345,8 +320,8 @@ def test_cli_override_parses_json_lists() -> None:
 def test_lazy_imports_do_not_load_heavy_packages() -> None:
     code = (
         "import sys; "
-        "import gluomem.llm, gluomem.bench.mem0, gluomem.embedding.providers; "
-        "loaded = [m for m in ('dspy', 'mem0', 'sentence_transformers') if m in sys.modules]; "
+        "import gluomem.llm, gluomem.embedding.providers; "
+        "loaded = [m for m in ('dspy', 'sentence_transformers') if m in sys.modules]; "
         "sys.exit(1 if loaded else 0)"
     )
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)

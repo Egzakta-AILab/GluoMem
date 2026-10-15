@@ -50,6 +50,8 @@ class ModelEntry(BaseModel):
     provider_model: str
     revision: str | None = None
     dim: int | None = None
+    query_prefix: str = ""
+    passage_prefix: str = ""
     api_key_env: str | None = None
     api_base: str | None = None
     cost_per_1k_in: float | None = None
@@ -65,9 +67,26 @@ def _default_models() -> dict[str, ModelEntry]:
             provider_model="sentence-transformers/all-MiniLM-L6-v2",
             dim=384,
         ),
+        "multilingual_e5_small": ModelEntry(
+            provider="inprocess",
+            provider_model="intfloat/multilingual-e5-small",
+            revision="fd1525a9fd15316a2d503bf26ab031a61d056e98",
+            dim=384,
+            query_prefix="query: ",
+            passage_prefix="passage: ",
+        ),
         "reranker": ModelEntry(
             provider="inprocess",
             provider_model="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        ),
+        "gliner_multi": ModelEntry(
+            provider="inprocess",
+            provider_model="fastino/gliner2.5-multi-v1",
+            revision="cf5593a5d45e3bbf204b9df621b13b1c0cf25ee3",
+        ),
+        "fake_classifier": ModelEntry(
+            provider="fake",
+            provider_model="gliner2.5-heuristic-fake",
         ),
         "haiku": ModelEntry(
             provider="openrouter",
@@ -372,11 +391,32 @@ def _default_scanner_patterns() -> list[ScannerPattern]:
     return [ScannerPattern(regex=pattern, weight=1.0) for pattern in patterns]
 
 
+_REVIEWED_SOURCES: list[FrameSource] = ["import"]
+
+_DEFAULT_CLASSIFIER_ATTACK_LABELS: tuple[str, ...] = (
+    "instruction to ignore, override or replace earlier information",
+    "claims special authority, approval or priority",
+    "asks to send, route or reveal secrets or credentials",
+    "tells the assistant how to answer in the future",
+)
+
+
+class ClassifierScannerConfig(BaseModel):
+    """Zero-shot injection classifier config (`safety.scanner.classifier`)."""
+
+    enabled: bool = False
+    model: str = "gliner_multi"
+    review_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
+    reviewed_sources: list[FrameSource] = Field(default_factory=lambda: _REVIEWED_SOURCES.copy())
+    attack_labels: list[str] = Field(
+        default_factory=lambda: list(_DEFAULT_CLASSIFIER_ATTACK_LABELS)
+    )
+    benign_label: str = "normal factual note, conversation turn or status update"
+
+
 class ScannerConfig(BaseModel):
     patterns: list[ScannerPattern] = Field(default_factory=_default_scanner_patterns)
-
-
-_REVIEWED_SOURCES: list[FrameSource] = ["import"]
+    classifier: ClassifierScannerConfig = Field(default_factory=ClassifierScannerConfig)
 
 
 class ConflictReviewConfig(BaseModel):
@@ -532,12 +572,6 @@ def _default_dspy_tasks() -> dict[str, DspyTaskConfig]:
         ),
         "cognify": DspyTaskConfig(model="deepseek-flash", module="predict"),
         "contradiction": DspyTaskConfig(model="deepseek-flash", module="predict", temperature=0.0),
-        "answer": DspyTaskConfig(
-            model="deepseek-flash",
-            module="predict",
-            temperature=0.0,
-            max_tokens=1024,
-        ),
     }
 
 
@@ -560,97 +594,6 @@ class DspyConfig(BaseModel):
     tasks: dict[str, DspyTaskConfig] = Field(default_factory=_default_dspy_tasks)
     optimizer: DspyOptimizerConfig = Field(default_factory=DspyOptimizerConfig)
     artifacts: DspyArtifactsConfig = Field(default_factory=DspyArtifactsConfig)
-
-
-class BenchmarkJudgeConfig(BaseModel):
-    family: str = "trio_strict"
-    backbones: list[str] = Field(default_factory=lambda: ["haiku", "gpt5-mini", "qwen3"])
-    also_record_single: bool = True
-    backend: str = "dspy"
-
-
-class BenchmarkAnswerConfig(BaseModel):
-    task: str = "answer"
-    backend: str = "dspy"
-    context_k: int = Field(default=50, ge=1)
-    abstain_text: str = "I don't know."
-    style: str = "preference_aware"
-
-    @model_validator(mode="after")
-    def _check_style(self) -> BenchmarkAnswerConfig:
-        if self.style not in ("base", "preference_aware"):
-            raise ValueError(
-                f"benchmark.answer.style must be 'base' or 'preference_aware', got {self.style!r}"
-            )
-        return self
-
-
-class BenchmarkRetrievalConfig(BaseModel):
-    ks: list[int] = Field(default_factory=lambda: [5, 10])
-
-
-class BenchmarkSampleConfig(BaseModel):
-    per_category: int = Field(default=80, ge=1)
-    categories: list[int] = Field(default_factory=lambda: [1, 2, 3, 4])
-    seed: int = 42
-    manifest: str = "benchmarks_data/locomo_sample_seed42.json"
-
-
-class BenchmarkDatasetEntry(BaseModel):
-    url: str
-    sha256: str
-    file: str
-
-
-def _default_benchmark_datasets() -> dict[str, BenchmarkDatasetEntry]:
-    return {
-        "locomo": BenchmarkDatasetEntry(
-            url="https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json",
-            sha256="79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
-            file="locomo10.json",
-        ),
-        "longmemeval_oracle": BenchmarkDatasetEntry(
-            url="https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json",
-            sha256="821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c",
-            file="longmemeval_oracle.json",
-        ),
-        "longmemeval_s": BenchmarkDatasetEntry(
-            url="https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json",
-            sha256="d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
-            file="longmemeval_s_cleaned.json",
-        ),
-    }
-
-
-class BenchmarkFullContextConfig(BaseModel):
-    max_chars: int = Field(default=120_000, ge=1)
-    keep: str = "tail"
-
-
-class BenchmarkMem0Config(BaseModel):
-    model: str = "deepseek-flash"
-    embedder_model: str = "minilm"
-    top_k: int | None = Field(default=None, ge=1)
-    infer: bool = True
-
-
-class BenchmarkCiGateConfig(BaseModel):
-    metric: str = "evidence_hit@5"
-    min: float = 0.7
-
-
-class BenchmarkConfig(BaseModel):
-    judge: BenchmarkJudgeConfig = Field(default_factory=BenchmarkJudgeConfig)
-    answer: BenchmarkAnswerConfig = Field(default_factory=BenchmarkAnswerConfig)
-    retrieval: BenchmarkRetrievalConfig = Field(default_factory=BenchmarkRetrievalConfig)
-    sample: BenchmarkSampleConfig = Field(default_factory=BenchmarkSampleConfig)
-    datasets: dict[str, BenchmarkDatasetEntry] = Field(default_factory=_default_benchmark_datasets)
-    datasets_dir: str = "benchmarks_data"
-    full_context: BenchmarkFullContextConfig = Field(default_factory=BenchmarkFullContextConfig)
-    run_dir: str = "experiments"
-    parallelism: int = Field(default=8, ge=1)
-    mem0: BenchmarkMem0Config = Field(default_factory=BenchmarkMem0Config)
-    ci_gate: BenchmarkCiGateConfig = Field(default_factory=BenchmarkCiGateConfig)
 
 
 class _PydanticDefaultsSource(PydanticBaseSettingsSource):
@@ -679,7 +622,6 @@ _PYDANTIC_DEFAULTS: dict[str, Any] = {
     "safety": SafetyConfig().model_dump(),
     "write": WriteConfig().model_dump(),
     "dspy": DspyConfig().model_dump(),
-    "benchmark": BenchmarkConfig().model_dump(),
 }
 
 
@@ -710,7 +652,6 @@ class AppConfig(BaseSettings):
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     write: WriteConfig = Field(default_factory=WriteConfig)
     dspy: DspyConfig = Field(default_factory=DspyConfig)
-    benchmark: BenchmarkConfig = Field(default_factory=BenchmarkConfig)
 
     _load_overrides: dict[str, Any] = PrivateAttr(default_factory=dict)
 
@@ -736,6 +677,7 @@ class AppConfig(BaseSettings):
         refs: list[str] = [
             self.embedding.model,
             self.search.rerank.model,
+            self.safety.scanner.classifier.model,
             self.write.contradiction.model,
             self.dspy.default_model,
         ]
@@ -866,105 +808,6 @@ class AppConfig(BaseSettings):
                     f"safety.scanner.patterns[{i}].regex does not compile: "
                     f"{pattern.regex!r} ({exc})"
                 ) from exc
-        return self
-
-    @model_validator(mode="after")
-    def _validate_benchmark_refs(self) -> AppConfig:
-        judge = self.benchmark.judge
-        for name in judge.backbones:
-            if name not in self.models:
-                known = ", ".join(sorted(self.models)) or "(none)"
-                raise ValueError(
-                    f"benchmark.judge.backbones entry '{name}' not in model registry: {known}"
-                )
-        if len(set(judge.backbones)) != len(judge.backbones) or not judge.backbones:
-            raise ValueError(
-                f"benchmark.judge.backbones must be non-empty and unique, got: {judge.backbones}"
-            )
-        families = {"trio_strict", "single"}
-        if judge.family not in families:
-            raise ValueError(
-                f"benchmark.judge.family '{judge.family}' invalid; must be one "
-                f"of: {sorted(families)}"
-            )
-        if judge.family == "trio_strict" and len(judge.backbones) != 3:
-            raise ValueError(
-                f"benchmark.judge.family 'trio_strict' requires exactly 3 "
-                f"backbones, got {len(judge.backbones)}"
-            )
-        backends = {"dspy", "fake"}
-        for where, backend in (
-            ("benchmark.judge.backend", judge.backend),
-            ("benchmark.answer.backend", self.benchmark.answer.backend),
-        ):
-            if backend not in backends:
-                raise ValueError(f"{where} '{backend}' invalid; must be one of: {sorted(backends)}")
-        if self.benchmark.answer.task not in self.dspy.tasks:
-            raise ValueError(
-                f"benchmark.answer.task '{self.benchmark.answer.task}' not in "
-                f"dspy.tasks: {sorted(self.dspy.tasks)}"
-            )
-        keeps = {"head", "tail"}
-        if self.benchmark.full_context.keep not in keeps:
-            raise ValueError(
-                f"benchmark.full_context.keep "
-                f"'{self.benchmark.full_context.keep}' invalid; must be one "
-                f"of: {sorted(keeps)}"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _validate_benchmark_mem0(self) -> AppConfig:
-        mem0 = self.benchmark.mem0
-        for where, name in (
-            ("benchmark.mem0.model", mem0.model),
-            ("benchmark.mem0.embedder_model", mem0.embedder_model),
-        ):
-            if name not in self.models:
-                known = ", ".join(sorted(self.models)) or "(none)"
-                raise ValueError(f"{where} '{name}' not in model registry: {known}")
-        embedder = self.models[mem0.embedder_model]
-        if embedder.dim is None:
-            raise ValueError(
-                f"benchmark.mem0.embedder_model '{mem0.embedder_model}' has "
-                f"no dim in the registry; faiss needs embedding_model_dims"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _validate_benchmark_sample(self) -> AppConfig:
-        cats = self.benchmark.sample.categories
-        if not cats or len(set(cats)) != len(cats):
-            raise ValueError(
-                f"benchmark.sample.categories must be non-empty and unique, got: {cats}"
-            )
-        if not all(1 <= c <= 7 for c in cats):
-            raise ValueError(f"benchmark.sample.categories must be within 1..7, got: {cats}")
-        return self
-
-    @model_validator(mode="after")
-    def _validate_ci_gate(self) -> AppConfig:
-        gate = self.benchmark.ci_gate
-        m = re.fullmatch(
-            r"qa_accuracy|(?:precision|evidence_recall|evidence_hit)@(\d+)",
-            gate.metric,
-        )
-        if m is None:
-            raise ValueError(
-                f"benchmark.ci_gate.metric '{gate.metric}' invalid; must be "
-                f"'qa_accuracy' or one of precision|evidence_recall|"
-                f"evidence_hit '@k'"
-            )
-        if m.group(1) is not None:
-            k = int(m.group(1))
-            if k not in self.benchmark.retrieval.ks:
-                raise ValueError(
-                    f"benchmark.ci_gate.metric '{gate.metric}' uses k={k} "
-                    f"which is not computed (benchmark.retrieval.ks="
-                    f"{self.benchmark.retrieval.ks})"
-                )
-        if not 0.0 <= gate.min <= 1.0:
-            raise ValueError(f"benchmark.ci_gate.min {gate.min} must be within [0, 1]")
         return self
 
     def with_overrides(self, overrides: dict[str, Any]) -> AppConfig:

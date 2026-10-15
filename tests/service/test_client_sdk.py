@@ -10,7 +10,12 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from gluomem.client.sdk import AsyncGluoMemClient, GluoMemApiError, GluoMemClient
+from gluomem.client.sdk import (
+    AsyncGluoMemClient,
+    EmbeddedMemoryClient,
+    GluoMemApiError,
+    GluoMemClient,
+)
 from gluomem.config.app_config import AppConfig
 from gluomem.frames.store import FrameStore
 from gluomem.service.app import create_app
@@ -50,8 +55,14 @@ class _Calls:
         return call
 
 
-@pytest.fixture(params=["sync", "async"])
+@pytest.fixture(params=["sync", "async", "embedded"])
 def sdk(request: pytest.FixtureRequest, mind_db: MindDB, frame_store: FrameStore, cfg: AppConfig):
+    if request.param == "embedded":
+        with EmbeddedMemoryClient(
+            mind_db, frame_store, cfg=cfg, default_scope=frame_store.scope
+        ) as embedded:
+            yield _Calls(embedded)
+        return
     app = create_app(mind_db, frame_store, cfg=cfg, service_key="secret")
     with TestClient(app):
         if request.param == "sync":

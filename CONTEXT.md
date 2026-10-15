@@ -34,7 +34,7 @@
 | Scope Generation | `gluomem/frames/generation.py` (`current_scope_generation`, `bump_scope_generation`) |
 | Suppression Key | `gluomem/frames/content_hash.py` (`suppression_key`); tables `memory_frame_keys`, `memory_tombstone_keys` |
 | Hybrid Search | `gluomem/search/hybrid.py` (`HybridSearch`, `SearchHit`, `SearchResult`) |
-| Candidate Cache | `gluomem/tune/candidate_cache.py` (`CandidateRow`, `CandidateCache`, `build_candidate_cache`); candidates come from `HybridSearch.candidates` |
+| Conversation Ingest | `gluomem/write/conversation.py` (`Conversation`, `Session`, `Turn`, `ingest_conversation`) |
 
 ## Context Boundaries
 

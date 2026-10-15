@@ -51,12 +51,10 @@ def main() -> int:
         if not (package_dir / relative).is_file():
             print(f"FAIL: {relative} is not packaged", file=sys.stderr)
             return 1
-    for subpackage in ("service", "client", "tune", "migrations"):
+    for subpackage in ("service", "client", "migrations"):
         importlib.import_module(f"gluomem.{subpackage}")
     if args.expect_core_only:
-        loaded = {
-            name for name in ("fastapi", "optuna", "alembic", "sqlalchemy") if name in sys.modules
-        }
+        loaded = {name for name in ("fastapi", "alembic", "sqlalchemy") if name in sys.modules}
         if loaded:
             print(f"FAIL: core subpackage import loaded {sorted(loaded)}", file=sys.stderr)
             return 1
