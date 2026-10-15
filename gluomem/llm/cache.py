@@ -35,12 +35,16 @@ from typing import TYPE_CHECKING, TypeVar
 
 from gluomem.llm.outputs import (
     CognifyResult,
+    ConsolidationDecision,
     ContradictionVerdict,
+    ExtractedClaimSpec,
     ExtractedEvent,
     ExtractedFact,
+    StoredCandidate,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import datetime
 
     from gluomem.llm.outputs import Extractors
@@ -77,7 +81,7 @@ def _key(method: str, *parts: str) -> str:
 
 def _encode(method: str, value: object) -> object:
     """Typed output → JSON-native (dict / list of dict)."""
-    if method in ("extract_facts", "extract_profile", "extract_events"):
+    if method in ("extract_facts", "extract_profile", "extract_events", "extract_event_claims"):
         return [v.model_dump(mode="json") for v in value]  # type: ignore[union-attr]
     return value.model_dump(mode="json")  # type: ignore[union-attr]
 
@@ -88,10 +92,14 @@ def _decode(method: str, output: object) -> object:
         return [ExtractedFact.model_validate(x) for x in output]  # type: ignore[union-attr]
     if method == "extract_events":
         return [ExtractedEvent.model_validate(x) for x in output]  # type: ignore[union-attr]
+    if method == "extract_event_claims":
+        return [ExtractedClaimSpec.model_validate(x) for x in output]  # type: ignore[union-attr]
     if method == "cognify":
         return CognifyResult.model_validate(output)
     if method == "check_contradiction":
         return ContradictionVerdict.model_validate(output)
+    if method == "consolidate_claim":
+        return ConsolidationDecision.model_validate(output)
     raise ValueError(f"unknown cached method {method!r}")
 
 
@@ -222,6 +230,30 @@ class CachedExtractors:
             "check_contradiction",
             _key("check_contradiction", new_statement, stored_statement),
             lambda: self._inner.check_contradiction(new_statement, stored_statement),
+        )
+
+    def extract_event_claims(
+        self, source_text: str, *, reference_date: datetime | None = None
+    ) -> list[ExtractedClaimSpec]:
+        ref_str = reference_date.isoformat() if reference_date is not None else ""
+        return self._serve(
+            "extract_event_claims",
+            _key("extract_event_claims", source_text, ref_str),
+            lambda: self._inner.extract_event_claims(source_text, reference_date=reference_date),
+        )
+
+    def consolidate_claim(
+        self, new_claim: str, candidates: Sequence[StoredCandidate]
+    ) -> ConsolidationDecision:
+        cand_json = json.dumps(
+            [c.model_dump(mode="json") for c in candidates],
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        return self._serve(
+            "consolidate_claim",
+            _key("consolidate_claim", new_claim, cand_json),
+            lambda: self._inner.consolidate_claim(new_claim, candidates),
         )
 
 

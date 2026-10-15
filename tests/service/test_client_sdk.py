@@ -95,6 +95,7 @@ def test_sdk_full_lifecycle(
         event_id="decision",
         source_ref="chat",
         content="We decided to use PostgreSQL 18 for GluoMem.",
+        kind="decision",
     )
     original = ingested.frames[0]
     assert original.kind == "decision"
@@ -124,6 +125,7 @@ def test_sdk_full_lifecycle(
         event_id="ep-1",
         source_ref="chat-3",
         content="Yesterday a transient outage occurred.",
+        kind="episode",
         created_at="2026-01-01T00:00:00",
     ).frames[0]
     assert ep.kind == "episode"

@@ -86,6 +86,8 @@ def test_signature_fields_and_docstrings() -> None:
         "event_extraction",
         "cognify",
         "contradiction",
+        "event_claims",
+        "consolidate",
     }
 
 

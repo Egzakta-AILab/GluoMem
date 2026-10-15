@@ -37,18 +37,16 @@ gluomem/
              review.py  provenance.py  expiry.py  generation.py           # I/P/B + lifecycle
   embedding/ base.py  providers.py  chunker.py  reranker.py  fingerprint.py  compat.py
   search/    hybrid.py  scoring.py  sanitize.py  multilingual.py
-  kg/        graph.py  normalizer.py  temporal.py
-  write/     gate.py  events.py  classify.py  dedup.py  ingest.py  lanes.py  cognify.py
-  llm/       signatures.py  modules.py  router.py  judge.py  bootstrap.py  optimize.py
-  bench/     adapters/  fixtures/  registry.py  replay.py  retriever.py  judge.py  metrics.py
-             rescore.py  report.py  baselines.py
-  tune/      candidate_cache.py  rescore.py  objective.py  ablate.py
+  kg/        graph.py  normalizer.py
+  write/     gate.py  events.py  conversation.py  dedup.py  lanes.py  cognify.py
+  llm/       signatures.py  modules.py  outputs.py  cache.py  fake.py  router.py
+  harnesses/ tools.py  hooks.py
+  mcp/       server.py
   service/   app.py  auth.py  jobs.py  schemas.py  worker.py
   client/    models.py  sdk.py
   cli.py  components.py  extras.py  timeutil.py
-artifacts/  benchmarks_data/  tests/
+artifacts/  tests/
 ```
-Out of scope: MCP server, assistant lifecycle hooks, wiki compiler, enrichment/synth queue, identity/awareness layers, harvest adapters.
 
 ---
 

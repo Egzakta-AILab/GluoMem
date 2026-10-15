@@ -19,9 +19,14 @@ create-if-missing) before ``kg.create_relation``.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
+
+from gluomem.storage.scope import MemoryKind
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 # NOTE ON DOCSTRINGS: pydantic serializes each model's class docstring (and
 # every Field ``description``) into the JSON schema that DSPy inlines into the
@@ -93,6 +98,70 @@ class ContradictionVerdict(BaseModel):
     confidence: float = Field(default=1.0, ge=0, le=1)
 
 
+_DEFAULT_MEMORY_KIND: MemoryKind = "fact"
+
+
+class ExtractedClaimSpec(BaseModel):
+    """One atomic, self-contained memory claim with its kind, provenance, and KG triples."""
+
+    text: str = Field(description="Atomic statement that stands alone without unresolved pronouns.")
+    kind: MemoryKind = Field(
+        default=_DEFAULT_MEMORY_KIND,
+        description=(
+            "Memory kind: fact, profile, preference, decision, procedure, episode, "
+            "correction, or summary."
+        ),
+    )
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    event_date: datetime | None = Field(
+        default=None,
+        description="Absolute ISO date resolved against reference_date when applicable, else null.",
+    )
+    verbatim_span: str = Field(
+        default="",
+        description="Supporting quote from the source message.",
+    )
+    message_id: str | None = Field(
+        default=None,
+        description="Optional source message identifier.",
+    )
+    entities: list[KGEntity] = Field(default_factory=list)
+    relations: list[KGRelation] = Field(default_factory=list)
+
+
+class StoredCandidate(BaseModel):
+    """One existing active memory frame considered during consolidation."""
+
+    frame_id: int
+    content: str
+    kind: MemoryKind = "fact"
+    source: str = "user_stated"
+    event_time: str | None = None
+
+
+ConsolidationAction = Literal["ADD", "SUPERSEDE", "NOOP", "CANDIDATE"]
+
+
+class ConsolidationDecision(BaseModel):
+    """How a newly extracted claim relates to existing stored memory candidates."""
+
+    action: ConsolidationAction = Field(
+        default="ADD",
+        description=(
+            "ADD if new information, NOOP if already captured by target_frame_id, "
+            "SUPERSEDE if it updates/replaces target_frame_id, or CANDIDATE if ambiguous."
+        ),
+    )
+    target_frame_id: int | None = Field(
+        default=None,
+        description="Frame id being matched (NOOP) or replaced (SUPERSEDE/CANDIDATE), else null.",
+    )
+    rationale: str = Field(
+        default="",
+        description="Brief explanation of why this consolidation action was chosen.",
+    )
+
+
 class ExtractionError(RuntimeError):
     """Raised when an extraction task fails after retries are exhausted."""
 
@@ -114,3 +183,11 @@ class Extractors(Protocol):
     def check_contradiction(
         self, new_statement: str, stored_statement: str
     ) -> ContradictionVerdict: ...
+
+    def extract_event_claims(
+        self, source_text: str, *, reference_date: datetime | None = None
+    ) -> list[ExtractedClaimSpec]: ...
+
+    def consolidate_claim(
+        self, new_claim: str, candidates: Sequence[StoredCandidate]
+    ) -> ConsolidationDecision: ...

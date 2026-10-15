@@ -309,8 +309,8 @@ def test_invalid_config_overrides_fail_loudly(overrides: dict[str, object], matc
 
 
 def test_cli_override_parses_json_lists() -> None:
-    assert _parse_override('safety.conflict_review.sources=["import"]') == (
-        "safety.conflict_review.sources",
+    assert _parse_override('safety.scanner.classifier.reviewed_sources=["import"]') == (
+        "safety.scanner.classifier.reviewed_sources",
         ["import"],
     )
     with pytest.raises(Exception, match="JSON"):

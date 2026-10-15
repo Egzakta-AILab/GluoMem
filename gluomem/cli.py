@@ -340,6 +340,121 @@ def _add_serve_parser(sub: argparse._SubParsersAction) -> None:
     _add_config_args(serve)
 
 
+def _scope_from_cli_args(args: argparse.Namespace):  # noqa: ANN202
+    from gluomem.storage.scope import DEFAULT_SCOPE, MemoryScope
+
+    return MemoryScope(
+        tenant_id=getattr(args, "tenant_id", None) or DEFAULT_SCOPE.tenant_id,
+        principal_id=getattr(args, "principal_id", None) or DEFAULT_SCOPE.principal_id,
+        namespace=getattr(args, "namespace", None) or DEFAULT_SCOPE.namespace,
+    )
+
+
+def _add_scope_and_client_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--db", default=None, help="mind db path (embedded mode)")
+    parser.add_argument("--url", default=None, help="GluoMem HTTP service URL (remote mode)")
+    parser.add_argument(
+        "--service-key",
+        default=None,
+        help="Bearer service key for remote HTTP mode (or GLUOMEM_SERVICE_KEY)",
+    )
+    parser.add_argument("--tenant-id", default=None, help="default scope tenant_id")
+    parser.add_argument("--principal-id", default=None, help="default scope principal_id")
+    parser.add_argument("--namespace", default=None, help="default scope namespace")
+    _add_config_args(parser)
+
+
+def _cmd_mcp(args: argparse.Namespace) -> int:
+    import os
+
+    from gluomem.client.sdk import EmbeddedMemoryClient, GluoMemClient
+    from gluomem.mcp.server import McpServer, run_stdio_server
+
+    scope = _scope_from_cli_args(args)
+    if args.url:
+        key = args.service_key or os.environ.get("GLUOMEM_SERVICE_KEY", "")
+        with GluoMemClient(args.url, service_key=key, default_scope=scope) as client:
+            return run_stdio_server(McpServer(client, default_scope=scope))
+
+    cfg = _config_from(args)
+    with EmbeddedMemoryClient.open(args.db, cfg=cfg, default_scope=scope) as client:
+        return run_stdio_server(McpServer(client, default_scope=scope))
+
+
+def _add_mcp_parser(sub: argparse._SubParsersAction) -> None:
+    mcp_parser = sub.add_parser("mcp", help="run JSON-RPC 2.0 Model Context Protocol stdio server")
+    _add_scope_and_client_args(mcp_parser)
+
+
+def _cmd_hook(args: argparse.Namespace) -> int:
+    import os
+
+    from gluomem.client.sdk import EmbeddedMemoryClient, GluoMemClient
+    from gluomem.harnesses.hooks import run_hook_cli
+
+    if args.hook_command not in ("recall", "capture"):
+        print("gluomem hook: pick recall or capture", file=sys.stderr)
+        return 1
+    scope = _scope_from_cli_args(args)
+    raw_stdin = sys.stdin.read()
+    k = getattr(args, "k", 5)
+    profile = getattr(args, "profile", "balanced")
+    async_mode = getattr(args, "async_mode", False)
+
+    if args.url:
+        key = args.service_key or os.environ.get("GLUOMEM_SERVICE_KEY", "")
+        with GluoMemClient(args.url, service_key=key, default_scope=scope) as client:
+            out = run_hook_cli(
+                args.hook_command,
+                raw_stdin,
+                client=client,
+                default_scope=scope,
+                k=k,
+                profile=profile,
+                async_mode=async_mode,
+            )
+            print(out)
+            return 0
+
+    cfg = _config_from(args)
+    with EmbeddedMemoryClient.open(args.db, cfg=cfg, default_scope=scope) as client:
+        out = run_hook_cli(
+            args.hook_command,
+            raw_stdin,
+            client=client,
+            default_scope=scope,
+            k=k,
+            profile=profile,
+            async_mode=async_mode,
+        )
+        print(out)
+        return 0
+
+
+def _add_hook_parser(sub: argparse._SubParsersAction) -> None:
+    hook = sub.add_parser("hook", help="run agentic harness lifecycle hook (recall or capture)")
+    hook_sub = hook.add_subparsers(dest="hook_command")
+    recall_p = hook_sub.add_parser(
+        "recall", help="read prompt JSON on stdin and emit memory context"
+    )
+    recall_p.add_argument("-k", type=int, default=5, help="max memory hits to inject (default: 5)")
+    recall_p.add_argument(
+        "--profile", default="balanced", help="scoring profile (default: balanced)"
+    )
+    _add_scope_and_client_args(recall_p)
+
+    capture_p = hook_sub.add_parser(
+        "capture", help="read turn JSON on stdin and ingest SourceEvent"
+    )
+    capture_p.add_argument(
+        "--async",
+        dest="async_mode",
+        action="store_true",
+        help="enqueue durable background job instead of synchronous ingest",
+    )
+    _add_scope_and_client_args(capture_p)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="gluomem",
@@ -372,6 +487,8 @@ def main(argv: list[str] | None = None) -> int:
     _add_migrate_parsers(sub)
     _add_worker_parser(sub)
     _add_serve_parser(sub)
+    _add_mcp_parser(sub)
+    _add_hook_parser(sub)
 
     args = parser.parse_args(argv)
     from gluomem.components import FakeComponentError, ProviderUnavailableError
@@ -404,6 +521,10 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _cmd_worker(args)
     if args.command == "serve":
         return _cmd_serve(args)
+    if args.command == "mcp":
+        return _cmd_mcp(args)
+    if args.command == "hook":
+        return _cmd_hook(args)
     print(
         f"gluomem: '{args.command}' is not implemented yet.",
         file=sys.stderr,

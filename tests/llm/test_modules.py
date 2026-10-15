@@ -12,6 +12,7 @@ from gluomem.config.app_config import load_config
 from gluomem.llm import (
     CognifyResult,
     ContradictionVerdict,
+    ExtractedEvent,
     ExtractedFact,
     ExtractionError,
     FakeExtractors,
@@ -158,6 +159,7 @@ def test_fake_and_null_extractors_and_factory(capsys) -> None:
     assert "FAKE EXTRACTORS" in capsys.readouterr().err
 
     fx = FakeExtractors(
+        events=[[ExtractedEvent(text="We met yesterday.", event_date=datetime(2023, 5, 7))]],
         cognify_results=[CognifyResult(entities=[KGEntity(entity_type="person", name="alice")])],
         verdicts=[ContradictionVerdict(is_contradiction=True, description="moved")],
         banner=False,

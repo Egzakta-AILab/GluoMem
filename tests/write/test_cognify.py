@@ -44,11 +44,12 @@ def test_entity_resolution_alias_and_implicit_endpoints(env) -> None:
     assert len(env.kg.find_valid_entities("alice", env.cfg.kg)) == 1
 
     existing = env.kg.create_entity("technology", "kubernetes")
+    alias_cfg = env.cfg.with_overrides({"kg.alias_groups": [["kubernetes", "k8s"]]})
     g_alias = cognify_text(
         "t",
         facade=_facade(CognifyResult(entities=[KGEntity(entity_type="technology", name="k8s")])),
         kg=env.kg,
-        cfg=env.cfg,
+        cfg=alias_cfg,
     )
     assert g_alias.entity_ids == [existing.id]
 

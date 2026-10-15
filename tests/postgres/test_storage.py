@@ -79,7 +79,7 @@ def test_fts_matches_script_variants_and_survives_operator_input(
 ) -> None:
     serbian = frame_store.create_i_frame("gop", "Извештај за Београд је послао Ђорђе.")
     english = frame_store.create_i_frame("gop", "The deployments were running smoothly.")
-    for query in ("Београд извештај", "Beogradu izveštaj", "Beograd izvestaj Djordje"):
+    for query in ("Београд извештај", "Beograd izveštaj", "Beograd izvestaj Djordje"):
         assert mind_db.fts.search(sanitize(query), 10) == [serbian.id]
     assert mind_db.fts.search(sanitize("deployment run"), 10) == [english.id]
     for hostile in ("or -x", "a & b | !c", "O'Brien:*", "C++ (v1.2.3)", "<-> ''", "!!!"):
@@ -112,8 +112,8 @@ def test_unmigrated_postgres_is_rejected(mind_db: MindDB, pg_dsn: str, version: 
 
 
 def test_fts_match_any_ranks_partial_matches(mind_db: MindDB, frame_store: FrameStore) -> None:
-    both = frame_store.create_i_frame("gop", "Главни трезор у Београду")
-    one = frame_store.create_i_frame("gop", "Rezervni trezor u Nisu")
+    both = frame_store.create_i_frame("gop", "Главни трезор у Београд")
+    one = frame_store.create_i_frame("gop", "Rezervni trezor u Nis")
     frame_store.create_i_frame("gop", "unrelated note")
     query = sanitize("glavni trezor beograd")
     assert mind_db.fts.search(query, 10) == [both.id]

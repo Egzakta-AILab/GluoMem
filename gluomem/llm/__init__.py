@@ -16,13 +16,17 @@ from gluomem.llm.cache import CachedExtractors, ExtractionCacheMiss
 from gluomem.llm.fake import FakeExtractors, NullExtractors
 from gluomem.llm.outputs import (
     CognifyResult,
+    ConsolidationAction,
+    ConsolidationDecision,
     ContradictionVerdict,
+    ExtractedClaimSpec,
     ExtractedEvent,
     ExtractedFact,
     ExtractionError,
     Extractors,
     KGEntity,
     KGRelation,
+    StoredCandidate,
 )
 
 if TYPE_CHECKING:
@@ -74,7 +78,10 @@ def make_extractors(cfg: AppConfig) -> Extractors:
 __all__ = [
     "CachedExtractors",
     "CognifyResult",
+    "ConsolidationAction",
+    "ConsolidationDecision",
     "ContradictionVerdict",
+    "ExtractedClaimSpec",
     "ExtractedEvent",
     "ExtractedFact",
     "ExtractionCacheMiss",
@@ -84,5 +91,6 @@ __all__ = [
     "KGEntity",
     "KGRelation",
     "NullExtractors",
+    "StoredCandidate",
     "make_extractors",
 ]

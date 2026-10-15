@@ -41,6 +41,8 @@ from gluomem.frames.lifecycle import (
 )
 from gluomem.frames.store import Frame, FrameStore
 from gluomem.kg.graph import KnowledgeGraph
+from gluomem.llm.outputs import Extractors
+from gluomem.mcp.server import McpServer
 from gluomem.search.hybrid import HybridSearch
 from gluomem.service.auth import (
     HEADER_NAMESPACE,
@@ -114,6 +116,7 @@ def create_app(
     search: HybridSearch | None = None,
     kg: KnowledgeGraph | None = None,
     queue: JobQueue | None = None,
+    extractors: Extractors | None = None,
     max_pending_per_scope: int = 50,
 ) -> FastAPI:
     """Use one shared secret; deploy behind a trusted gateway asserting tenant/principal headers."""
@@ -249,7 +252,13 @@ def create_app(
             )
             response.status_code = 202
             return JobResponse.model_validate(job)
-        result = ingest_source_event(req.to_source_event(scope), store=rt.store, kg=rt.kg, cfg=cfg)
+        result = ingest_source_event(
+            req.to_source_event(scope),
+            store=rt.store,
+            kg=rt.kg,
+            cfg=cfg,
+            extractors=extractors,
+        )
         return IngestEventResponse(
             source_event_row_id=result.event_row_id,
             event_id=result.event_id,
@@ -464,5 +473,31 @@ def create_app(
         if job.scope != scope:
             raise KeyError(job_id)
         return JobResponse.model_validate(job)
+
+    @app.post("/mcp")
+    def mcp_endpoint(
+        payload: dict[str, Any],
+        response: Response,
+        scope: Annotated[MemoryScope, Depends(require_scope)],
+        rt: Annotated[_Runtime, Depends(runtime)],
+    ) -> dict[str, Any]:
+        from gluomem.client.sdk import EmbeddedMemoryClient
+
+        embedded = EmbeddedMemoryClient(
+            rt.db,
+            rt.store,
+            cfg=cfg,
+            default_scope=scope,
+            search=rt.search,
+            kg=rt.kg,
+            queue=rt.queue,
+            extractors=extractors,
+        )
+        server = McpServer(embedded, default_scope=scope)
+        reply = server.handle_message(payload, scope_override=scope)
+        if reply is None:
+            response.status_code = 202
+            return {"status": "accepted"}
+        return reply
 
     return app

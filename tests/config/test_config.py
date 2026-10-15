@@ -74,7 +74,8 @@ def test_default_config_loads_all_sections_and_constants() -> None:
     assert cfg.write.lanes.fact.importance == "normal"
     assert cfg.write.lanes.profile.importance == "important"
     assert (cfg.kg.seed_min_len, cfg.kg.bfs_symmetric) == (2, True)
-    assert "k8s" in cfg.kg.tech_allowlist
+    assert cfg.kg.tech_allowlist == []
+    assert cfg.kg.alias_groups == []
     assert len(cfg.safety.scanner.patterns) >= 5
     assert cfg.dspy.default_model == "deepseek-flash"
     assert set(cfg.dspy.tasks) >= {
@@ -82,6 +83,8 @@ def test_default_config_loads_all_sections_and_constants() -> None:
         "event_extraction",
         "cognify",
         "contradiction",
+        "event_claims",
+        "consolidate",
     }
 
 

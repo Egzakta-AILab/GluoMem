@@ -73,25 +73,6 @@ _LATIN_ASCII_TRANSLATION = str.maketrans(_LATIN_DIACRITIC_TO_ASCII)
 _WORD_RE = re.compile(r"[^\W_]+(?:[-.][^\W_]+)*", re.UNICODE)
 _QUOTED_PHRASE_RE = re.compile(r'"([^"]+)"|(\S+)')
 
-# Common Serbian noun/adjective case suffixes (ordered longest-first)
-_SERBIAN_SUFFIXES: tuple[str, ...] = (
-    "ovima",
-    "evima",
-    "ovi",
-    "ova",
-    "eve",
-    "ima",
-    "om",
-    "og",
-    "eg",
-    "oj",
-    "u",
-    "a",
-    "e",
-    "i",
-    "o",
-)
-
 
 def cyrillic_to_latin(text: str) -> str:
     """Transliterate Serbian Cyrillic characters to Serbian Latin (preserving Latin diacritics)."""
@@ -116,22 +97,11 @@ def fold_to_ascii(text: str) -> str:
     return fold_diacritics(cyrillic_to_latin(text)).lower()
 
 
-def _serbian_stem(ascii_token: str) -> str | None:
-    """Return a light stem for a lowercase ASCII token if a Serbian case suffix applies."""
-    if ascii_token in {"program", "radio"} or len(ascii_token) < 5 or not ascii_token.isalpha():
-        return None
-    for suffix in _SERBIAN_SUFFIXES:
-        if ascii_token.endswith(suffix) and len(ascii_token) - len(suffix) >= 4:
-            return ascii_token[: -len(suffix)]
-    return None
-
-
 def _variants(token: str) -> list[str]:
     raw = token.lower()
     latin = cyrillic_to_latin(raw).lower()
     ascii_form = fold_diacritics(latin).lower()
-    forms = list(dict.fromkeys((raw, latin, ascii_form, ascii_form.replace("dj", "d"))))
-    return list(dict.fromkeys([*forms, *(stem for form in forms if (stem := _serbian_stem(form)))]))
+    return list(dict.fromkeys((raw, latin, ascii_form, ascii_form.replace("dj", "d"))))
 
 
 def fold_multilingual_text(text: str) -> str:
@@ -141,16 +111,6 @@ def fold_multilingual_text(text: str) -> str:
             variant for match in _WORD_RE.finditer(text) for variant in _variants(match.group())
         )
     )
-
-
-def canonical_terms(text: str) -> list[str]:
-    """Return one script-, diacritic- and case-folded, lightly stemmed form per word."""
-    return [
-        _serbian_stem(word) or word
-        for match in _WORD_RE.finditer(fold_to_ascii(text))
-        for word in match.group().replace(".", "-").split("-")
-        if word
-    ]
 
 
 def fold_query_text(query: str, *, match_any: bool = False) -> str:
@@ -166,7 +126,7 @@ def fold_query_text(query: str, *, match_any: bool = False) -> str:
 
 
 def expand_fts5_query(sanitized_query: str, *, match_any: bool = False) -> str:
-    """Expand each literal FTS5 term with symmetric script and stem variants.
+    """Expand each literal FTS5 term with symmetric script variants.
 
     Terms are AND-ed unless ``match_any`` is set, which OR-s them.
     """
@@ -182,7 +142,6 @@ def expand_fts5_query(sanitized_query: str, *, match_any: bool = False) -> str:
 
 
 __all__ = [
-    "canonical_terms",
     "cyrillic_to_latin",
     "expand_fts5_query",
     "fold_diacritics",
