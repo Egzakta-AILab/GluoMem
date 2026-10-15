@@ -1,7 +1,7 @@
 [project]
 name = "gluomem"
 version = "0.1.0"
-description = "GluoMem — frame-codec memory library and benchmark harness for AI agents"
+description = "GluoMem — frame-codec memory engine for AI agents"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
@@ -28,8 +28,8 @@ llm = [
 embeddings = [
     "sentence-transformers>=3.0",
 ]
-tune = [
-    "optuna>=4.0",
+classifier = [
+    "gliner2[local]>=2.1,<3",
 ]
 service = [
     "fastapi>=0.115",
@@ -39,7 +39,7 @@ service = [
 client = ["httpx>=0.28"]
 
 all = [
-    "gluomem[postgres,llm,embeddings,tune,service]",
+    "gluomem[postgres,llm,embeddings,classifier,service]",
 ]
 
 [project.scripts]
@@ -92,10 +92,6 @@ replace-imports-with-any = [
     "fastapi.*",
     "httpx",
     "httpx.*",
-    "mem0",
-    "mem0.*",
-    "optuna",
-    "optuna.*",
     "pgvector",
     "pgvector.*",
     "psycopg",

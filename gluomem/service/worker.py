@@ -16,6 +16,7 @@ from gluomem.frames.expiry import sweep_expired_episodes
 from gluomem.frames.generation import current_scope_generation
 from gluomem.frames.store import FrameStore
 from gluomem.kg.graph import KnowledgeGraph
+from gluomem.llm.outputs import CognifyResult, Extractors, KGEntity, KGRelation
 from gluomem.service.jobs import (
     JobQueue,
     LeaseLostError,
@@ -27,6 +28,7 @@ from gluomem.service.schemas import IngestEventRequest
 from gluomem.storage.db import MindDB
 from gluomem.storage.scope import scope_sql
 from gluomem.timeutil import now_utc_iso
+from gluomem.write.cognify import link_and_retire_resolved, resolve_cognify_result
 from gluomem.write.events import ingest_source_event
 
 _LOG = logging.getLogger(__name__)
@@ -47,6 +49,7 @@ class MemoryWorker:
         cfg: AppConfig | None = None,
         kg: KnowledgeGraph | None = None,
         queue: JobQueue | None = None,
+        extractors: Extractors | None = None,
         worker_id: str | None = None,
         lease_seconds: float = 60.0,
         retry_backoff_seconds: float = 5.0,
@@ -57,6 +60,7 @@ class MemoryWorker:
         self._cfg = cfg if cfg is not None else AppConfig()
         self._kg = kg if kg is not None else KnowledgeGraph(db, scope=store.scope)
         self._queue = queue if queue is not None else JobQueue(db.backend)
+        self._extractors = extractors
         self._worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
         self._lease_seconds = float(lease_seconds)
         self._retry_backoff_seconds = float(retry_backoff_seconds)
@@ -111,7 +115,13 @@ class MemoryWorker:
 
     def _handle_ingest_event(self, job: MemoryJob) -> None:
         event = IngestEventRequest.model_validate({**job.payload}).to_source_event(job.scope)
-        ingest_source_event(event, store=self._store, kg=self._kg, cfg=self._cfg)
+        ingest_source_event(
+            event,
+            store=self._store,
+            kg=self._kg,
+            cfg=self._cfg,
+            extractors=self._extractors,
+        )
 
     def _handle_cognify_frame(self, job: MemoryJob) -> None:
         payload = job.payload
@@ -123,42 +133,51 @@ class MemoryWorker:
         if not is_recall_eligible(frame):
             return
 
-        entity_map: dict[str, int] = {}
-        for ent in entities:
-            self._renew(job)
-            name = str(ent.get("name", "")).strip()
-            etype = str(ent.get("entity_type", "concept")).strip() or "concept"
-            if not name:
-                continue
-            existing = self._kg.find_valid_entities(
-                name, self._cfg.kg, entity_type=etype, scope=job.scope
+        self._renew(job)
+        if entities or relations:
+            raw = CognifyResult(
+                entities=[
+                    KGEntity(
+                        name=str(ent.get("name", "")).strip(),
+                        entity_type=str(ent.get("entity_type", "concept")).strip() or "concept",
+                        properties=ent.get("properties")
+                        if isinstance(ent.get("properties"), dict)
+                        else {},
+                    )
+                    for ent in entities
+                    if str(ent.get("name", "")).strip()
+                ],
+                relations=[
+                    KGRelation(
+                        source=str(rel.get("source", "")).strip(),
+                        target=str(rel.get("target", "")).strip(),
+                        relation_type=str(rel.get("relation_type", "related_to")).strip()
+                        or "related_to",
+                        confidence=float(rel.get("confidence", 1.0)),
+                    )
+                    for rel in relations
+                    if str(rel.get("source", "")).strip() and str(rel.get("target", "")).strip()
+                ],
             )
-            if existing:
-                e_obj = existing[0]
-            else:
-                e_obj = self._kg.create_entity(
-                    etype,
-                    name,
-                    ent.get("properties") if isinstance(ent.get("properties"), dict) else None,
-                    scope=job.scope,
-                )
-            self._kg.link_entity_frame(e_obj.id, frame.id, scope=job.scope)
-            entity_map[name.lower()] = e_obj.id
+        elif self._extractors is not None and self._cfg.write.cognify.enabled:
+            raw = self._extractors.cognify(frame.content)
+        else:
+            return
 
-        for rel in relations:
-            self._renew(job)
-            src_name = str(rel.get("source", "")).strip().lower()
-            tgt_name = str(rel.get("target", "")).strip().lower()
-            rel_type = str(rel.get("relation_type", "related_to")).strip()
-            if src_name in entity_map and tgt_name in entity_map and rel_type:
-                relation = self._kg.create_relation(
-                    entity_map[src_name],
-                    entity_map[tgt_name],
-                    rel_type,
-                    confidence=float(rel.get("confidence", 1.0)),
-                    scope=job.scope,
-                )
-                self._kg.link_relation_frame(relation.id, frame.id, scope=job.scope)
+        resolved = resolve_cognify_result(
+            raw,
+            kg=self._kg,
+            cfg=self._cfg,
+            valid_from=frame.event_time,
+            scope=job.scope,
+        )
+        link_and_retire_resolved(
+            resolved,
+            frame.id,
+            kg=self._kg,
+            cfg=self._cfg,
+            scope=job.scope,
+        )
 
     def _handle_compact_gop(self, job: MemoryJob) -> None:
         gop_id = str(job.payload["gop_id"])

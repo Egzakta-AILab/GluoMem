@@ -20,7 +20,6 @@ from gluomem.llm import (
     KGEntity,
     KGRelation,
     NullExtractors,
-    Verdict,
 )
 from gluomem.llm.modules import build_module
 from gluomem.llm.signatures import (
@@ -29,7 +28,6 @@ from gluomem.llm.signatures import (
     ContradictionCheck,
     EventExtraction,
     FactExtraction,
-    JudgeQA,
     make_cognify_signature,
 )
 
@@ -43,8 +41,6 @@ def test_output_models_validation_and_protocol_conformance() -> None:
         ExtractedFact(text="x", confidence=1.5)
     with pytest.raises(ValidationError):
         ExtractedEvent(text="x", confidence=-0.1)
-    with pytest.raises(ValidationError):
-        Verdict(correct=True, score=2.0, rationale="r")
 
     fact = ExtractedFact(text="Alice lives in Boston.")
     assert fact.confidence == 1.0
@@ -84,12 +80,6 @@ def test_signature_fields_and_docstrings() -> None:
         "new_statement": str,
         "stored_statement": str,
         "verdict": ContradictionVerdict,
-    }
-    assert _fields(JudgeQA) == {
-        "question": str,
-        "gold": str,
-        "prediction": str,
-        "verdict": Verdict,
     }
     assert set(TASK_SIGNATURES) == {
         "fact_extraction",

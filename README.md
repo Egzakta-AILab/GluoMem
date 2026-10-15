@@ -11,23 +11,15 @@ GluoMem is a research-stage Python library (version 0.0.1). Embedded use runs ag
 - **One UTC convention**: naive timestamps are UTC, offset-aware ones are converted to UTC on write and read, and search recency reads time from an injectable clock ([timeutil](./gluomem/timeutil.py)).
 - **Hybrid retrieval**: SQLite FTS5 (BM25) and sqlite-vec exact KNN, fused with RRF, then a four-signal relevance model (temporal, popularity, contextual, importance) and an optional cross-encoder reranker. Abstention is separate from ranking: `search.abstain.score` names the scale the threshold is read on (`fusion`, the default, gives the same decision with reranking on or off; `rerank` requires a declared calibration matching the reranker model), and every search returns an `AbstentionDecision` with the reason, score identity, top score and calibration. No threshold has been calibrated; the default `0.0` abstains only when no eligible evidence exists.
 - **DSPy write path**: typed extraction behind an `Extractors` protocol, with deterministic fake extractors for offline tests, an admission gate (regex injection scanner, quarantine or reject; imports that restate a trusted fact with a different value are held as review candidates, `safety.conflict_review`), and an extraction cache. Quarantined frames are kept for inspection by id but excluded from search, current-state reads, graph linking and compaction ([eligibility rule](./gluomem/frames/eligibility.py)).
-- **Benchmark harness**: LoCoMo and LongMemEval (S and oracle) adapters, full-context, BM25 and vector-RAG baselines, an optional mem0 comparison, judge panels, protocol tags, offline rescore of a run directory, and usage accounting. A versioned [benchmark registry](./gluomem/bench/registry.py) records each protocol's source ancestry, native or adapted scorer, logical clock, split grouping, rights and readiness; scores from different protocols never aggregate, and overlapping sources (MemoryAgentBench reuses LongMemEval) are flagged. Every run writes `denominators.json`: an answerable sample with nothing retrieved scores zero, failures and timeouts stay in the denominator, and samples where retrieval does not apply are counted separately. `gluomem bench replay` replays a generated MemoryAgentBench-shaped fixture in event order into isolated stores and writes a reproducible receipt; it is a protocol test, not an official MemoryAgentBench result.
 - **Fail-closed components**: each embedder, reranker and LLM backend is built from the provider its config names, or construction raises; nothing falls back to the mock embedder. Test doubles (`provider: fake` embedders, `fake` backends) need `components.allow_fake: true`. A `.mind` file records the fingerprint of the embedder that wrote its vectors (implementation, model, revision, dim, preprocessing, index schema) and rejects any other embedder before reading or writing a vector. `gluomem components` prints the effective components and their readiness without secrets; `gluomem index rebuild` and `gluomem index adopt` are the explicit ways to change or record a file's embedder.
 - **Scoped storage**: scope and recall eligibility are pushed into every vector, full-text and LIKE query before `LIMIT`, so one scope's rows never fill another scope's top-k. PostgreSQL uses HNSW with iterative scans so filtered searches still return k rows. The Postgres schema is SQLAlchemy metadata in [pg_schema.py](./gluomem/storage/pg_schema.py) with Alembic revisions generated from it (`gluomem migrate upgrade|downgrade|current|heads|revision --autogenerate`); a backend refuses to open a database that is not at the head revision.
 - **Memory lifecycle**: frames carry a kind (`fact`, `profile`, `preference`, `decision`, `procedure`, `episode`, `correction`, `summary`) and a status (`candidate`, `active`, `superseded`, `expired`, `forgotten`, `tombstoned`). Source events are idempotent per `(event_id, revision)`, and a reused key with a different payload is a conflict. Low-confidence writes become review candidates (`lifecycle.review_threshold`), and episodes expire after `lifecycle.episode_ttl_days` (`sweep_expired_episodes` marks due episodes `expired` and removes their FTS, vector and chunk projections). Correct, forget, scope erasure (`forget_scope`) and retract-source scrub the old plaintext from frames, indexes, stored event payloads, queued jobs and orphaned graph rows, then record a suppression key so a replay of the same content stays forgotten. Each of these bumps the scope generation.
 - **Service and worker** (`gluomem[service]`): `gluomem serve` exposes `/v1/events`, `/v1/memories:recall`, `/v1/memories:sweep-expired`, memory listing, lineage, review, correct, forget, source retraction, export, job status and `/v1/status`; `/healthz` and `/readyz` are unauthenticated and minimal. `gluomem worker` processes durable jobs with leases, retries, dead-lettering and an optional `should_pause` backpressure hook. A job leased before a forget or correction is re-run at the new scope generation instead of writing stale data. `gluomem[client]` provides `GluoMemClient` and `AsyncGluoMemClient`.
-- **Offline tuning** (`gluomem[tune]`): `gluomem tune` builds a candidate cache once and searches scoring parameters with seeded Optuna TPE, scoring only on a held-out query split (`--held-out-fraction`). `gluomem ablate` reports per-signal and per-lane ablations over the same cache. Neither makes model calls after the cache is built.
 - **Configuration**: one typed config tree (`pydantic-settings`, `GLUOMEM_` prefix). Precedence is `Pydantic defaults < env < with_overrides()`.
 
-## What is not implemented
+## Evaluation & Benchmarks (`gluomem-bench`)
 
-- **Tier-2 tuning.** Tuning ranks by retrieval metrics only. Promoting the best configurations to an end-to-end judged QA run ([DESIGN.md §9](./DESIGN.md#9-tuning-subsystem)) is not implemented.
-- **Prompt optimization runs.** Fact and event extraction now have a frozen, source-backed objective ([extraction_eval](./gluomem/llm/extraction_eval.py)): unsupported facts score zero, and wrong subject, lost negation, a plan recorded as done and a superseded state presented as current are reported as separate errors with feedback. Its fixture is 27 authored cases across `train`, `dev` and `sealed_test` in English and native Serbian (Latin and Cyrillic), which tests the scorer across all six capabilities without live model calls. `make optimize-prompts` (MIPROv2) spends real tokens, is never run automatically, and refuses extraction trainsets that do not reference annotated, non-sealed cases. The [campaign contract](./gluomem/llm/fixtures/campaign_v1.json) for baseline, MIPROv2 and GEPA comparisons is defined but unrun and unauthorized; other tasks still use a parse-or-exact-match metric.
-- **Service features**: MCP API, per-user identity, RBAC, deployment packaging.
-
-## Evidence status
-
-The benchmark reports in [docs/research/](./docs/research/README.md) are historical. The `experiments/` run directories they cite were never published, so their numbers cannot currently be rescored. See the [evidence inventory](./docs/research/EVIDENCE_INVENTORY.md). Use them as research notes, not as product claims, until a new rescorable baseline is published.
+The benchmark harness, LoCoMo / LongMemEval / MemoryAgentBench replay / MINJA adversarial / SR-EN evaluation suites, Optuna retrieval tuning (`tune`, `ablate`), `mem0` comparison adapter, and DSPy prompt optimization live in the companion `gluomem-bench` repository (`https://github.com/UkisAI-Egzakta/gluomem-bench`).
 
 ## Installation
 
@@ -36,13 +28,12 @@ The core package is small. Model-backed components are optional extras. When a c
 | Install | Adds | Readiness |
 |---|---|---|
 | `gluomem` (core) | Config, SQLite storage, I/P/B frames, hybrid search, KG, fake extractors, mock embedder | Works offline; real embedding, reranking and DSPy extraction raise `MissingExtraError` |
-| `gluomem[llm]` | DSPy >= 3.4.1: extraction, answerer, judges, prompt optimization | Needs `OPENROUTER_API_KEY` at call time; calls are paid |
+| `gluomem[llm]` | DSPy >= 3.4.1: extraction | Needs `OPENROUTER_API_KEY` at call time; calls are paid |
 | `gluomem[embeddings]` | sentence-transformers MiniLM embedder and cross-encoder reranker | Downloads models from Hugging Face on first use |
 | `gluomem[postgres]` | `psycopg`, `pgvector`, Alembic and SQLAlchemy for the PostgreSQL backend | Connects via `storage.backend: postgres` and `storage.dsn`; run `gluomem migrate upgrade` first |
-| `gluomem[tune]` | Optuna for `gluomem tune` | Offline; no model calls after the candidate cache is built |
 | `gluomem[service]` | FastAPI, uvicorn and httpx for `gluomem serve` and `gluomem worker` | Needs a service key in `GLUOMEM_SERVICE_KEY` or `--service-key-file` |
 | `gluomem[client]` | httpx for the `gluomem.client` SDK | Talks to a running service |
-| `gluomem[all]` | `postgres`, `llm`, `embeddings`, `tune` and `service` | All of the above |
+| `gluomem[all]` | `postgres`, `llm`, `embeddings` and `service` | All of the above |
 
 `gluomem.extras.status()` reports which extras are installed without importing or downloading anything.
 
@@ -52,40 +43,33 @@ Requires Python 3.11 or newer and [uv](https://docs.astral.sh/uv/). Every comman
 
 ```bash
 make install             # uv sync --locked --extra all (full development environment)
-# or: make install-offline  (uv sync --locked --extra llm; enough for make check, no torch)
+# or: make install-offline  (uv sync --locked --extra llm --extra service --extra postgres)
 make check               # ruff lint + pyrefly type check + offline tests
 make wheel-check         # build the wheel, install it core-only outside the checkout, write and read
-uv run gluomem --help    # CLI: ingest, components, index, bench, tune, ablate, migrate, serve, worker
+uv run gluomem --help    # CLI: components, index, migrate, serve, worker
 ```
 
 CI (`.github/workflows/ci.yml`) runs `make check` and `make wheel-check` on Python 3.11, 3.12 and 3.13 on every pull request, plus the live PostgreSQL tests (`pytest -m postgres`) against a pgvector PG18 service container. Locally those tests skip unless `GLUOMEM_TEST_PG_DSN` points at a database where they may create and drop schemas. Slow tests that download models run only when the workflow is dispatched manually with `run_model_tests`.
 
-Deterministic ingest of a bundled synthetic fixture, using the fake extractors and mock embeddings (test doubles, so they need an explicit opt-in):
+Inspect component readiness:
 
 ```bash
-uv run gluomem ingest tests/fixtures/locomo_tiny.json --db /tmp/demo.mind \
-  --override write.extraction_backend=fake --override embedding.model=mock \
-  --override components.allow_fake=true
-uv run gluomem components --db /tmp/demo.mind   # effective components, readiness, stored fingerprint
-uv run gluomem bench replay --work-dir /tmp/replay --out /tmp/replay-receipt \
-  --override embedding.model=mock --override components.allow_fake=true \
-  --override search.rerank.enabled=false   # ordered replay of the generated fixture
+uv run gluomem components
 ```
 
-Tests that download real models are marked `slow` and excluded by default (`addopts = "-m 'not slow'"`). Live provider tests skip unless `OPENROUTER_API_KEY` is set. The default configuration uses DSPy extraction through OpenRouter, so `gluomem ingest` and `gluomem bench run` without the overrides above call a paid provider when a key is present. Copy `.env.example` to `.env` only when you intend to make live calls.
+Tests that download real models are marked `slow` and excluded by default (`addopts = "-m 'not slow'"`). Live provider tests skip unless `OPENROUTER_API_KEY` is set. Copy `.env.example` to `.env` only when you intend to make live calls.
 
 Optional: `make hooks` installs the pre-commit (lint and type check) and pre-push (tests) gates.
 
 ## Repository boundary
 
-This repository holds the memory library, its CLI, the HTTP service and worker, the Python client SDK and the evaluation harness. It does not contain assistant adapters or KVARK integration code. Those are planned as separate work that uses this library.
+This repository holds the memory library, its CLI (`components`, `index`, `migrate`, `serve`, `worker`), the HTTP service and worker, and the Python client SDK. Benchmarks, offline Optuna tuning, and prompt optimization live in `gluomem-bench`. It does not contain assistant adapters or KVARK integration code.
 
 ## Documents
 
 1. **[SPEC.md](./SPEC.md)** — original research specification: purpose, scope, requirements, acceptance criteria.
-2. **[DESIGN.md](./DESIGN.md)** — architecture, schema, layers, config system, DSPy layer, tuning engine, harness.
+2. **[DESIGN.md](./DESIGN.md)** — architecture, schema, layers, config system, DSPy layer.
 3. **[CONTEXT.md](./CONTEXT.md)** — domain terms, code mapping and architectural decisions.
-4. **[docs/research/](./docs/research/README.md)** — archived experimental plan and historical benchmark reports.
 
 ## License
 

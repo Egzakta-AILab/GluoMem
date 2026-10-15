@@ -82,14 +82,7 @@ def test_default_config_loads_all_sections_and_constants() -> None:
         "event_extraction",
         "cognify",
         "contradiction",
-        "answer",
     }
-    assert cfg.benchmark.judge.family == "trio_strict"
-    assert cfg.benchmark.judge.backbones == ["haiku", "gpt5-mini", "qwen3"]
-    assert cfg.benchmark.mem0.model == "deepseek-flash"
-    assert cfg.benchmark.mem0.embedder_model == "minilm"
-    assert cfg.benchmark.mem0.top_k is None
-    assert cfg.benchmark.mem0.infer is True
 
 
 def test_app_config_direct_construction_matches_load_config() -> None:
@@ -134,9 +127,6 @@ def test_cross_validation_errors() -> None:
 
     with pytest.raises(ValidationError, match="Unknown model reference"):
         base.with_overrides({"embedding.model": "nonexistent-embedder"})
-
-    with pytest.raises(ValidationError, match="has no dim in the registry"):
-        base.with_overrides({"benchmark.mem0.embedder_model": "reranker"})
 
     with pytest.raises(ValidationError, match="Unknown model reference"):
         base.with_overrides({"search.rerank.model": "no-such-reranker"})

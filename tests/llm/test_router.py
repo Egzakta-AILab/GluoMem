@@ -11,11 +11,9 @@ from pathlib import Path
 import dotenv
 import dspy
 import pytest
-from dspy.utils.dummies import DummyLM
 
 from gluomem.config.app_config import load_config
 from gluomem.llm.concurrency import ConcurrencyGate
-from gluomem.llm.judge import QAJudge
 from gluomem.llm.modules import DspyExtractors
 from gluomem.llm.router import LMRouter, _make_adapter
 from gluomem.llm.usage import UsageAccumulator, total_tokens, usage_delta
@@ -159,12 +157,8 @@ def test_usage_accumulator_deltas_and_judge_surface() -> None:
     assert total_tokens(delta) == (85, 16)
     assert usage_delta(before, before) == {}
 
-    lm = DummyLM(
-        [{"reasoning": "ok", "verdict": {"correct": True, "score": 1.0, "rationale": "r"}}]
-    )
-    judge = QAJudge(LMRouter(load_config()), "haiku", lm=lm)
-    judge.judge("q", "gold", "gold")
-    assert isinstance(judge.usage.snapshot(), dict)
+    fx = DspyExtractors(load_config())
+    assert isinstance(fx.usage.snapshot(), dict)
 
 
 @pytest.mark.slow

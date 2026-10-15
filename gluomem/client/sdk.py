@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Generic, Literal, TypeVar
+import time
+from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from gluomem.client.models import (
     HEADER_NAMESPACE,
@@ -18,6 +19,8 @@ from gluomem.client.models import (
     ListMemoriesResponse,
     MemoryFrameModel,
     MemoryKind,
+    ProvenanceModel,
+    RecallHitModel,
     RecallResponse,
     RetractSourceResponse,
     ReviewResponse,
@@ -25,6 +28,21 @@ from gluomem.client.models import (
     SourceType,
     SweepExpiredResponse,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from pathlib import Path
+
+    from gluomem.config.app_config import AppConfig
+    from gluomem.embedding.base import Embedder
+    from gluomem.embedding.reranker import Reranker
+    from gluomem.frames.store import Frame, FrameStore
+    from gluomem.kg.graph import KnowledgeGraph
+    from gluomem.llm.outputs import Extractors
+    from gluomem.search.hybrid import HybridSearch
+    from gluomem.service.jobs import JobQueue
+    from gluomem.storage.db import MindDB
+    from gluomem.storage.scope import MemoryScope
 
 T = TypeVar("T")
 
@@ -448,3 +466,537 @@ class AsyncGluoMemClient(_Transport):
 
     async def get_job(self, job_id: int, **kwargs: Any) -> JobResponse:
         return await self._asend(self._ops.get_job(job_id, **kwargs))
+
+
+def _group_frames(
+    frames: Sequence[MemoryFrameModel],
+) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
+    kinds: dict[str, list[int]] = {}
+    refs: dict[str, list[int]] = {}
+    for frame in frames:
+        kinds.setdefault(frame.kind, []).append(frame.id)
+        for ref in sorted({p.source_ref for p in frame.provenance}) or [f"gop:{frame.gop_id}"]:
+            refs.setdefault(ref, []).append(frame.id)
+    return kinds, refs
+
+
+class EmbeddedMemoryClient:
+    """In-process memory client with the same surface and contracts as ``GluoMemClient``."""
+
+    def __init__(
+        self,
+        db: MindDB,
+        store: FrameStore | None = None,
+        *,
+        cfg: AppConfig | None = None,
+        default_scope: Any = None,
+        search: HybridSearch | None = None,
+        kg: KnowledgeGraph | None = None,
+        queue: JobQueue | None = None,
+        extractors: Extractors | None = None,
+        reranker: Reranker | None = None,
+        owns_db: bool = False,
+    ) -> None:
+        from gluomem.config.app_config import AppConfig as _AppConfig
+        from gluomem.embedding.providers import make_embedder
+        from gluomem.frames.store import FrameStore as _FrameStore
+        from gluomem.kg.graph import KnowledgeGraph as _KnowledgeGraph
+        from gluomem.search.hybrid import HybridSearch as _HybridSearch
+        from gluomem.service.jobs import JobQueue as _JobQueue
+        from gluomem.storage.scope import (
+            DEFAULT_SCOPE,
+            resolve_scope,
+        )
+        from gluomem.storage.scope import (
+            MemoryScope as _MemoryScope,
+        )
+
+        self.db = db
+        self.cfg = cfg if cfg is not None else _AppConfig()
+        base_scope = store.scope if store is not None else DEFAULT_SCOPE
+        if default_scope is None:
+            self._default_scope = resolve_scope(None, default=base_scope)
+        elif isinstance(default_scope, _MemoryScope):
+            self._default_scope = resolve_scope(default_scope, default=base_scope)
+        else:
+            sm = ScopeModel.model_validate(default_scope)
+            self._default_scope = resolve_scope(
+                _MemoryScope(sm.tenant_id, sm.principal_id, sm.namespace),
+                default=base_scope,
+            )
+        if store is None:
+            store = _FrameStore(
+                db,
+                embedder=make_embedder(self.cfg),
+                chunking=self.cfg.chunking,
+                scope=self._default_scope,
+                lifecycle=self.cfg.lifecycle,
+            )
+        self.store = store
+        self.kg = kg if kg is not None else _KnowledgeGraph(db, scope=self._default_scope)
+        self.search = (
+            search
+            if search is not None
+            else _HybridSearch(db, self.store, self.cfg, kg=self.kg, reranker=reranker)
+        )
+        self.queue = queue if queue is not None else _JobQueue(db.backend)
+        self.extractors = extractors
+        self._owns_db = owns_db
+
+    @classmethod
+    def open(
+        cls,
+        path: str | Path | None = None,
+        *,
+        cfg: AppConfig | None = None,
+        default_scope: Any = None,
+        embedder: Embedder | None = None,
+        reranker: Reranker | None = None,
+        extractors: Extractors | None = None,
+    ) -> EmbeddedMemoryClient:
+        from gluomem.config.app_config import AppConfig as _AppConfig
+        from gluomem.embedding.providers import make_embedder
+        from gluomem.frames.store import FrameStore as _FrameStore
+        from gluomem.storage.db import MindDB as _MindDB
+        from gluomem.storage.scope import (
+            MemoryScope as _MemoryScope,
+        )
+        from gluomem.storage.scope import (
+            resolve_scope,
+        )
+
+        eff_cfg = cfg if cfg is not None else _AppConfig()
+        eff_embedder = embedder if embedder is not None else make_embedder(eff_cfg)
+        if default_scope is None:
+            scope = resolve_scope(None)
+        elif isinstance(default_scope, _MemoryScope):
+            scope = resolve_scope(default_scope)
+        else:
+            sm = ScopeModel.model_validate(default_scope)
+            scope = resolve_scope(_MemoryScope(sm.tenant_id, sm.principal_id, sm.namespace))
+        backend_type: Literal["sqlite", "postgres"] = (
+            "postgres" if eff_cfg.storage.backend == "postgres" else "sqlite"
+        )
+        db = _MindDB(
+            path if path is not None else eff_cfg.storage.path,
+            dim=eff_embedder.dim,
+            backend_type=backend_type,
+            dsn=eff_cfg.storage.dsn,
+            postgres_schema=eff_cfg.storage.postgres_schema,
+        )
+        store = _FrameStore(
+            db,
+            embedder=eff_embedder,
+            chunking=eff_cfg.chunking,
+            scope=scope,
+            lifecycle=eff_cfg.lifecycle,
+        )
+        return cls(
+            db,
+            store,
+            cfg=eff_cfg,
+            default_scope=scope,
+            reranker=reranker,
+            extractors=extractors,
+            owns_db=True,
+        )
+
+    def close(self) -> None:
+        if self._owns_db:
+            self.db.close()
+
+    def __enter__(self) -> EmbeddedMemoryClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def _scope(self, scope: Any = None) -> MemoryScope:
+        from gluomem.storage.scope import MemoryScope as _MemoryScope
+
+        if scope is None:
+            return self._default_scope
+        if isinstance(scope, _MemoryScope):
+            return scope
+        validated = ScopeModel.model_validate(scope)
+        return _MemoryScope(validated.tenant_id, validated.principal_id, validated.namespace)
+
+    def _frames(self, frames: Sequence[Frame], scope: MemoryScope) -> list[MemoryFrameModel]:
+        from gluomem.storage.scope import scope_sql
+
+        if not frames:
+            return []
+        ids = [frame.id for frame in frames]
+        rows = self.db.fetchall(
+            f"SELECT * FROM memory_provenance WHERE {scope_sql()} "
+            f"AND frame_id IN ({','.join('?' for _ in ids)}) ORDER BY id",
+            (*scope.as_tuple(), *ids),
+        )
+        provenance: dict[int, list[ProvenanceModel]] = {}
+        for row in rows:
+            provenance.setdefault(row["frame_id"], []).append(
+                ProvenanceModel.model_validate(dict(row))
+            )
+        models = [MemoryFrameModel.model_validate(frame) for frame in frames]
+        for model in models:
+            model.provenance = provenance.get(model.id, [])
+        return models
+
+    def _call(self, fn: Callable[[], T]) -> T:
+        from gluomem.service.jobs import BackpressureError, EventConflictError
+
+        try:
+            return fn()
+        except KeyError as exc:
+            raise GluoMemApiError(404, "Memory resource not found") from exc
+        except EventConflictError as exc:
+            raise GluoMemApiError(409, str(exc)) from exc
+        except BackpressureError as exc:
+            raise GluoMemApiError(429, str(exc)) from exc
+        except (ValueError, ValidationError) as exc:
+            raise GluoMemApiError(422, str(exc)) from exc
+
+    def healthz(self) -> dict[str, Any]:
+        return {"status": "ok"}
+
+    def readyz(self) -> dict[str, Any]:
+        if self.db.scalar("SELECT 1") != 1:
+            raise GluoMemApiError(503, "Database probe failed")
+        return {"status": "ok"}
+
+    def status(self, *, scope: Any = None) -> dict[str, Any]:
+        from gluomem.embedding.compat import stored_fingerprint
+
+        def _op() -> dict[str, Any]:
+            eff_scope = self._scope(scope)
+            fp = stored_fingerprint(self.db)
+            return {
+                "dialect": self.db.dialect,
+                "embedder_fingerprint": fp.to_json() if fp else None,
+                "queue": self.queue.queue_stats(eff_scope),
+            }
+
+        return self._call(_op)
+
+    def ingest_event(self, *, scope: Any = None, **kwargs: Any) -> IngestEventResponse:
+        from gluomem.service.schemas import IngestEventRequest
+        from gluomem.write.events import ingest_source_event
+
+        def _op() -> IngestEventResponse:
+            eff_scope = self._scope(scope)
+            req = IngestEventRequest.model_validate(kwargs)
+            result = ingest_source_event(
+                req.to_source_event(eff_scope),
+                store=self.store,
+                kg=self.kg,
+                cfg=self.cfg,
+                extractors=self.extractors,
+            )
+            return IngestEventResponse(
+                source_event_row_id=result.event_row_id,
+                event_id=result.event_id,
+                revision=result.revision,
+                deduped_event=result.deduplicated,
+                frames=self._frames(result.frames, eff_scope),
+                suppressed_hashes=result.suppressed_hashes,
+            )
+
+        return self._call(_op)
+
+    def enqueue_event(self, *, scope: Any = None, **kwargs: Any) -> JobResponse:
+        from gluomem.service.schemas import IngestEventRequest
+
+        def _op() -> JobResponse:
+            eff_scope = self._scope(scope)
+            req = IngestEventRequest.model_validate({**kwargs, "async_mode": True})
+            job = self.queue.enqueue(
+                eff_scope,
+                "ingest_event",
+                f"{req.event_id}:{req.revision}",
+                req.model_dump(exclude={"async_mode"}),
+            )
+            return JobResponse.model_validate(job)
+
+        return self._call(_op)
+
+    def recall(
+        self,
+        query: str,
+        *,
+        k: int = 10,
+        profile: str = "balanced",
+        since: str | None = None,
+        until: str | None = None,
+        now_iso: str | None = None,
+        scope: Any = None,
+    ) -> RecallResponse:
+        from gluomem.service.schemas import RecallRequest
+
+        def _op() -> RecallResponse:
+            eff_scope = self._scope(scope)
+            req = RecallRequest.model_validate(
+                {
+                    "query": query,
+                    "k": k,
+                    "profile": profile,
+                    "since": since,
+                    "until": until,
+                    "now_iso": now_iso,
+                }
+            )
+            if req.profile not in self.cfg.scoring.profiles:
+                raise ValueError("Unknown scoring profile")
+            started = time.perf_counter()
+            result = self.search.search(
+                req.query,
+                limit=req.k,
+                profile=req.profile,
+                since=req.since,
+                until=req.until,
+                scope=eff_scope,
+                now_iso=req.now_iso,
+            )
+            frames = self._frames([hit.frame for hit in result.hits], eff_scope)
+            hits = [
+                RecallHitModel(
+                    frame=frame,
+                    rrf=hit.rrf,
+                    relevance=hit.relevance,
+                    fusion=hit.fusion,
+                    rerank=hit.rerank,
+                    final=hit.final,
+                )
+                for hit, frame in zip(result.hits, frames, strict=True)
+            ]
+            return RecallResponse(
+                hits=hits,
+                abstained=result.abstained,
+                abstention=asdict(result.abstention) if result.abstention is not None else {},
+                latency_ms=round((time.perf_counter() - started) * 1000, 3),
+            )
+
+        return self._call(_op)
+
+    def list_memories(
+        self,
+        *,
+        include_review_queue: bool = True,
+        limit: int = 50,
+        cursor: int = 0,
+        kind: MemoryKind | None = None,
+        source_ref: str | None = None,
+        scope: Any = None,
+    ) -> ListMemoriesResponse:
+        from gluomem.storage.scope import eligible_sql, scope_sql
+        from gluomem.timeutil import now_utc_iso
+
+        def _op() -> ListMemoriesResponse:
+            if not (1 <= limit <= 100):
+                raise ValueError("limit must be between 1 and 100")
+            if cursor < 0:
+                raise ValueError("cursor must be >= 0")
+            eff_scope = self._scope(scope)
+            where = f"{scope_sql('m')} AND m.id > ? AND ({eligible_sql('m')}"
+            where += " OR m.status = 'candidate')" if include_review_queue else ")"
+            params: list[Any] = [*eff_scope.as_tuple(), cursor, now_utc_iso()]
+            if kind is not None:
+                where += " AND m.kind = ?"
+                params.append(kind)
+            if source_ref is not None:
+                where += (
+                    f" AND EXISTS (SELECT 1 FROM memory_provenance p WHERE {scope_sql('p')} "
+                    "AND p.frame_id = m.id AND p.source_ref = ?)"
+                )
+                params.extend((*eff_scope.as_tuple(), source_ref))
+            rows = self.db.fetchall(
+                f"SELECT m.* FROM memory_frames m WHERE {where} ORDER BY m.id LIMIT ?",
+                (*params, limit + 1),
+            )
+            frames = self._frames(
+                [self.store._row_to_frame(row) for row in rows[:limit]], eff_scope
+            )
+            active = [frame for frame in frames if frame.status == "active"]
+            kinds, refs = _group_frames(active)
+            return ListMemoriesResponse(
+                scope=ScopeModel.model_validate(eff_scope),
+                active_frames=active,
+                by_kind=kinds,
+                by_source_ref=refs,
+                review_queue=[frame for frame in frames if frame.status == "candidate"],
+                next_cursor=frames[-1].id if len(rows) > limit else None,
+            )
+
+        return self._call(_op)
+
+    def get_lineage(self, frame_id: int, *, scope: Any = None) -> list[MemoryFrameModel]:
+        from gluomem.frames.lifecycle import version_lineage
+
+        def _op() -> list[MemoryFrameModel]:
+            eff_scope = self._scope(scope)
+            return self._frames(version_lineage(self.store, frame_id, scope=eff_scope), eff_scope)
+
+        return self._call(_op)
+
+    def review_memory(
+        self,
+        frame_id: int,
+        action: Literal["accept", "edit", "dismiss"],
+        *,
+        edited_content: str | None = None,
+        scope: Any = None,
+    ) -> ReviewResponse:
+        from gluomem.service.schemas import ReviewRequest
+        from gluomem.write.events import review_memory
+
+        def _op() -> ReviewResponse:
+            eff_scope = self._scope(scope)
+            req = ReviewRequest.model_validate({"action": action, "edited_content": edited_content})
+            frame = review_memory(
+                self.store,
+                frame_id,
+                action=req.action,
+                edited_content=req.edited_content,
+                scope=eff_scope,
+            )
+            return ReviewResponse(action=req.action, frame=self._frames([frame], eff_scope)[0])
+
+        return self._call(_op)
+
+    def correct_memory(
+        self, frame_id: int, new_content: str, *, scope: Any = None
+    ) -> CorrectResponse:
+        from gluomem.frames.lifecycle import correct_memory
+        from gluomem.service.schemas import CorrectRequest
+
+        def _op() -> CorrectResponse:
+            eff_scope = self._scope(scope)
+            req = CorrectRequest.model_validate({"new_content": new_content})
+            result = correct_memory(self.store, frame_id, req.new_content, scope=eff_scope)
+            old, new = self._frames([result.superseded_frame, result.replacement_frame], eff_scope)
+            return CorrectResponse(
+                superseded_frame=old,
+                replacement_frame=new,
+                scope_generation=result.scope_generation,
+            )
+
+        return self._call(_op)
+
+    def forget_memory(self, frame_id: int, *, scope: Any = None) -> ForgetResponse:
+        from gluomem.frames.lifecycle import forget_memory
+
+        def _op() -> ForgetResponse:
+            eff_scope = self._scope(scope)
+            return ForgetResponse.model_validate(
+                forget_memory(self.store, frame_id, scope=eff_scope)
+            )
+
+        return self._call(_op)
+
+    def retract_source(self, source_ref: str, *, scope: Any = None) -> RetractSourceResponse:
+        from gluomem.frames.lifecycle import retract_source
+        from gluomem.service.schemas import RetractSourceRequest
+
+        def _op() -> RetractSourceResponse:
+            eff_scope = self._scope(scope)
+            req = RetractSourceRequest.model_validate({"source_ref": source_ref})
+            return RetractSourceResponse.model_validate(
+                retract_source(self.store, req.source_ref, scope=eff_scope)
+            )
+
+        return self._call(_op)
+
+    def sweep_expired(
+        self,
+        *,
+        now_iso: str | None = None,
+        dedup_key: str | None = None,
+        scope: Any = None,
+    ) -> SweepExpiredResponse:
+        from gluomem.frames.expiry import sweep_expired_episodes
+        from gluomem.service.schemas import SweepExpiredRequest
+
+        def _op() -> SweepExpiredResponse:
+            eff_scope = self._scope(scope)
+            req = SweepExpiredRequest.model_validate({"now_iso": now_iso, "dedup_key": dedup_key})
+            return SweepExpiredResponse.model_validate(
+                sweep_expired_episodes(self.store, scope=eff_scope, now_iso=req.now_iso)
+            )
+
+        return self._call(_op)
+
+    def enqueue_sweep_expired(
+        self,
+        *,
+        now_iso: str | None = None,
+        dedup_key: str | None = None,
+        scope: Any = None,
+    ) -> JobResponse:
+        from gluomem.service.schemas import SweepExpiredRequest
+        from gluomem.timeutil import now_utc_iso
+
+        def _op() -> JobResponse:
+            eff_scope = self._scope(scope)
+            req = SweepExpiredRequest.model_validate(
+                {"now_iso": now_iso, "dedup_key": dedup_key, "async_mode": True}
+            )
+            eff_now = req.now_iso or now_utc_iso()
+            key = req.dedup_key or f"sweep_expired:{eff_now}"
+            payload: dict[str, Any] = {"now_iso": req.now_iso} if req.now_iso is not None else {}
+            job = self.queue.enqueue(eff_scope, "sweep_expired", key, payload)
+            return JobResponse.model_validate(job)
+
+        return self._call(_op)
+
+    def export_memories(self, *, scope: Any = None) -> dict[str, Any]:
+        from gluomem.frames.eligibility import is_recall_eligible
+        from gluomem.frames.lifecycle import get_scope_generation
+
+        def _op() -> dict[str, Any]:
+            eff_scope = self._scope(scope)
+            frames = self._frames(
+                [
+                    frame
+                    for frame in self.store.all_frames(scope=eff_scope)
+                    if is_recall_eligible(frame) or frame.status == "candidate"
+                ],
+                eff_scope,
+            )
+            active = [frame for frame in frames if frame.status == "active"]
+            kinds, refs = _group_frames(active)
+            serialized = {
+                frame.id: {
+                    **frame.model_dump(),
+                    "lineage": [
+                        {
+                            "source_frame_id": entry.source_frame_id,
+                            "source_frame_type": entry.source_frame_type,
+                            "source_content_hash": entry.source_content_hash,
+                            "operation": entry.operation,
+                        }
+                        for entry in self.store.lineage(frame.id)
+                    ],
+                }
+                for frame in frames
+            }
+            return {
+                "scope": eff_scope.as_dict(),
+                "scope_generation": get_scope_generation(self.db.backend, eff_scope),
+                "active_memories": [serialized[frame.id] for frame in active],
+                "by_kind": kinds,
+                "by_source_ref": refs,
+                "review_queue": [
+                    serialized[frame.id] for frame in frames if frame.status == "candidate"
+                ],
+            }
+
+        return self._call(_op)
+
+    def get_job(self, job_id: int, *, scope: Any = None) -> JobResponse:
+        def _op() -> JobResponse:
+            eff_scope = self._scope(scope)
+            job = self.queue.get_job(job_id)
+            if job.scope != eff_scope:
+                raise KeyError(job_id)
+            return JobResponse.model_validate(job)
+
+        return self._call(_op)

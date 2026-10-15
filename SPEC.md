@@ -2,9 +2,9 @@
 
 > This document is the governing specification: it describes the full intended system, its requirements, and its acceptance criteria.
 
-> Companions: `DESIGN.md` (architecture), [`docs/research/PAPER.md`](./docs/research/PAPER.md) (experimental design).
+> Companions: `DESIGN.md` (architecture) and the companion `gluomem-bench` repository (`docs/research/PAPER.md` experimental design).
 
-> **Implementation status (2026-10-13, version 0.0.1).** This is the original research specification, not a statement of what ships. Not implemented: the tuning engine (G5, §7 tuning, FR-14 `tune`/`ablate`, acceptance criterion 4) and the committed reproducible run artifacts (Q-4, acceptance criteria 2 and 6; see [the evidence inventory](./docs/research/EVIDENCE_INVENTORY.md)). MemBench has no adapter. The `source` enum (§9 schema constant) labels provenance; it is not tenant, workspace or access control. The README lists the current scope and known limitations.
+> **Implementation status (2026-10-13, version 0.0.1).** This is the original research specification, not a statement of what ships. The benchmark harness, offline tuning (`tune`/`ablate`), and historical research reports live in the companion `gluomem-bench` repository. The `source` enum (§9 schema constant) labels provenance; it is not tenant, workspace or access control. The README lists the current scope and known limitations.
 
 ---
 

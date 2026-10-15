@@ -252,3 +252,69 @@ def test_worker_should_pause_and_sweep_expired_job(
     assert done is not None and done.id == job.id and done.status == "succeeded"
     assert store.get_frame(expired.id).status == "expired"
     assert store.index_state(expired.id).frame_vec == 0
+
+
+def test_worker_and_ingest_cognify_unifies_kg_resolution(
+    mind_db: MindDB, frame_store: FrameStore, cfg: AppConfig, kg: KnowledgeGraph
+) -> None:
+    from gluomem.llm.fake import FakeExtractors
+    from gluomem.llm.outputs import CognifyResult, KGEntity, KGRelation
+
+    extractors = FakeExtractors(
+        cognify_results=[
+            CognifyResult(
+                entities=[
+                    KGEntity(name="Alice", entity_type="person"),
+                    KGEntity(name="Belgrade", entity_type="city"),
+                ],
+                relations=[KGRelation(source="Alice", target="Belgrade", relation_type="lives_in")],
+            )
+        ],
+        banner=False,
+    )
+    ingested = ingest_source_event(
+        SourceEvent(
+            event_id="evt-cog-1",
+            source_ref="doc",
+            content="Alice works at Acme in Belgrade.",
+            event_time="2026-01-01T00:00:00",
+            scope=frame_store.scope,
+        ),
+        store=frame_store,
+        kg=kg,
+        cfg=cfg,
+        extractors=extractors,
+    )
+    assert len(ingested.frames) == 1
+    assert kg.find_valid_entities("Alice", cfg.kg)
+
+    # Worker cognify_frame resolves explicit entities/relations and retires conflicting edges
+    f2 = ingest_source_event(
+        SourceEvent(
+            event_id="evt-cog-2",
+            source_ref="doc",
+            content="Alice moved to Novi Sad.",
+            event_time="2026-02-01T00:00:00",
+            scope=frame_store.scope,
+        ),
+        store=frame_store,
+        cfg=cfg,
+    ).frames[0]
+    worker = MemoryWorker(
+        mind_db, frame_store, cfg=cfg, kg=kg, extractors=extractors, retry_backoff_seconds=0
+    )
+    worker.queue.enqueue(
+        job_type="cognify_frame",
+        dedup_key="cog-f2",
+        payload={
+            "frame_id": f2.id,
+            "entities": [{"name": "Alice", "entity_type": "person"}, {"name": "Novi Sad"}],
+            "relations": [{"source": "Alice", "target": "Novi Sad", "relation_type": "lives_in"}],
+        },
+    )
+    assert worker.run_once() is not None
+    alice = kg.find_valid_entities("Alice", cfg.kg)[0]
+    valid_rels = kg.find_valid_relations(alice.id, "lives_in")
+    assert len(valid_rels) == 1
+    novi_sad = kg.find_valid_entities("Novi Sad", cfg.kg)[0]
+    assert valid_rels[0].target_id == novi_sad.id

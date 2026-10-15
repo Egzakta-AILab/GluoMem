@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from gluomem.config.app_config import AppConfig
     from gluomem.frames.store import Frame, FrameStore
     from gluomem.kg.graph import KnowledgeGraph
+    from gluomem.llm.outputs import Extractors
 
 SourceType = Literal[
     "chat_turn",
@@ -198,12 +199,15 @@ def ingest_source_event(
     kg: KnowledgeGraph | None = None,
     cfg: AppConfig | None = None,
     scanner: Scanner | None = None,
+    extractors: Extractors | None = None,
     write_guard: Callable[[], None] | None = None,
 ) -> IngestEventResult:
     """Embed and scan first, then commit an event, its claims and provenance together."""
     from gluomem.frames.content_hash import suppression_key
+    from gluomem.frames.eligibility import is_recall_eligible
     from gluomem.frames.expiry import episode_expiry
     from gluomem.frames.provenance import get_frames_provenance
+    from gluomem.write.cognify import link_and_retire_resolved, resolve_cognify_result
     from gluomem.write.gate import admit
 
     backend = store._backend
@@ -248,6 +252,11 @@ def ingest_source_event(
     frame_source = _SOURCE_TYPE_TO_FRAME_SOURCE[event.source_type]
     prepared = [store._prepare_index(claim.content) for claim in claims]
     verdicts = [scanner.scan(claim.content, context=frame_source) for claim in claims]
+    cognified = (
+        [extractors.cognify(claim.content) for claim in claims]
+        if (extractors is not None and kg is not None and eff_cfg.write.cognify.enabled)
+        else [None for _ in claims]
+    )
     now_s = to_storage(event.created_at) or now_utc_iso()
     with backend.transaction():
         row = backend.fetchone(
@@ -275,7 +284,9 @@ def ingest_source_event(
             assert existing is not None
             return duplicate(existing)
         result = IngestEventResult(int(row["id"]), event.event_id, event.revision, False)
-        for claim, index, verdict in zip(claims, prepared, verdicts, strict=True):
+        for claim, index, verdict, cognify_res in zip(
+            claims, prepared, verdicts, cognified, strict=True
+        ):
             chash = content_hash(claim.content)
             if is_suppressed_by_tombstone(
                 backend,
@@ -319,6 +330,15 @@ def ingest_source_event(
             if admitted.frame is None:
                 continue
             frame = admitted.frame
+            if cognify_res is not None and kg is not None and is_recall_eligible(frame):
+                resolved = resolve_cognify_result(
+                    cognify_res,
+                    kg=kg,
+                    cfg=eff_cfg,
+                    valid_from=frame.event_time,
+                    scope=scope,
+                )
+                link_and_retire_resolved(resolved, frame.id, kg=kg, cfg=eff_cfg, scope=scope)
             backend.execute(
                 "INSERT INTO memory_provenance (tenant_id, principal_id, namespace, "
                 "frame_id, source_event_id, "

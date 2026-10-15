@@ -93,22 +93,6 @@ class ContradictionVerdict(BaseModel):
     confidence: float = Field(default=1.0, ge=0, le=1)
 
 
-class Verdict(BaseModel):
-    """Whether the prediction answers the question in agreement with gold."""
-
-    correct: bool
-    score: float = Field(ge=0, le=1)
-    rationale: str
-
-
-# Answerer return value for the bench harness; never referenced by a dspy
-# OutputField (AnswerQA outputs a plain str), so it is not prompt-visible.
-class AnswerResult(BaseModel):
-    text: str
-    prompt_tokens: int | None = None
-    completion_tokens: int | None = None
-
-
 class ExtractionError(RuntimeError):
     """Raised when an extraction task fails after retries are exhausted."""
 

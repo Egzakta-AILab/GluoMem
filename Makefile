@@ -1,4 +1,4 @@
-.PHONY: install install-offline hooks test lint typecheck check wheel-check optimize-prompts
+.PHONY: install install-offline hooks test lint typecheck check wheel-check
 
 PYTHON ?= 3.12
 
@@ -6,9 +6,9 @@ PYTHON ?= 3.12
 install:
 	uv sync --locked --extra all
 
-# Offline checks: llm, tune, service, postgres and dev tools, without model packages.
+# Offline checks: llm, service, postgres and dev tools, without model packages.
 install-offline:
-	uv sync --locked --extra llm --extra tune --extra service --extra postgres
+	uv sync --locked --extra llm --extra service --extra postgres
 
 # One-time per clone: commit gate (hygiene + lint + typecheck) and push gate (tests)
 hooks:
@@ -38,8 +38,3 @@ wheel-check:
 	cd "$$tmp"; \
 	"$$tmp/venv/bin/python" "$(CURDIR)/scripts/wheel_smoke.py" --expect-core-only; \
 	"$$tmp/venv/bin/gluomem" --help > /dev/null
-
-# Offline DSPy compile -> artifacts/ (needs the llm extra, OPENROUTER_API_KEY
-# and trainsets; spends real tokens). TRAINSETS defaults to benchmarks_data/trainsets.
-optimize-prompts:
-	uv run python -m gluomem.llm.optimize --task all --trainset $(or $(TRAINSETS),benchmarks_data/trainsets)
