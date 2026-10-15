@@ -671,13 +671,13 @@ def ingest_per_conversation(
     from gluomem.kg.graph import KnowledgeGraph
     from gluomem.llm.usage import total_tokens, usage_delta
     from gluomem.storage.db import MindDB
-    from gluomem.write.gate import InjectionScanner
+    from gluomem.write.gate import make_scanner
     from gluomem.write.ingest import ingest_conversation
 
     adapter = make_adapter(dataset, cfg)
     adapter.verify()
     db_dir.mkdir(parents=True, exist_ok=True)
-    scanner = InjectionScanner(cfg.safety)
+    scanner = make_scanner(cfg)
     # One embedder for the whole batch (loading MiniLM per conversation
     # wastes ~20s and churns memory).
     if embedder is None:

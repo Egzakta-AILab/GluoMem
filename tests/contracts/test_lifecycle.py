@@ -77,20 +77,31 @@ def test_claims_embed_before_transaction_and_crash_retries(frame_store, mind_db,
 
     original = gate.admit
     prepare = frame_store._prepare_index
+    scanner = gate.make_scanner(cfg)
+    raw_scan = scanner.scan
+    scan_calls = 0
     calls = 0
 
     def outside_transaction(text):
         assert not mind_db.in_transaction
         return prepare(text)
 
+    def scan_outside_transaction(content: str, *, context: str = ""):
+        nonlocal scan_calls
+        assert not mind_db.in_transaction
+        scan_calls += 1
+        return raw_scan(content, context=context)
+
     def crash_on_second(*args, **kwargs):
         nonlocal calls
         calls += 1
+        assert kwargs.get("verdict") is not None
         if calls == 2:
             raise RuntimeError("crash")
         return original(*args, **kwargs)
 
     monkeypatch.setattr(frame_store, "_prepare_index", outside_transaction)
+    monkeypatch.setattr(scanner, "scan", scan_outside_transaction)
     monkeypatch.setattr(gate, "admit", crash_on_second)
     event = SourceEvent(
         event_id="evt",
@@ -100,7 +111,8 @@ def test_claims_embed_before_transaction_and_crash_retries(frame_store, mind_db,
         ],
     )
     with pytest.raises(RuntimeError, match="crash"):
-        ingest_source_event(event, store=frame_store, cfg=cfg)
+        ingest_source_event(event, store=frame_store, cfg=cfg, scanner=scanner)
+    assert scan_calls == 2
     assert frame_store.count_frames() == 0
     assert mind_db.scalar("SELECT COUNT(*) FROM source_events") == 0
     assert mind_db.scalar("SELECT COUNT(*) FROM memory_provenance") == 0
@@ -112,9 +124,11 @@ def test_claims_embed_before_transaction_and_crash_retries(frame_store, mind_db,
         raise RuntimeError("fenced")
 
     with pytest.raises(RuntimeError, match="fenced"):
-        ingest_source_event(event, store=frame_store, cfg=cfg, write_guard=guard)
+        ingest_source_event(event, store=frame_store, cfg=cfg, scanner=scanner, write_guard=guard)
+    assert scan_calls == 4
     assert mind_db.scalar("SELECT COUNT(*) FROM source_events") == 0
-    retry = ingest_source_event(event, store=frame_store, cfg=cfg)
+    retry = ingest_source_event(event, store=frame_store, cfg=cfg, scanner=scanner)
+    assert scan_calls == 6
     assert not retry.deduplicated and len(retry.frames) == 2
 
 

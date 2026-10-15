@@ -48,7 +48,7 @@ from gluomem.storage.scope import (
 )
 from gluomem.timeutil import now_utc_iso, to_storage
 from gluomem.write.classify import classify_memory_kind
-from gluomem.write.gate import InjectionScanner
+from gluomem.write.gate import Scanner, make_scanner
 
 if TYPE_CHECKING:
     from gluomem.config.app_config import AppConfig
@@ -197,10 +197,10 @@ def ingest_source_event(
     store: FrameStore,
     kg: KnowledgeGraph | None = None,
     cfg: AppConfig | None = None,
-    scanner: InjectionScanner | None = None,
+    scanner: Scanner | None = None,
     write_guard: Callable[[], None] | None = None,
 ) -> IngestEventResult:
-    """Embed first, then commit an event, its claims and provenance together."""
+    """Embed and scan first, then commit an event, its claims and provenance together."""
     from gluomem.frames.content_hash import suppression_key
     from gluomem.frames.expiry import episode_expiry
     from gluomem.frames.provenance import get_frames_provenance
@@ -243,9 +243,11 @@ def ingest_source_event(
     if existing is not None:
         return duplicate(existing)
     eff_cfg = cfg or _default_config()
-    scanner = scanner or (_default_scanner() if cfg is None else InjectionScanner(eff_cfg.safety))
+    scanner = scanner or (_default_scanner() if cfg is None else make_scanner(eff_cfg))
     claims = extract_candidate_claims(event)
+    frame_source = _SOURCE_TYPE_TO_FRAME_SOURCE[event.source_type]
     prepared = [store._prepare_index(claim.content) for claim in claims]
+    verdicts = [scanner.scan(claim.content, context=frame_source) for claim in claims]
     now_s = to_storage(event.created_at) or now_utc_iso()
     with backend.transaction():
         row = backend.fetchone(
@@ -273,7 +275,7 @@ def ingest_source_event(
             assert existing is not None
             return duplicate(existing)
         result = IngestEventResult(int(row["id"]), event.event_id, event.revision, False)
-        for claim, index in zip(claims, prepared, strict=True):
+        for claim, index, verdict in zip(claims, prepared, verdicts, strict=True):
             chash = content_hash(claim.content)
             if is_suppressed_by_tombstone(
                 backend,
@@ -297,7 +299,7 @@ def ingest_source_event(
                 store=store,
                 kg=kg,
                 cfg=eff_cfg,
-                source=_SOURCE_TYPE_TO_FRAME_SOURCE[event.source_type],
+                source=frame_source,
                 trust="trusted" if event.source_type == "explicit_memory" else "normal",
                 event_time=claim.event_time,
                 created_at=now_s,
@@ -312,6 +314,7 @@ def ingest_source_event(
                 verified_by_user=event.source_type == "explicit_memory",
                 scope_wide=True,
                 prepared=index,
+                verdict=verdict,
             )
             if admitted.frame is None:
                 continue
@@ -357,5 +360,5 @@ def _default_config() -> AppConfig:
 
 
 @lru_cache(maxsize=1)
-def _default_scanner() -> InjectionScanner:
-    return InjectionScanner(_default_config().safety)
+def _default_scanner() -> Scanner:
+    return make_scanner(_default_config())

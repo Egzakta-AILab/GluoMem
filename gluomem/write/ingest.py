@@ -22,7 +22,7 @@ from gluomem.write.cognify import (
     retire_conflicting_relations,
 )
 from gluomem.write.dedup import SemanticDeduper
-from gluomem.write.gate import InjectionScanner, admit
+from gluomem.write.gate import Scanner, admit, make_scanner
 from gluomem.write.lanes import Observation, extract_observations, lane_importance
 
 if TYPE_CHECKING:
@@ -276,7 +276,7 @@ def _admit_observation(
     session_iso: str,
     graph: ResolvedGraph,
     facade: Extractors,
-    scanner: InjectionScanner,
+    scanner: Scanner,
     store: FrameStore,
     kg: KnowledgeGraph,
     cfg: AppConfig,
@@ -397,7 +397,7 @@ def ingest_conversation(
     conv: Conversation,
     *,
     facade: Extractors,
-    scanner: InjectionScanner,
+    scanner: Scanner,
     store: FrameStore,
     kg: KnowledgeGraph,
     cfg: AppConfig,
@@ -534,7 +534,7 @@ def ingest_path(
         db, embedder=embedder, chunking=cfg.chunking, scope=s, lifecycle=cfg.lifecycle
     )
     kg = KnowledgeGraph(db, scope=s)
-    scanner = InjectionScanner(cfg.safety)
+    scanner = make_scanner(cfg)
 
     total = IngestReport()
     for conv in conversations:
