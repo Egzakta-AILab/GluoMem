@@ -30,7 +30,9 @@
 | Recall Eligibility | `gluomem/frames/eligibility.py` (`is_recall_eligible`); SQL predicate `gluomem/storage/scope.py` (`eligible_sql`, `scope_sql`) |
 | Bitemporal Knowledge Graph | `gluomem/kg/graph.py` (`KnowledgeGraph`, `Entity`, `Relation`, `RelationInterval`) |
 | Admission Gate | `gluomem/write/gate.py` (`admit`, `AdmitResult`) |
-| Conflict Review | `gluomem/write/gate.py` (`find_conflict`); config `ConflictReviewConfig` in `gluomem/config/app_config.py` |
+| Conflict Review | `gluomem/write/events.py` (`ingest_source_event` untrusted-source `SUPERSEDE` holding); config `SafetyConfig.untrusted_sources` in `gluomem/config/app_config.py` |
+| Unified Event Extraction & Consolidation | `gluomem/write/events.py` (`extract_event_claims_from_envelope`, `ingest_source_event`) and `gluomem/llm/outputs.py` (`ExtractedClaimSpec`, `ConsolidationDecision`) |
+| Agentic Harnesses & MCP | `gluomem/mcp/server.py` (`McpServer`, `run_stdio_server`), `gluomem/harnesses/hooks.py` (`handle_recall_hook`, `handle_capture_hook`), `gluomem/harnesses/tools.py` (`MemoryToolPack`) |
 | Scope Generation | `gluomem/frames/generation.py` (`current_scope_generation`, `bump_scope_generation`) |
 | Suppression Key | `gluomem/frames/content_hash.py` (`suppression_key`); tables `memory_frame_keys`, `memory_tombstone_keys` |
 | Hybrid Search | `gluomem/search/hybrid.py` (`HybridSearch`, `SearchHit`, `SearchResult`) |

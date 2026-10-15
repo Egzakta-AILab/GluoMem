@@ -32,15 +32,19 @@ import dspy
 from gluomem.llm.bootstrap import load_or_build
 from gluomem.llm.outputs import (
     CognifyResult,
+    ConsolidationDecision,
     ContradictionVerdict,
+    ExtractedClaimSpec,
     ExtractedEvent,
     ExtractedFact,
     ExtractionError,
+    StoredCandidate,
 )
 from gluomem.llm.router import LMRouter
 from gluomem.llm.signatures import TASK_SIGNATURES
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import datetime
 
     from gluomem.config.app_config import AppConfig, DspyTaskConfig
@@ -159,3 +163,25 @@ class DspyExtractors:
             stored_statement=stored_statement,
         )
         return pred.verdict
+
+    def extract_event_claims(
+        self, source_text: str, *, reference_date: datetime | None = None
+    ) -> list[ExtractedClaimSpec]:
+        pred = self._run(
+            "event_claims",
+            source_text=source_text,
+            reference_date=reference_date.isoformat() if reference_date is not None else "",
+        )
+        return list(pred.claims)
+
+    def consolidate_claim(
+        self, new_claim: str, candidates: Sequence[StoredCandidate]
+    ) -> ConsolidationDecision:
+        if not candidates:
+            return ConsolidationDecision(action="ADD")
+        pred = self._run(
+            "consolidate",
+            new_claim=new_claim,
+            candidates=list(candidates),
+        )
+        return pred.decision

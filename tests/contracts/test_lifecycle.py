@@ -22,7 +22,6 @@ from gluomem.write.events import (
     EventConflictError,
     SourceEvent,
     SourceEventMessage,
-    classify_memory_kind,
     get_frame_provenance,
     ingest_source_event,
     list_review_queue,
@@ -36,25 +35,6 @@ def _evt(text: str, event_id: str = "evt", **kwargs: Any) -> SourceEvent:
     return SourceEvent(
         event_id=event_id, source_ref=kwargs.pop("source_ref", "doc"), content=text, **kwargs
     )
-
-
-@pytest.mark.parametrize(
-    ("text", "kind"),
-    [
-        ("I always prefer dark mode.", "preference"),
-        ("Увек користим ћирилицу за званичне дописе.", "preference"),
-        ("We decided to migrate to PostgreSQL.", "decision"),
-        ("Одлучили смо да пређемо на нови сервис.", "decision"),
-        ("Runbook step 1: drain the nodes.", "procedure"),
-        ("Uputstvo: korak 1.", "procedure"),
-        ("Yesterday an incident happened.", "episode"),
-        ("My role is Principal Engineer.", "profile"),
-        ("The process crashed.", "fact"),
-        ("An unselected preferenceish word.", "fact"),
-    ],
-)
-def test_bilingual_classifier_word_boundaries(text, kind):
-    assert classify_memory_kind(text) == kind
 
 
 def test_scopeless_delivery_is_scoped_idempotent_and_conflicts(frame_store, mind_db, mock_embedder):
@@ -382,7 +362,12 @@ def test_configured_episode_ttl_pin_and_promote(frame_store, mind_db, mock_embed
     cfg = cfg.with_overrides({"lifecycle.episode_ttl_days": 7, "lifecycle.review_threshold": 0.9})
     store = FrameStore(mind_db, mock_embedder, lifecycle=cfg.lifecycle)
     frame = ingest_source_event(
-        _evt("Yesterday an incident happened.", created_at="2026-01-01T12:00:00", confidence=0.8),
+        _evt(
+            "Yesterday an incident happened.",
+            created_at="2026-01-01T12:00:00",
+            confidence=0.8,
+            kind="episode",
+        ),
         store=store,
         cfg=cfg,
     ).frames[0]
@@ -453,6 +438,7 @@ def test_sweep_expired_episodes_reclaims_indexes_and_retires_orphaned_kg(
             "Yesterday the staging Redis cluster restarted.",
             "ep-exp",
             created_at="2099-01-01T12:00:00",
+            kind="episode",
         ),
         store=store,
         cfg=cfg,
@@ -462,6 +448,7 @@ def test_sweep_expired_episodes_reclaims_indexes_and_retires_orphaned_kg(
             "Yesterday the production failover drill completed.",
             "ep-pin",
             created_at="2099-01-01T12:00:00",
+            kind="episode",
             pinned=True,
         ),
         store=store,
@@ -472,6 +459,7 @@ def test_sweep_expired_episodes_reclaims_indexes_and_retires_orphaned_kg(
             "Today the canary deployment started.",
             "ep-act",
             created_at="2099-01-06T12:00:00",
+            kind="episode",
         ),
         store=store,
         cfg=cfg,

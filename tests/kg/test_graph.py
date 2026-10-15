@@ -111,11 +111,15 @@ def test_bfs_symmetric_depth_and_retired(kg: KnowledgeGraph) -> None:
 
 
 def test_seeding_and_normalizer(kg: KnowledgeGraph, cfg: AppConfig) -> None:
-    assert normalize("Postgres", cfg.kg) == "postgresql"
-    assert normalize("PG", cfg.kg) == "postgresql"
-    assert normalize("K8S", cfg.kg) == "kubernetes"
-    assert normalize("GO", cfg.kg) == "go"
-    assert normalize("Mountain", cfg.kg) == "mountain"
+    kg_cfg = KgConfig(
+        alias_groups=[["postgresql", "postgres", "pg"], ["kubernetes", "k8s"]],
+        tech_allowlist=["go", "ai", "ml", "db", "npm", "k8s"],
+    )
+    assert normalize("Postgres", kg_cfg) == "postgresql"
+    assert normalize("PG", kg_cfg) == "postgresql"
+    assert normalize("K8S", kg_cfg) == "kubernetes"
+    assert normalize("GO", kg_cfg) == "go"
+    assert normalize("Mountain", kg_cfg) == "mountain"
 
     fam_cfg = KgConfig(predicate_families=[["LIVES_IN", "MOVED_TO", "RESIDES_IN"]])
     assert predicate_family("lives_in", fam_cfg) == ("LIVES_IN", "MOVED_TO", "RESIDES_IN")
@@ -123,13 +127,13 @@ def test_seeding_and_normalizer(kg: KnowledgeGraph, cfg: AppConfig) -> None:
 
     ai = kg.create_entity("concept", "ai")
     pg = kg.create_entity("tool", "postgresql")
-    assert ai.id not in kg.seed_entities("I climbed a mountain", cfg.kg)
-    assert ai.id in kg.seed_entities("I use AI daily", cfg.kg)
-    assert pg.id in kg.seed_entities("we deploy pg in production", cfg.kg)
+    assert ai.id not in kg.seed_entities("I climbed a mountain", kg_cfg)
+    assert ai.id in kg.seed_entities("I use AI daily", kg_cfg)
+    assert pg.id in kg.seed_entities("we deploy pg in production", kg_cfg)
 
 
 def test_entity_and_relation_resolution_helpers(kg: KnowledgeGraph) -> None:
-    cfg = KgConfig()
+    cfg = KgConfig(alias_groups=[["kubernetes", "k8s"]])
     k8s = kg.create_entity("technology", "kubernetes")
     assert [x.id for x in kg.find_valid_entities("k8s", cfg)] == [k8s.id]
 

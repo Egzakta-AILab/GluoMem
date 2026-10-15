@@ -277,15 +277,8 @@ class ScoringConfig(BaseModel):
 class KgConfig(BaseModel):
     seed_min_len: int = 2
     bfs_symmetric: bool = True
-    alias_groups: list[list[str]] = Field(
-        default_factory=lambda: [
-            ["postgresql", "postgres", "pg"],
-            ["kubernetes", "k8s"],
-        ]
-    )
-    tech_allowlist: list[str] = Field(
-        default_factory=lambda: ["go", "ai", "ml", "db", "npm", "k8s"]
-    )
+    alias_groups: list[list[str]] = Field(default_factory=list)
+    tech_allowlist: list[str] = Field(default_factory=list)
     entity_type_mode: str = "retype"
     entity_type_allowlist: list[str] = Field(
         default_factory=lambda: [
@@ -419,29 +412,13 @@ class ScannerConfig(BaseModel):
     classifier: ClassifierScannerConfig = Field(default_factory=ClassifierScannerConfig)
 
 
-class ConflictReviewConfig(BaseModel):
-    """Hold untrusted writes that restate a trusted active fact with a different value.
-
-    A write from one of ``sources`` is compared with the ``neighbors`` best
-    any-term full-text matches among recall-eligible frames in its scope whose
-    own source is not in ``sources``. It conflicts with one when they share at
-    least ``min_shared_terms`` content words, the shared words are at least
-    ``min_overlap`` of the shorter one's, and each has a word the other lacks
-    (a pure elaboration is not a conflict).
-    """
-
-    enabled: bool = True
-    sources: list[FrameSource] = Field(default_factory=lambda: _REVIEWED_SOURCES.copy())
-    neighbors: int = Field(default=10, ge=1)
-    min_shared_terms: int = Field(default=3, ge=1)
-    min_overlap: float = Field(default=0.5, gt=0.0, le=1.0)
-
-
 class SafetyConfig(BaseModel):
     block_threshold: float = 0.7
     fail_mode: str = "quarantine"
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
-    conflict_review: ConflictReviewConfig = Field(default_factory=ConflictReviewConfig)
+    untrusted_sources: list[FrameSource] = Field(
+        default_factory=lambda: _REVIEWED_SOURCES.copy()
+    )
 
 
 class CompactionConfig(BaseModel):
@@ -572,6 +549,17 @@ def _default_dspy_tasks() -> dict[str, DspyTaskConfig]:
         ),
         "cognify": DspyTaskConfig(model="deepseek-flash", module="predict"),
         "contradiction": DspyTaskConfig(model="deepseek-flash", module="predict", temperature=0.0),
+        "event_claims": DspyTaskConfig(
+            model="deepseek-flash",
+            module="predict",
+            temperature=0.0,
+            max_tokens=4096,
+        ),
+        "consolidate": DspyTaskConfig(
+            model="deepseek-flash",
+            module="predict",
+            temperature=0.0,
+        ),
     }
 
 

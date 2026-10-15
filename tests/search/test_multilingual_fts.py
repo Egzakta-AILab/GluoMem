@@ -49,7 +49,6 @@ def test_cyrillic_latin_and_ascii_folding_primitives() -> None:
     expected_tokens = (
         "београду",
         "beogradu",
-        "beograd",
         "извештај",
         "izveštaj",
         "izvestaj",
@@ -211,10 +210,8 @@ def test_postgres_tsvector_store_combines_simple_folded_and_english_queries() ->
 @pytest.mark.parametrize(
     "forms",
     [
-        ("Beograd", "Beogradu", "Београд", "Београду"),
-        ("Gradovi", "Gradova", "Градови", "Градова"),
+        ("Beograd", "Београд"),
         ("Đorđe", "Djordje", "Dorde", "Ђорђе"),
-        ("program", "programa", "програм", "програма"),
         ("Ljiljana", "ǈiljana", "Љиљана", "LJiljana"),
         ("Džep", "ǅep", "Џеп", "Dzep"),
         ("Njegoš", "ǋegoš", "Његош", "Njegos"),
@@ -230,17 +227,9 @@ def test_sqlite_variants_match_symmetrically_in_both_directions(
             assert set(db.fts.search(sanitize(query), limit=10)) == {frame.id for frame in frames}
 
 
-@pytest.mark.parametrize("query", ["progr", "sist", "radi", "unrelated"])
-def test_sqlite_light_stem_does_not_overstem_common_words(query: str, tmp_path: Path) -> None:
-    with MindDB(tmp_path / "negative.mind", dim=16) as db:
-        store = FrameStore(db, embedder=MockEmbedder(dim=16))
-        frame = store.create_i_frame("g1", "program sistem radio")
-        assert frame.id not in db.fts.search(sanitize(query), limit=10)
-
-
-def test_postgres_query_expression_quotes_user_words_and_includes_stems() -> None:
+def test_postgres_query_expression_quotes_user_words_and_folds_scripts() -> None:
     assert fold_query_text("or -x") == "('or') & ('x')"
-    folded = fold_query_text("Beogradu Đorđe")
+    folded = fold_query_text("Beograd Đorđe")
     assert "'beograd'" in folded
     assert "'djordje'" in folded
     assert "'dorde'" in folded
@@ -255,8 +244,8 @@ def test_match_any_ors_terms_in_both_dialects(tmp_path: Path) -> None:
 
     with MindDB(tmp_path / "any.mind", dim=16) as db:
         store = FrameStore(db, embedder=MockEmbedder(dim=16))
-        both = store.create_i_frame("g1", "Главни трезор у Београду")
-        one = store.create_i_frame("g2", "Rezervni trezor u Nisu")
+        both = store.create_i_frame("g1", "Главни трезор Београд")
+        one = store.create_i_frame("g2", "Rezervni trezor Nis")
         store.create_i_frame("g3", "unrelated note")
         query = sanitize("glavni trezor beograd")
         assert db.fts.search(query, limit=10) == [both.id]

@@ -219,6 +219,7 @@ def test_worker_should_pause_and_sweep_expired_job(
             event_id="exp-job",
             source_ref="doc",
             content="Yesterday the worker queue saturated.",
+            kind="episode",
             created_at="2026-01-01T00:00:00",
             scope=store.scope,
         ),

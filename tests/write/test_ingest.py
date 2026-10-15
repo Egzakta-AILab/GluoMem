@@ -77,7 +77,17 @@ def _sample_conversation() -> Conversation:
 def test_lanes_extraction_order_event_time_and_disablement(env) -> None:
     obs = extract_observations(
         "Alice got promoted yesterday. Bob likes tea.",
-        facade=FakeExtractors(banner=False),
+        facade=FakeExtractors(
+            events=[
+                [
+                    ExtractedEvent(
+                        text="Alice got promoted yesterday.",
+                        event_date=datetime(2023, 5, 7),
+                    )
+                ]
+            ],
+            banner=False,
+        ),
         reference_date=_REF,
         speakers=["Alice", "Bob"],
         speaker_texts={"Alice": "I got promoted.", "Bob": "I like tea."},

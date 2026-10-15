@@ -1,4 +1,4 @@
-"""Scoped SourceEvent ingestion with replay receipts and provenance."""
+"""Scoped SourceEvent ingestion with single-pass extraction, consolidation, and provenance."""
 
 from __future__ import annotations
 
@@ -39,6 +39,14 @@ from gluomem.frames.review import (
     review_memory as review_memory,
 )
 from gluomem.frames.store import FrameSource
+from gluomem.llm.outputs import (
+    CognifyResult,
+    ConsolidationDecision,
+    Extractors,
+    KGEntity,
+    KGRelation,
+    StoredCandidate,
+)
 from gluomem.storage.scope import (
     FrameStatus,
     MemoryKind,
@@ -46,15 +54,13 @@ from gluomem.storage.scope import (
     resolve_scope,
     scope_sql,
 )
-from gluomem.timeutil import now_utc_iso, to_storage
-from gluomem.write.classify import classify_memory_kind
+from gluomem.timeutil import now_utc_iso, parse_utc, to_storage
 from gluomem.write.gate import Scanner, make_scanner
 
 if TYPE_CHECKING:
     from gluomem.config.app_config import AppConfig
-    from gluomem.frames.store import Frame, FrameStore
+    from gluomem.frames.store import Frame, FrameStore, _PreparedIndex
     from gluomem.kg.graph import KnowledgeGraph
-    from gluomem.llm.outputs import Extractors
 
 SourceType = Literal[
     "chat_turn",
@@ -107,13 +113,16 @@ class SourceEvent(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class ExtractedClaim:
-    """One candidate claim extracted from a source event."""
+    """One atomic claim extracted from a source event."""
 
     content: str
     message_id: str | None
     kind: MemoryKind
     confidence: float
     event_time: str | None = None
+    verbatim_span: str = ""
+    entities: tuple[KGEntity, ...] = ()
+    relations: tuple[KGRelation, ...] = ()
 
 
 @dataclass(slots=True)
@@ -129,8 +138,9 @@ class IngestEventResult:
     suppressed_hashes: list[str] = field(default_factory=list)
 
 
-def extract_candidate_claims(event: SourceEvent) -> list[ExtractedClaim]:
-    """Extract non-empty claims, excluding assistant messages."""
+def _direct_claims(event: SourceEvent) -> list[ExtractedClaim]:
+    """Direct claim pass-through when kind is explicitly provided or no extractor is active."""
+    effective_kind: MemoryKind = event.kind or "fact"
     claims: list[ExtractedClaim] = []
     if event.messages:
         for msg in event.messages:
@@ -139,29 +149,139 @@ def extract_candidate_claims(event: SourceEvent) -> list[ExtractedClaim]:
             raw = msg.content.strip()
             if not raw:
                 continue
-            kind = event.kind or classify_memory_kind(raw)
             claims.append(
                 ExtractedClaim(
                     content=raw,
                     message_id=msg.message_id,
-                    kind=kind,
+                    kind=effective_kind,
                     confidence=float(event.confidence),
                     event_time=msg.timestamp or event.event_time,
+                    verbatim_span=raw,
                 )
             )
     elif event.content and event.content.strip():
         raw = event.content.strip()
-        kind = event.kind or classify_memory_kind(raw)
         claims.append(
             ExtractedClaim(
                 content=raw,
                 message_id=None,
-                kind=kind,
+                kind=effective_kind,
                 confidence=float(event.confidence),
                 event_time=event.event_time,
+                verbatim_span=raw,
             )
         )
     return claims
+
+
+def _format_event_source(event: SourceEvent) -> tuple[str, dict[str, str | None], str | None]:
+    """Format eligible event segments into a single source string for LLM extraction."""
+    msg_timestamps: dict[str, str | None] = {}
+    default_mid: str | None = None
+    if event.messages:
+        lines: list[str] = []
+        eligible_mids: list[str] = []
+        for msg in event.messages:
+            if msg.role not in ("user", "system", "tool"):
+                continue
+            raw = msg.content.strip()
+            if not raw:
+                continue
+            msg_timestamps[msg.message_id] = msg.timestamp or event.event_time
+            eligible_mids.append(msg.message_id)
+            lines.append(f"[{msg.message_id}] {msg.role}: {raw}")
+        if len(eligible_mids) == 1:
+            default_mid = eligible_mids[0]
+        return "\n".join(lines), msg_timestamps, default_mid
+    if event.content and event.content.strip():
+        return event.content.strip(), msg_timestamps, None
+    return "", msg_timestamps, None
+
+
+def extract_event_claims_from_envelope(
+    event: SourceEvent,
+    *,
+    extractors: Extractors | None = None,
+) -> list[ExtractedClaim]:
+    """Extract atomic claims from a SourceEvent using single-pass Extractors when configured."""
+    if (event.source_type == "explicit_memory" and event.kind is not None) or extractors is None:
+        return _direct_claims(event)
+
+    source_text, msg_timestamps, default_mid = _format_event_source(event)
+    if not source_text:
+        return []
+
+    ref_iso = event.event_time or event.created_at
+    ref_dt = None
+    if ref_iso:
+        try:
+            ref_dt = parse_utc(ref_iso)
+        except ValueError:
+            ref_dt = None
+
+    specs = extractors.extract_event_claims(source_text, reference_date=ref_dt)
+    claims: list[ExtractedClaim] = []
+    for spec in specs:
+        text = spec.text.strip()
+        if not text:
+            continue
+        mid = spec.message_id if spec.message_id in msg_timestamps else default_mid
+        ev_time = (
+            to_storage(spec.event_date)
+            if spec.event_date is not None
+            else (msg_timestamps.get(mid) if mid is not None else event.event_time)
+            or event.event_time
+        )
+        claims.append(
+            ExtractedClaim(
+                content=text,
+                message_id=mid,
+                kind=event.kind or spec.kind,
+                confidence=min(float(event.confidence), float(spec.confidence)),
+                event_time=ev_time,
+                verbatim_span=spec.verbatim_span.strip() or text,
+                entities=tuple(spec.entities),
+                relations=tuple(spec.relations),
+            )
+        )
+    return claims
+
+
+def _retrieve_consolidation_candidates(
+    store: FrameStore,
+    prepared: _PreparedIndex,
+    *,
+    scope: MemoryScope,
+    limit: int = 5,
+) -> list[StoredCandidate]:
+    """Retrieve top-k recall-eligible active frames in scope for claim consolidation."""
+    from gluomem.frames.eligibility import is_recall_eligible
+
+    seen_ids: list[int] = []
+    for fid in store._fts.search(prepared.text, limit, scope=scope, match_any=True):
+        if fid not in seen_ids:
+            seen_ids.append(fid)
+    if prepared.frame_vec is not None:
+        for fid, _ in store._db.frame_vec.search(prepared.frame_vec, limit, scope=scope):
+            if fid not in seen_ids:
+                seen_ids.append(fid)
+    if not seen_ids:
+        return []
+    frames_map = store.get_frames(seen_ids[:limit], scope=scope)
+    candidates: list[StoredCandidate] = []
+    for fid in seen_ids[:limit]:
+        frame = frames_map.get(fid)
+        if frame is not None and frame.status == "active" and is_recall_eligible(frame):
+            candidates.append(
+                StoredCandidate(
+                    frame_id=frame.id,
+                    content=frame.content,
+                    kind=frame.kind,
+                    source=frame.source,
+                    event_time=frame.event_time,
+                )
+            )
+    return candidates
 
 
 def _canonical_event_payload(event: SourceEvent) -> tuple[str, str]:
@@ -202,10 +322,12 @@ def ingest_source_event(
     extractors: Extractors | None = None,
     write_guard: Callable[[], None] | None = None,
 ) -> IngestEventResult:
-    """Embed and scan first, then commit an event, its claims and provenance together."""
+    """Extract, consolidate, embed, and scan first, then commit claims and provenance atomically."""
     from gluomem.frames.content_hash import suppression_key
     from gluomem.frames.eligibility import is_recall_eligible
     from gluomem.frames.expiry import episode_expiry
+    from gluomem.frames.generation import bump_scope_generation
+    from gluomem.frames.lifecycle import _scrub_frames
     from gluomem.frames.provenance import get_frames_provenance
     from gluomem.write.cognify import link_and_retire_resolved, resolve_cognify_result
     from gluomem.write.gate import admit
@@ -248,16 +370,42 @@ def ingest_source_event(
         return duplicate(existing)
     eff_cfg = cfg or _default_config()
     scanner = scanner or (_default_scanner() if cfg is None else make_scanner(eff_cfg))
-    claims = extract_candidate_claims(event)
+    claims = extract_event_claims_from_envelope(event, extractors=extractors)
     frame_source = _SOURCE_TYPE_TO_FRAME_SOURCE[event.source_type]
     prepared = [store._prepare_index(claim.content) for claim in claims]
     verdicts = [scanner.scan(claim.content, context=frame_source) for claim in claims]
-    cognified = (
-        [extractors.cognify(claim.content) for claim in claims]
-        if (extractors is not None and kg is not None and eff_cfg.write.cognify.enabled)
-        else [None for _ in claims]
-    )
+
+    cognified: list[CognifyResult | None] = []
+    used_single_pass = not (event.source_type == "explicit_memory" and event.kind is not None)
+    for claim in claims:
+        if kg is not None and eff_cfg.write.cognify.enabled:
+            if claim.entities or claim.relations:
+                cognified.append(
+                    CognifyResult(
+                        entities=list(claim.entities),
+                        relations=list(claim.relations),
+                    )
+                )
+            elif extractors is not None and not used_single_pass:
+                cognified.append(extractors.cognify(claim.content))
+            else:
+                cognified.append(None)
+        else:
+            cognified.append(None)
+
+    decisions: list[ConsolidationDecision] = []
+    for claim, index in zip(claims, prepared, strict=True):
+        if extractors is not None:
+            candidates = _retrieve_consolidation_candidates(store, index, scope=scope)
+            if candidates:
+                decisions.append(extractors.consolidate_claim(claim.content, candidates))
+            else:
+                decisions.append(ConsolidationDecision(action="ADD"))
+        else:
+            decisions.append(ConsolidationDecision(action="ADD"))
+
     now_s = to_storage(event.created_at) or now_utc_iso()
+    untrusted_sources = set(eff_cfg.safety.untrusted_sources)
     with backend.transaction():
         row = backend.fetchone(
             "INSERT INTO source_events (tenant_id, principal_id, namespace, event_id, "
@@ -284,8 +432,8 @@ def ingest_source_event(
             assert existing is not None
             return duplicate(existing)
         result = IngestEventResult(int(row["id"]), event.event_id, event.revision, False)
-        for claim, index, verdict, cognify_res in zip(
-            claims, prepared, verdicts, cognified, strict=True
+        for claim, index, verdict, cognify_res, decision in zip(
+            claims, prepared, verdicts, cognified, decisions, strict=True
         ):
             chash = content_hash(claim.content)
             if is_suppressed_by_tombstone(
@@ -298,10 +446,55 @@ def ingest_source_event(
             ):
                 result.suppressed_hashes.append(chash)
                 continue
-            needs_review = event.require_review or (
-                event.source_type != "explicit_memory"
-                and claim.confidence < eff_cfg.lifecycle.review_threshold
+
+            target_frame: Frame | None = None
+            if decision.target_frame_id is not None:
+                try:
+                    cand_frame = store.get_frame(decision.target_frame_id, scope=scope)
+                    if cand_frame.status == "active":
+                        target_frame = cand_frame
+                except KeyError:
+                    target_frame = None
+
+            if decision.action == "NOOP" and target_frame is not None:
+                backend.execute(
+                    "INSERT INTO memory_provenance (tenant_id, principal_id, namespace, "
+                    "frame_id, source_event_id, "
+                    "source_type, source_ref, message_id, verbatim_span, created_at) VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        *scope.as_tuple(),
+                        target_frame.id,
+                        result.event_row_id,
+                        event.source_type,
+                        event.source_ref,
+                        claim.message_id,
+                        claim.verbatim_span or claim.content,
+                        now_s,
+                    ),
+                )
+                if target_frame.id not in {f.id for f in result.frames}:
+                    result.frames.append(target_frame)
+                continue
+
+            needs_review = (
+                event.require_review
+                or decision.action == "CANDIDATE"
+                or (
+                    event.source_type != "explicit_memory"
+                    and claim.confidence < eff_cfg.lifecycle.review_threshold
+                )
             )
+            untrusted_conflict = (
+                decision.action == "SUPERSEDE"
+                and target_frame is not None
+                and frame_source in untrusted_sources
+                and target_frame.source not in untrusted_sources
+                and not (event.pinned or event.source_type == "explicit_memory")
+            )
+            if untrusted_conflict:
+                needs_review = True
+
             status: FrameStatus = "candidate" if needs_review else "active"
             admitted = admit(
                 claim.content,
@@ -330,6 +523,23 @@ def ingest_source_event(
             if admitted.frame is None:
                 continue
             frame = admitted.frame
+
+            if (
+                decision.action == "SUPERSEDE"
+                and target_frame is not None
+                and target_frame.id != frame.id
+                and frame.status == "active"
+                and is_recall_eligible(frame)
+            ):
+                store._record_lineage(
+                    frame.id, target_frame, target_frame.content_hash, "supersede"
+                )
+                _scrub_frames(store, [target_frame], scope=scope, status="superseded")
+                store._update(target_frame.id, scope, superseded_by=frame.id)
+                store._update(frame.id, scope, supersedes=target_frame.id)
+                bump_scope_generation(backend, scope)
+                frame = store.get_frame(frame.id, scope=scope)
+
             if cognify_res is not None and kg is not None and is_recall_eligible(frame):
                 resolved = resolve_cognify_result(
                     cognify_res,
@@ -351,7 +561,7 @@ def ingest_source_event(
                     event.source_type,
                     event.source_ref,
                     claim.message_id,
-                    claim.content,
+                    claim.verbatim_span or claim.content,
                     now_s,
                 ),
             )

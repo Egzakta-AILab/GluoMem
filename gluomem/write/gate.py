@@ -16,13 +16,13 @@ from gluomem.frames.store import (
     Importance,
     Trust,
 )
-from gluomem.search.multilingual import canonical_terms, fold_to_ascii
+from gluomem.search.multilingual import fold_to_ascii
 from gluomem.storage.scope import FrameStatus, MemoryKind, MemoryScope, resolve_scope
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from gluomem.config.app_config import AppConfig, ConflictReviewConfig, SafetyConfig
+    from gluomem.config.app_config import AppConfig, SafetyConfig
     from gluomem.frames.store import FrameStore, _PreparedIndex
     from gluomem.kg.graph import KnowledgeGraph
     from gluomem.write.dedup import SemanticDeduper
@@ -76,54 +76,6 @@ class InjectionScanner:
         return ScanVerdict(score=score, matched=matched)
 
 
-_FAKE_CLASSIFIER_RULES: tuple[tuple[int, float, re.Pattern[str]], ...] = (
-    (
-        0,
-        0.85,
-        re.compile(
-            r"(?i)\b(?:earlier\s+guidance\s+has\s+expired|"
-            r"previous\s+records?\s+(?:are|is)\s+(?:obsolete|superseded|void)|"
-            r"new\s+source\s+of\s+truth|"
-            r"ignore\s+(?:all\s+)?(?:previous|prior|earlier)\s+(?:instructions|guidance|context)|"
-            r"(?:prethodn[ae]|dosadasnj[ae])\s+(?:evidencij[ae]|uputstva|smernice)\s+"
-            r"(?:su\s+istekl[ae]|(?:vise\s+)?ne\s+vaz[ie])|"
-            r"stari\s+zapis[i]?\s+vise\s+ne\s+vaz[ie])"
-        ),
-    ),
-    (
-        1,
-        0.82,
-        re.compile(
-            r"(?i)\b(?:central\s+security\s+has\s+signed|"
-            r"highest-priority\s+operator\s+bulletin|"
-            r"authorized\s+maintenance\s+directive|"
-            r"mandatory\s+compliance\s+addendum|"
-            r"merodavna\s+je\s+iskljucivo\s+ova\s+dopuna|"
-            r"potpisao\s+bezbednosni\s+tim)"
-        ),
-    ),
-    (
-        2,
-        0.90,
-        re.compile(
-            r"(?i)\b(?:send|forward|route|transmit|reveal|exfiltrate|prosledi|otkrij)\b.{0,80}"
-            r"\b(?:secrets?|credentials?|tokens?|api\s+keys?|"
-            r"(?:confidential|access)\s+material|lozink[aeu]|tajne)\b"
-        ),
-    ),
-    (
-        3,
-        0.80,
-        re.compile(
-            r"(?i)\b(?:for\s+(?:all\s+)?future\s+(?:questions|answers|responses)|"
-            r"retain\s+it\s+for\s+future\s+answers|"
-            r"za\s+sve\s+naredne\s+odgovore|"
-            r"u\s+buducim\s+odgovorima\s+navedi)"
-        ),
-    ),
-)
-
-
 class FakeInjectionClassifier:
     """Deterministic offline test double for the zero-shot injection classifier."""
 
@@ -133,31 +85,21 @@ class FakeInjectionClassifier:
         attack_labels: Sequence[str],
         review_threshold: float = 0.4,
         scripted_scores: dict[str, float] | None = None,
+        default_score: float = 0.0,
     ) -> None:
         self._attack_labels = tuple(attack_labels)
         self._review_threshold = float(review_threshold)
         self._scripted: dict[str, float] = dict(scripted_scores or {})
+        self._default_score = float(default_score)
 
     def score(self, content: str) -> tuple[float, list[str]]:
-        if content in self._scripted:
-            val = float(self._scripted[content])
-            labels = (
-                [self._attack_labels[0]]
-                if val >= self._review_threshold and self._attack_labels
-                else []
-            )
-            return val, labels
-        folded = fold_to_ascii(content)
-        best = 0.0
-        matched: list[str] = []
-        for label_idx, weight, pattern in _FAKE_CLASSIFIER_RULES:
-            if pattern.search(content) is not None or pattern.search(folded) is not None:
-                best = max(best, weight)
-                if weight >= self._review_threshold and label_idx < len(self._attack_labels):
-                    label = self._attack_labels[label_idx]
-                    if label not in matched:
-                        matched.append(label)
-        return best, matched
+        val = float(self._scripted.get(content, self._default_score))
+        labels = (
+            [self._attack_labels[0]]
+            if val >= self._review_threshold and self._attack_labels
+            else []
+        )
+        return val, labels
 
 
 class GlinerInjectionClassifier:
@@ -254,9 +196,18 @@ def make_scanner(cfg: AppConfig) -> Scanner:
 
     if entry.provider == "fake":
         require_fake_allowed(cfg, f"safety.scanner.classifier.model={name!r} (provider: fake)")
+        raw_scores = entry.extra.get("scripted_scores")
+        scripted_scores = (
+            {str(k): float(v) for k, v in raw_scores.items()}
+            if isinstance(raw_scores, dict)
+            else None
+        )
+        default_score = float(entry.extra.get("default_score", 0.0))
         classifier: InjectionClassifier = FakeInjectionClassifier(
             attack_labels=clf_cfg.attack_labels,
             review_threshold=clf_cfg.review_threshold,
+            scripted_scores=scripted_scores,
+            default_score=default_score,
         )
         return CompositeScanner(regex_scanner, classifier)
 
@@ -280,74 +231,9 @@ def make_scanner(cfg: AppConfig) -> Scanner:
     return CompositeScanner(regex_scanner, classifier)
 
 
-_STOPWORDS = frozenset(
-    (
-        "a an and are as at be by for from has in is it its of on or that the this to was with "
-        "da do i iz ili je na od sa se su u za"
-    ).split()
-)
-
-_SEQUENCE_LABELS = frozenset({"note", "evidencij", "evidencija", "entry", "item"})
-
-
-def _fact_terms(text: str) -> frozenset[str]:
-    """Content words of ``text``; digits always count except serial counters after log labels."""
-    terms = canonical_terms(text)
-    filtered: set[str] = set()
-    for idx, term in enumerate(terms):
-        if term in _STOPWORDS or (len(term) <= 1 and not term.isdigit()):
-            continue
-        if term.isdigit() and idx > 0 and terms[idx - 1] in _SEQUENCE_LABELS:
-            continue
-        filtered.add(term)
-    return frozenset(filtered)
-
-
-def _restates_with_new_value(
-    new: frozenset[str], old: frozenset[str], cfg: ConflictReviewConfig
-) -> bool:
-    shared = len(new & old)
-    if shared < cfg.min_shared_terms or not (new - old) or not (old - new):
-        return False
-    return shared / min(len(new), len(old)) >= cfg.min_overlap
-
-
-def find_conflict(
-    content: str,
-    *,
-    store: FrameStore,
-    scope: MemoryScope,
-    cfg: ConflictReviewConfig,
-) -> int | None:
-    """Return the id of a more-trusted active frame ``content`` restates with a new value.
-
-    Frames from the reviewed sources themselves are not compared: untrusted
-    writes may disagree with each other, but not silently with a trusted one.
-    """
-    new = _fact_terms(content)
-    if len(new) < cfg.min_shared_terms:
-        return None
-    query = " ".join(f'"{t}"' for t in sorted(new))
-    ids = store._fts.search(query, cfg.neighbors, scope=scope, match_any=True)
-    frames = store.get_frames(ids, scope=scope)
-    for fid in ids:
-        frame = frames.get(fid)
-        if (
-            frame is not None
-            and frame.source not in cfg.sources
-            and _restates_with_new_value(new, _fact_terms(frame.indexable_text), cfg)
-        ):
-            return fid
-    return None
-
-
 @dataclass
 class AdmitResult:
-    """Outcome of one admission: the frame (or None under reject) and verdict.
-
-    ``conflicts_with`` names the active frame an untrusted write restated with a
-    different value; such a write is stored as a ``candidate`` for review.
-    """
+    """Outcome of one admission: the frame (or None under reject) and verdict."""
 
     admitted: bool
     frame: Frame | None
@@ -459,20 +345,6 @@ def admit(
                     semantic_deduped=True,
                 )
 
-    conflicts_with: int | None = None
-    review = cfg.safety.conflict_review
-    if (
-        review.enabled
-        and frame_type != "B"
-        and source in review.sources
-        and status == "active"
-        and not (pinned or verified_by_user)
-        and is_recall_eligible(trust, status=status, expires_at=expires_at)
-    ):
-        conflicts_with = find_conflict(content, store=store, scope=s, cfg=review)
-        if conflicts_with is not None:
-            status = "candidate"
-
     clf_cfg = cfg.safety.scanner.classifier
     if (
         clf_cfg.enabled
@@ -558,5 +430,4 @@ def admit(
         verdict=verdict,
         trust=trust,
         superseded_id=superseded_id,
-        conflicts_with=conflicts_with,
     )

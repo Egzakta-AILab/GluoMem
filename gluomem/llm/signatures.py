@@ -19,11 +19,14 @@ import dspy
 from pydantic import Field, create_model
 
 from gluomem.llm.outputs import (
+    ConsolidationDecision,
     ContradictionVerdict,
+    ExtractedClaimSpec,
     ExtractedEvent,
     ExtractedFact,
     KGEntity,
     KGRelation,
+    StoredCandidate,
 )
 
 if TYPE_CHECKING:
@@ -61,6 +64,25 @@ class ContradictionCheck(dspy.Signature):
     new_statement: str = dspy.InputField()
     stored_statement: str = dspy.InputField()
     verdict: ContradictionVerdict = dspy.OutputField()
+
+
+class EventClaimExtraction(dspy.Signature):
+    """Extract atomic, self-contained memory claims from a source event; classify
+    each claim's kind, resolve relative dates against reference_date, attach the
+    supporting verbatim quote, and extract typed entities and relations."""
+
+    source_text: str = dspy.InputField()
+    reference_date: str = dspy.InputField()
+    claims: list[ExtractedClaimSpec] = dspy.OutputField()
+
+
+class ClaimConsolidation(dspy.Signature):
+    """Decide whether a new claim is new (ADD), already stored (NOOP), updates/replaces
+    an existing stored candidate (SUPERSEDE), or requires review (CANDIDATE)."""
+
+    new_claim: str = dspy.InputField()
+    candidates: list[StoredCandidate] = dspy.InputField()
+    decision: ConsolidationDecision = dspy.OutputField()
 
 
 def make_cognify_signature(allowed_types: Sequence[str]) -> type[dspy.Signature]:
@@ -103,4 +125,6 @@ TASK_SIGNATURES: dict[str, type[dspy.Signature]] = {
     "event_extraction": EventExtraction,
     "cognify": CognifyExtraction,
     "contradiction": ContradictionCheck,
+    "event_claims": EventClaimExtraction,
+    "consolidate": ClaimConsolidation,
 }

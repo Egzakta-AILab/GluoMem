@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -11,7 +12,9 @@ import pytest
 from gluomem.llm import (
     CachedExtractors,
     CognifyResult,
+    ConsolidationDecision,
     ContradictionVerdict,
+    ExtractedClaimSpec,
     ExtractedEvent,
     ExtractedFact,
     ExtractionCacheMiss,
@@ -19,6 +22,7 @@ from gluomem.llm import (
     Extractors,
     FakeExtractors,
     KGEntity,
+    StoredCandidate,
 )
 
 _TEXT = "Alice moved to Denver. She likes tea."
@@ -42,6 +46,16 @@ class _Boom:
     def check_contradiction(
         self, new_statement: str, stored_statement: str
     ) -> ContradictionVerdict:
+        raise AssertionError("inner extractor called on a cache hit")
+
+    def extract_event_claims(
+        self, source_text: str, *, reference_date: datetime | None = None
+    ) -> list[ExtractedClaimSpec]:
+        raise AssertionError("inner extractor called on a cache hit")
+
+    def consolidate_claim(
+        self, new_claim: str, candidates: Sequence[StoredCandidate]
+    ) -> ConsolidationDecision:
         raise AssertionError("inner extractor called on a cache hit")
 
 
