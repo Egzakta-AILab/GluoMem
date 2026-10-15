@@ -7,14 +7,11 @@ from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from importlib.metadata import version
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-
-if TYPE_CHECKING:
-    from gluomem.storage.postgres_backend import PostgresConnectionPool
 
 from gluomem.client.models import (
     CorrectResponse,
@@ -66,6 +63,7 @@ from gluomem.service.schemas import (
     SweepExpiredRequest,
 )
 from gluomem.storage.db import MindDB
+from gluomem.storage.postgres_backend import PostgresConnectionPool
 from gluomem.storage.scope import DEFAULT_SCOPE, MemoryKind, MemoryScope, eligible_sql, scope_sql
 from gluomem.timeutil import now_utc_iso
 from gluomem.write.events import ingest_source_event, review_memory
@@ -142,9 +140,7 @@ def create_app(
     def _ensure_pg_pool() -> PostgresConnectionPool:
         with lock:
             if pool_ref[0] is None:
-                from gluomem.storage.postgres_backend import PostgresConnectionPool as _Pool
-
-                pool_ref[0] = _Pool(
+                pool_ref[0] = PostgresConnectionPool(
                     backend.dsn,
                     dim=db.dim,
                     postgres_schema=backend.postgres_schema,
