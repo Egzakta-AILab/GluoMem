@@ -16,7 +16,7 @@ from gluomem.timeutil import now_utc, parse_utc, utc_key
 from gluomem.write.events import EventConflictError
 
 JobStatus = Literal["queued", "leased", "succeeded", "dead_letter"]
-JobType = Literal["ingest_event", "cognify_frame", "compact_gop"]
+JobType = Literal["ingest_event", "cognify_frame", "compact_gop", "sweep_expired"]
 _JOB_COLS = (
     "id, tenant_id, principal_id, namespace, job_type, dedup_key, payload, "
     "status, attempt_count, max_attempts, scope_generation, worker_id, "

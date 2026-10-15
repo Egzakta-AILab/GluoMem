@@ -123,6 +123,14 @@ class RetractSourceResponse(_Resp):
     scope_generation: int
 
 
+class SweepExpiredResponse(_Resp):
+    scope: ScopeModel
+    swept_frame_ids: list[int]
+    retired_entity_ids: list[int]
+    retired_relation_ids: list[int]
+    scope_generation: int
+
+
 class JobResponse(_Resp):
     id: int
     scope: ScopeModel

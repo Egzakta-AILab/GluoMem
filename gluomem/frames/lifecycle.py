@@ -6,6 +6,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from gluomem.frames.content_hash import content_hash, suppression_key
+from gluomem.frames.expiry import (
+    SweepResult as SweepResult,
+)
+from gluomem.frames.expiry import (
+    sweep_expired_episodes as sweep_expired_episodes,
+)
 from gluomem.frames.generation import (
     bump_scope_generation,
     get_scope_generation,

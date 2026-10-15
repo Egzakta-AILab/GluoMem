@@ -439,3 +439,74 @@ def test_forget_scope_erases_all_scope_data_and_preserves_siblings(
     assert_no_recall("OrphanProject", db=mind_db, store=frame_store, kg=kg)
     assert sibling_store.get_frame(sibling_frame.id).content == "Sibling secret BETA."
     assert sibling_kg.get_entity(sibling_ent.id, scope=sibling_scope).name == "BETA"
+
+
+def test_sweep_expired_episodes_reclaims_indexes_and_retires_orphaned_kg(
+    frame_store, mind_db, mock_embedder, kg, cfg
+):
+    from gluomem.frames.expiry import sweep_expired_episodes
+
+    cfg = cfg.with_overrides({"lifecycle.episode_ttl_days": 7})
+    store = FrameStore(mind_db, mock_embedder, lifecycle=cfg.lifecycle)
+    expired = ingest_source_event(
+        _evt(
+            "Yesterday the staging Redis cluster restarted.",
+            "ep-exp",
+            created_at="2099-01-01T12:00:00",
+        ),
+        store=store,
+        cfg=cfg,
+    ).frames[0]
+    pinned = ingest_source_event(
+        _evt(
+            "Yesterday the production failover drill completed.",
+            "ep-pin",
+            created_at="2099-01-01T12:00:00",
+            pinned=True,
+        ),
+        store=store,
+        cfg=cfg,
+    ).frames[0]
+    active_ep = ingest_source_event(
+        _evt(
+            "Today the canary deployment started.",
+            "ep-act",
+            created_at="2099-01-06T12:00:00",
+        ),
+        store=store,
+        cfg=cfg,
+    ).frames[0]
+
+    orphan_ent = kg.create_entity("service", "StagingRedis")
+    shared_ent = kg.create_entity("service", "CanaryDeploy")
+    kg.link_entity_frame(orphan_ent.id, expired.id)
+    kg.link_entity_frame(shared_ent.id, expired.id)
+    kg.link_entity_frame(shared_ent.id, active_ep.id)
+
+    assert store.index_state(expired.id).ready
+    gen_before = current_scope_generation(mind_db.backend)
+
+    res = sweep_expired_episodes(store, now_iso="2099-01-10T00:00:00")
+    assert res.swept_frame_ids == [expired.id]
+    assert res.retired_entity_ids == [orphan_ent.id]
+    assert res.scope_generation == gen_before + 1
+
+    swept_frame = store.get_frame(expired.id)
+    assert swept_frame.status == "expired"
+    idx_state = store.index_state(expired.id)
+    assert not idx_state.fts_current
+    assert idx_state.frame_vec == 0
+    assert idx_state.chunks == 0
+    assert idx_state.chunk_vecs == 0
+    assert store.repair_indexes() == []
+
+    assert store.get_frame(pinned.id).status == "active"
+    assert store.index_state(pinned.id).ready
+    assert store.get_frame(active_ep.id).status == "active"
+    assert store.index_state(active_ep.id).ready
+    assert kg.find_valid_entities("StagingRedis", cfg.kg) == []
+    assert len(kg.find_valid_entities("CanaryDeploy", cfg.kg)) == 1
+
+    noop = sweep_expired_episodes(store, now_iso="2099-01-10T00:00:00")
+    assert noop.swept_frame_ids == []
+    assert noop.scope_generation == res.scope_generation

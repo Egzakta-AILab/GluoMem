@@ -23,6 +23,7 @@ from gluomem.client.models import (
     ReviewResponse,
     ScopeModel,
     SourceType,
+    SweepExpiredResponse,
 )
 
 T = TypeVar("T")
@@ -226,6 +227,31 @@ class _Operations:
             json={"source_ref": source_ref},
         )
 
+    def _sweep_expired(
+        self,
+        *,
+        now_iso: str | None = None,
+        dedup_key: str | None = None,
+        scope: Any = None,
+        async_mode: bool = False,
+    ) -> _Spec[Any]:
+        body: dict[str, Any] = {"now_iso": now_iso, "async_mode": async_mode}
+        if dedup_key is not None:
+            body["dedup_key"] = dedup_key
+        return self._spec(
+            "POST",
+            "/v1/memories:sweep-expired",
+            JobResponse if async_mode else SweepExpiredResponse,
+            scope=scope,
+            json=body,
+        )
+
+    def sweep_expired(self, **kwargs: Any) -> _Spec[SweepExpiredResponse]:
+        return self._sweep_expired(**kwargs)
+
+    def enqueue_sweep_expired(self, **kwargs: Any) -> _Spec[JobResponse]:
+        return self._sweep_expired(async_mode=True, **kwargs)
+
     def export_memories(self, *, scope: Any = None) -> _Spec[dict[str, Any]]:
         return self._spec("POST", "/v1/memories:export", dict[str, Any], scope=scope)
 
@@ -327,6 +353,12 @@ class GluoMemClient(_Transport):
     def retract_source(self, source_ref: str, **kwargs: Any) -> RetractSourceResponse:
         return self._send(self._ops.retract_source(source_ref, **kwargs))
 
+    def sweep_expired(self, **kwargs: Any) -> SweepExpiredResponse:
+        return self._send(self._ops.sweep_expired(**kwargs))
+
+    def enqueue_sweep_expired(self, **kwargs: Any) -> JobResponse:
+        return self._send(self._ops.enqueue_sweep_expired(**kwargs))
+
     def export_memories(self, **kwargs: Any) -> dict[str, Any]:
         return self._send(self._ops.export_memories(**kwargs))
 
@@ -404,6 +436,12 @@ class AsyncGluoMemClient(_Transport):
 
     async def retract_source(self, source_ref: str, **kwargs: Any) -> RetractSourceResponse:
         return await self._asend(self._ops.retract_source(source_ref, **kwargs))
+
+    async def sweep_expired(self, **kwargs: Any) -> SweepExpiredResponse:
+        return await self._asend(self._ops.sweep_expired(**kwargs))
+
+    async def enqueue_sweep_expired(self, **kwargs: Any) -> JobResponse:
+        return await self._asend(self._ops.enqueue_sweep_expired(**kwargs))
 
     async def export_memories(self, **kwargs: Any) -> dict[str, Any]:
         return await self._asend(self._ops.export_memories(**kwargs))

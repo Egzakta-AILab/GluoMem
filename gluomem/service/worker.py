@@ -12,6 +12,7 @@ from typing import Any
 
 from gluomem.config.app_config import AppConfig
 from gluomem.frames.eligibility import is_recall_eligible
+from gluomem.frames.expiry import sweep_expired_episodes
 from gluomem.frames.generation import current_scope_generation
 from gluomem.frames.store import FrameStore
 from gluomem.kg.graph import KnowledgeGraph
@@ -49,6 +50,7 @@ class MemoryWorker:
         worker_id: str | None = None,
         lease_seconds: float = 60.0,
         retry_backoff_seconds: float = 5.0,
+        should_pause: Callable[[], bool] | None = None,
     ) -> None:
         self._db = db
         self._store = store
@@ -58,10 +60,12 @@ class MemoryWorker:
         self._worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
         self._lease_seconds = float(lease_seconds)
         self._retry_backoff_seconds = float(retry_backoff_seconds)
+        self._should_pause = should_pause
         self._handlers: dict[str, JobHandler] = {
             "ingest_event": self._handle_ingest_event,
             "cognify_frame": self._handle_cognify_frame,
             "compact_gop": self._handle_compact_gop,
+            "sweep_expired": self._handle_sweep_expired,
         }
         self.stop_event = threading.Event()
 
@@ -160,8 +164,18 @@ class MemoryWorker:
         gop_id = str(job.payload["gop_id"])
         self._store.compact(gop_id, self._cfg, scope=job.scope)
 
+    def _handle_sweep_expired(self, job: MemoryJob) -> None:
+        now_iso = job.payload.get("now_iso")
+        sweep_expired_episodes(
+            self._store,
+            scope=job.scope,
+            now_iso=str(now_iso) if now_iso is not None else None,
+        )
+
     def run_once(self, *, now_iso: str | None = None) -> MemoryJob | None:
         """Execute one leased job; stale writes roll back and retry at the new generation."""
+        if self._should_pause is not None and self._should_pause():
+            return None
         try:
             job = self._queue.lease_next(
                 self._worker_id, lease_seconds=self._lease_seconds, now_iso=now_iso

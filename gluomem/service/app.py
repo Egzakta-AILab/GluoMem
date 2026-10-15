@@ -25,11 +25,13 @@ from gluomem.client.models import (
     RetractSourceResponse,
     ReviewResponse,
     ScopeModel,
+    SweepExpiredResponse,
 )
 from gluomem.config.app_config import AppConfig
 from gluomem.embedding.compat import stored_fingerprint
 from gluomem.extras import require
 from gluomem.frames.eligibility import is_recall_eligible
+from gluomem.frames.expiry import sweep_expired_episodes
 from gluomem.frames.lifecycle import (
     correct_memory,
     forget_memory,
@@ -55,6 +57,7 @@ from gluomem.service.schemas import (
     RecallRequest,
     RetractSourceRequest,
     ReviewRequest,
+    SweepExpiredRequest,
 )
 from gluomem.storage.db import MindDB
 from gluomem.storage.scope import MemoryKind, MemoryScope, eligible_sql, scope_sql
@@ -380,6 +383,34 @@ def create_app(
     ) -> RetractSourceResponse:
         return RetractSourceResponse.model_validate(
             retract_source(rt.store, req.source_ref, scope=scope)
+        )
+
+    @app.post(
+        "/v1/memories:sweep-expired",
+        response_model=SweepExpiredResponse | JobResponse,
+        responses={202: {"model": JobResponse}},
+    )
+    def sweep_expired(
+        scope: Annotated[MemoryScope, Depends(require_scope)],
+        rt: Annotated[_Runtime, Depends(runtime)],
+        response: Response,
+        req: SweepExpiredRequest | None = None,
+    ) -> SweepExpiredResponse | JobResponse:
+        req = req or SweepExpiredRequest()
+        if req.async_mode:
+            eff_now = req.now_iso or now_utc_iso()
+            dedup_key = req.dedup_key or f"sweep_expired:{eff_now}"
+            payload: dict[str, Any] = {"now_iso": req.now_iso} if req.now_iso is not None else {}
+            job = rt.queue.enqueue(
+                scope,
+                "sweep_expired",
+                dedup_key,
+                payload,
+            )
+            response.status_code = 202
+            return JobResponse.model_validate(job)
+        return SweepExpiredResponse.model_validate(
+            sweep_expired_episodes(rt.store, scope=scope, now_iso=req.now_iso)
         )
 
     @app.post("/v1/memories:export")

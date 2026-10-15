@@ -207,3 +207,48 @@ def test_worker_loop_logs_failures_and_obeys_stop(
     monkeypatch.setattr(worker, "run_once", poll)
     assert worker.run_forever(poll_interval=0.01) == 0
     assert calls == 2
+
+
+def test_worker_should_pause_and_sweep_expired_job(
+    mind_db: MindDB, frame_store: FrameStore, cfg: AppConfig, kg: KnowledgeGraph
+) -> None:
+    cfg = cfg.with_overrides({"lifecycle.episode_ttl_days": 7})
+    store = FrameStore(mind_db, frame_store.embedder, lifecycle=cfg.lifecycle)
+    expired = ingest_source_event(
+        SourceEvent(
+            event_id="exp-job",
+            source_ref="doc",
+            content="Yesterday the worker queue saturated.",
+            created_at="2026-01-01T00:00:00",
+            scope=store.scope,
+        ),
+        store=store,
+        cfg=cfg,
+    ).frames[0]
+    assert expired.expires_at == "2026-01-08T00:00:00"
+
+    paused = True
+    worker = MemoryWorker(
+        mind_db,
+        store,
+        cfg=cfg,
+        kg=kg,
+        retry_backoff_seconds=0,
+        should_pause=lambda: paused,
+    )
+    job = worker.queue.enqueue(
+        job_type="sweep_expired",
+        dedup_key="sweep:2026-01-10",
+        payload={"now_iso": "2026-01-10T00:00:00"},
+        now_iso="2026-01-10T00:00:00",
+    )
+    assert worker.run_once(now_iso="2026-01-10T00:00:00") is None
+    queued = worker.queue.get_job(job.id)
+    assert queued.status == "queued" and queued.attempt_count == 0
+    assert store.get_frame(expired.id).status == "active"
+
+    paused = False
+    done = worker.run_once(now_iso="2026-01-10T00:00:00")
+    assert done is not None and done.id == job.id and done.status == "succeeded"
+    assert store.get_frame(expired.id).status == "expired"
+    assert store.index_state(expired.id).frame_vec == 0
