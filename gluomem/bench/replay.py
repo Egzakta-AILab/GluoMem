@@ -32,6 +32,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 REPLAY_FIXTURES: dict[str, Path] = {
     "mab_fixture": FIXTURES_DIR / "mab_tiny.json",
     "sr_en_kvark_v1": FIXTURES_DIR / "sr_en_kvark_v1.json",
+    "sr_en_translation_v1": FIXTURES_DIR / "sr_en_translation_v1.json",
 }
 
 NOT_OFFICIAL_LABEL = (

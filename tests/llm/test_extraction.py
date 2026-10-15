@@ -17,8 +17,11 @@ from gluomem.llm import (
     FakeExtractors,
 )
 from gluomem.llm.extraction_eval import (
+    CAPABILITIES,
     FIXTURE_PATH,
     SEALED_SPLIT,
+    SPLITS,
+    TASKS,
     FixtureError,
     SealedSplitError,
     evaluator_fingerprint,
@@ -228,6 +231,54 @@ GOLDEN = [
         {},
         id="plan-kept-as-plan",
     ),
+    pytest.param(
+        "en-nikola-clinic",
+        _facts(
+            "Nikola now practices at the Zemun hospital.",
+            "Nikola previously worked at the Vračar clinic.",
+            "Milica works at the Vračar clinic.",
+            "Nikola does not treat pediatric patients.",
+            "Nikola might open a dental lab in autumn.",
+        ),
+        1.0,
+        {},
+        id="en-nikola-clinic-full",
+    ),
+    pytest.param(
+        "sr-cyrl-nikola-clinic",
+        _facts(
+            "Никола сада ради у болници у Земуну.",
+            "Никола је раније радио на Врачару.",
+            "Милица ради на Врачару.",
+            "Никола не прима педијатријске пацијенте.",
+            "Никола ће можда отворити стоматолошку ординацију.",
+        ),
+        1.0,
+        {},
+        id="sr-cyrl-nikola-clinic-full",
+    ),
+    pytest.param(
+        "en-datacenter-cooling",
+        _facts(
+            "Hall A uses liquid cooling.",
+            "Hall B uses air cooling.",
+            "Hall A does not run diesel generators indoors.",
+            "Hall B plans to expand in 2027.",
+        ),
+        1.0,
+        {},
+        id="en-datacenter-cooling-full",
+    ),
+    pytest.param(
+        "sr-latn-demo-dates",
+        _events(
+            ("Početak projekta", "2026-02-03T00:00:00"),
+            ("Prezentacija za klijenta", "2026-03-24T00:00:00"),
+        ),
+        1.0,
+        {},
+        id="sr-latn-demo-dates-full",
+    ),
 ]
 
 
@@ -285,6 +336,15 @@ def test_evaluator_components_redaction_and_normalization() -> None:
 
 def test_splits_sealing_fixture_validation_and_scorecard(tmp_path: Path) -> None:
     fx = load_fixture()
+    assert len(fx.cases) >= 24
+    for split in SPLITS:
+        split_cases = [c for c in fx.cases if c.split == split]
+        assert len(split_cases) >= 8
+        assert {c.language for c in split_cases} == {"en", "sr-Latn", "sr-Cyrl"}
+        assert {c.task for c in split_cases} == set(TASKS)
+        assert {cap for c in split_cases for cl in c.claims for cap in cl.capabilities} == set(
+            CAPABILITIES
+        )
     manifest = fx.split_manifest()
     assert manifest["policy"]["group_by"] == "source_family"
     assert {"en-jelena-role", "sr-latn-jelena-role"} <= set(

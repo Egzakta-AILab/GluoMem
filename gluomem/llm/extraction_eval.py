@@ -38,7 +38,7 @@ EVALUATOR_VERSION = 1
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "extraction_v1.json"
 # Changing any gold claim, span, split or alias changes this pin on purpose:
 # the evaluator is frozen, so a gold edit is a new evaluator version.
-FIXTURE_SHA256 = "86fb45c12911014262b31ed49fbfd826ee034322e4c4e63722f8bef447b447ce"
+FIXTURE_SHA256 = "82edcf4d0dd17be84630dc699e9a7f81d8708d4da28af395d771207c15d8ad5c"
 
 SPLITS = ("train", "dev", "sealed_test")
 SEALED_SPLIT = "sealed_test"
