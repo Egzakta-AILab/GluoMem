@@ -31,6 +31,9 @@ class MindDB:
         frame_vec: VectorStore | None = None,
         chunk_vec: VectorStore | None = None,
         fts: FtsStore | None = None,
+        conn: Any | None = None,
+        verify_schema: bool = True,
+        owns_connection: bool | None = None,
     ) -> None:
         resolved_dim = dim if dim is not None else (vector_dim if vector_dim is not None else 384)
         if resolved_dim <= 0:
@@ -50,7 +53,14 @@ class MindDB:
 
             if not dsn:
                 raise ValueError("MindDB(backend_type='postgres') requires dsn")
-            pg_backend = PostgresBackend(dsn, dim=resolved_dim, postgres_schema=postgres_schema)
+            pg_backend = PostgresBackend(
+                dsn,
+                dim=resolved_dim,
+                postgres_schema=postgres_schema,
+                conn=conn,
+                verify_schema=verify_schema,
+                owns_connection=owns_connection,
+            )
             self.backend = pg_backend
             self.path = pg_backend.path
             frame_vec = frame_vec or PgVectorStore(

@@ -203,12 +203,16 @@ def _cmd_worker(args: argparse.Namespace) -> int:
     from gluomem.embedding.providers import make_embedder
     from gluomem.frames.store import FrameStore
     from gluomem.kg.graph import KnowledgeGraph
+    from gluomem.llm import make_extractors
+    from gluomem.logging import configure_logging
     from gluomem.service.jobs import JobQueue
     from gluomem.service.worker import MemoryWorker
     from gluomem.storage.db import MindDB
 
+    configure_logging()
     cfg = _config_from(args)
     embedder = make_embedder(cfg)
+    extractors = make_extractors(cfg)
     db = MindDB.from_config(cfg, path_override=args.db)
     try:
         store = FrameStore(db, embedder=embedder, chunking=cfg.chunking, lifecycle=cfg.lifecycle)
@@ -223,6 +227,7 @@ def _cmd_worker(args: argparse.Namespace) -> int:
             cfg=cfg,
             kg=kg,
             queue=queue,
+            extractors=extractors,
             worker_id=args.worker_id,
             lease_seconds=args.lease_seconds,
         )
@@ -291,6 +296,8 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     from gluomem.extras import require
     from gluomem.frames.store import FrameStore
     from gluomem.kg.graph import KnowledgeGraph
+    from gluomem.llm import make_extractors
+    from gluomem.logging import configure_logging
     from gluomem.service.app import create_app
     from gluomem.service.jobs import JobQueue
     from gluomem.storage.db import MindDB
@@ -298,8 +305,10 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     require("service", "gluomem serve")
     import uvicorn
 
+    configure_logging()
     cfg = _config_from(args)
     embedder = make_embedder(cfg)
+    extractors = make_extractors(cfg)
     db = MindDB.from_config(cfg, path_override=args.db)
     try:
         store = FrameStore(db, embedder=embedder, chunking=cfg.chunking, lifecycle=cfg.lifecycle)
@@ -314,6 +323,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             ),
             kg=kg,
             queue=queue,
+            extractors=extractors,
         )
         uvicorn.run(app, host=args.host, port=args.port)
         return 0

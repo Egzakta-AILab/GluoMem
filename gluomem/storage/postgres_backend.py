@@ -109,6 +109,126 @@ class _PgRow:
         return list(self._vals)
 
 
+def _configure_connection(conn: Any, postgres_schema: str) -> None:
+    """Configure session parameters and register pgvector on a raw psycopg connection."""
+    validate_schema_name(postgres_schema)
+    from pgvector.psycopg import register_vector
+
+    conn.execute(f"SET search_path TO {postgres_schema}, public")
+    conn.execute("SET hnsw.iterative_scan = strict_order")
+    conn.execute("SET hnsw.max_scan_tuples = 20000")
+    conn.execute("SET hnsw.scan_mem_multiplier = 4")
+    register_vector(conn)
+
+
+def _verify_schema_conn(conn: Any, postgres_schema: str, dim: int) -> None:
+    """Verify Alembic revision and pgvector column dimensions on an open connection."""
+    version_table = f"{postgres_schema}.alembic_version"
+    exists = conn.execute("SELECT to_regclass(%s)", (version_table,)).fetchone()
+    if exists is None or exists["to_regclass"] is None:
+        raise IncompatibleSchemaError(
+            "PostgreSQL schema is not versioned; recreate the database if it is legacy, "
+            "then run gluomem migrate upgrade --dsn ... --schema " + postgres_schema
+        )
+    revisions = conn.execute(f"SELECT version_num FROM {version_table}").fetchall()
+    if {row["version_num"] for row in revisions} != set(get_heads()):
+        raise IncompatibleSchemaError(
+            "Unsupported PostgreSQL schema revision; recreate legacy databases, "
+            "or run gluomem migrate upgrade --dsn ... --schema " + postgres_schema
+        )
+    for table in _ALLOWED_VEC_TABLES:
+        row = conn.execute(
+            "SELECT atttypmod FROM pg_attribute WHERE attrelid = %s::regclass "
+            "AND attname = 'embedding'",
+            (f"{postgres_schema}.{table}",),
+        ).fetchone()
+        if row is None or row["atttypmod"] != dim:
+            raise IncompatibleSchemaError("Vector dimension differs; recreate the database")
+
+
+class PostgresConnectionPool:
+    """Process-wide PostgreSQL connection pool with startup-only schema verification."""
+
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        dim: int = 384,
+        postgres_schema: str = "gluomem",
+        min_size: int = 2,
+        max_size: int = 16,
+        open_pool: bool = True,
+        verify_schema: bool = True,
+    ) -> None:
+        if dim <= 0:
+            raise ValueError(f"vector dim must be positive, got {dim}")
+        if not dsn or not dsn.strip():
+            raise ValueError("PostgresConnectionPool requires a non-empty dsn")
+        if min_size < 1 or max_size < min_size:
+            raise ValueError(f"Invalid pool bounds: min_size={min_size}, max_size={max_size}")
+        validate_schema_name(postgres_schema)
+
+        require("postgres", "PostgresConnectionPool")
+        from psycopg.rows import dict_row
+        from psycopg_pool import ConnectionPool
+
+        self.dsn: str = dsn
+        self.dim: int = dim
+        self.postgres_schema: str = postgres_schema
+        self.min_size: int = min_size
+        self.max_size: int = max_size
+        self._verify_on_open: bool = verify_schema
+        self._verified: bool = False
+
+        self._pool: Any = ConnectionPool(
+            conninfo=dsn,
+            min_size=min_size,
+            max_size=max_size,
+            kwargs={"autocommit": True, "row_factory": dict_row},
+            configure=lambda conn: _configure_connection(conn, postgres_schema),
+            open=False,
+        )
+        if open_pool:
+            self.open()
+
+    def open(self, *, wait: bool = True) -> None:
+        self._pool.open(wait=wait)
+        if self._verify_on_open and not self._verified:
+            try:
+                with self._pool.connection() as conn:
+                    _verify_schema_conn(conn, self.postgres_schema, self.dim)
+                self._verified = True
+            except Exception:
+                self._pool.close()
+                raise
+
+    @contextmanager
+    def connection(self) -> Iterator[Any]:
+        with self._pool.connection() as conn:
+            yield conn
+
+    @contextmanager
+    def borrow_backend(self) -> Iterator[PostgresBackend]:
+        with self.connection() as conn:
+            yield PostgresBackend(
+                self.dsn,
+                dim=self.dim,
+                postgres_schema=self.postgres_schema,
+                conn=conn,
+                verify_schema=False,
+                owns_connection=False,
+            )
+
+    def close(self) -> None:
+        self._pool.close()
+
+    def __enter__(self) -> PostgresConnectionPool:
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
+
+
 class PostgresBackend:
     """Schema-isolated PostgreSQL backend; each thread must own its connection."""
 
@@ -120,6 +240,9 @@ class PostgresBackend:
         *,
         dim: int = 384,
         postgres_schema: str = "gluomem",
+        conn: Any | None = None,
+        verify_schema: bool = True,
+        owns_connection: bool | None = None,
     ) -> None:
         if dim <= 0:
             raise ValueError(f"vector dim must be positive, got {dim}")
@@ -128,50 +251,35 @@ class PostgresBackend:
         validate_schema_name(postgres_schema)
 
         require("postgres", "PostgresBackend")
-        import psycopg
-        from pgvector.psycopg import register_vector
-        from psycopg.rows import dict_row
 
         self.dsn: str = dsn
         self.dim: int = dim
         self.postgres_schema: str = postgres_schema
         self.path: Path = Path(f"postgres://{postgres_schema}")
         self._tx_depth: int = 0
+        self._owns_connection: bool = (
+            (conn is None) if owns_connection is None else bool(owns_connection)
+        )
 
-        self.conn: Any = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
-        try:
-            self.conn.execute(f"SET search_path TO {postgres_schema}, public")
-            self._verify_schema()
-            self.conn.execute("SET hnsw.iterative_scan = strict_order")
-            self.conn.execute("SET hnsw.max_scan_tuples = 20000")
-            self.conn.execute("SET hnsw.scan_mem_multiplier = 4")
-            register_vector(self.conn)
-        except Exception:
-            self.conn.close()
-            raise
+        if conn is None:
+            import psycopg
+            from psycopg.rows import dict_row
+
+            self.conn: Any = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+            try:
+                _configure_connection(self.conn, postgres_schema)
+                if verify_schema:
+                    self._verify_schema()
+            except Exception:
+                self.conn.close()
+                raise
+        else:
+            self.conn = conn
+            if verify_schema:
+                self._verify_schema()
 
     def _verify_schema(self) -> None:
-        version_table = f"{self.postgres_schema}.alembic_version"
-        exists = self.conn.execute("SELECT to_regclass(%s)", (version_table,)).fetchone()
-        if exists is None or exists["to_regclass"] is None:
-            raise IncompatibleSchemaError(
-                "PostgreSQL schema is not versioned; recreate the database if it is legacy, "
-                "then run gluomem migrate upgrade --dsn ... --schema " + self.postgres_schema
-            )
-        revisions = self.conn.execute(f"SELECT version_num FROM {version_table}").fetchall()
-        if {row["version_num"] for row in revisions} != set(get_heads()):
-            raise IncompatibleSchemaError(
-                "Unsupported PostgreSQL schema revision; recreate legacy databases, "
-                "or run gluomem migrate upgrade --dsn ... --schema " + self.postgres_schema
-            )
-        for table in _ALLOWED_VEC_TABLES:
-            row = self.conn.execute(
-                "SELECT atttypmod FROM pg_attribute WHERE attrelid = %s::regclass "
-                "AND attname = 'embedding'",
-                (f"{self.postgres_schema}.{table}",),
-            ).fetchone()
-            if row is None or row["atttypmod"] != self.dim:
-                raise IncompatibleSchemaError("Vector dimension differs; recreate the database")
+        _verify_schema_conn(self.conn, self.postgres_schema, self.dim)
 
     @property
     def in_transaction(self) -> bool:
@@ -228,7 +336,8 @@ class PostgresBackend:
         self.conn.rollback()
 
     def close(self) -> None:
-        self.conn.close()
+        if self._owns_connection:
+            self.conn.close()
 
 
 class PgVectorStore:
@@ -428,5 +537,7 @@ __all__ = [
     "PgTsVectorStore",
     "PgVectorStore",
     "PostgresBackend",
+    "PostgresConnectionPool",
     "_adapt_qmark_to_pyformat",
+    "_configure_connection",
 ]

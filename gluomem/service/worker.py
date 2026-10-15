@@ -7,6 +7,7 @@ import os
 import signal
 import socket
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -16,6 +17,7 @@ from gluomem.frames.expiry import sweep_expired_episodes
 from gluomem.frames.generation import current_scope_generation
 from gluomem.frames.store import FrameStore
 from gluomem.kg.graph import KnowledgeGraph
+from gluomem.llm.fake import NullExtractors
 from gluomem.llm.outputs import CognifyResult, Extractors, KGEntity, KGRelation
 from gluomem.service.jobs import (
     JobQueue,
@@ -29,7 +31,12 @@ from gluomem.storage.db import MindDB
 from gluomem.storage.scope import scope_sql
 from gluomem.timeutil import now_utc_iso
 from gluomem.write.cognify import link_and_retire_resolved, resolve_cognify_result
-from gluomem.write.events import ingest_source_event
+from gluomem.write.events import (
+    PreparedSourceEvent,
+    commit_source_event,
+    ingest_source_event,
+    prepare_source_event,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -105,12 +112,26 @@ class MemoryWorker:
         if current != job.scope_generation:
             raise StaleScopeGenerationError(job.id, job.scope_generation, current)
 
-    def _renew(self, job: MemoryJob) -> None:
+    def _renew(self, job: MemoryJob, *, now_iso: str | None = None) -> None:
         self._queue.renew_lease(
             job.id,
             self._worker_id,
             attempt_count=job.attempt_count,
             lease_seconds=self._lease_seconds,
+            now_iso=now_iso,
+        )
+
+    def _prepare_ingest_event(
+        self, job: MemoryJob, *, now_iso: str | None = None
+    ) -> PreparedSourceEvent:
+        event = IngestEventRequest.model_validate({**job.payload}).to_source_event(job.scope)
+        return prepare_source_event(
+            event,
+            store=self._store,
+            kg=self._kg,
+            cfg=self._cfg,
+            extractors=self._extractors,
+            on_progress=lambda: self._renew(job, now_iso=now_iso),
         )
 
     def _handle_ingest_event(self, job: MemoryJob) -> None:
@@ -123,7 +144,9 @@ class MemoryWorker:
             extractors=self._extractors,
         )
 
-    def _handle_cognify_frame(self, job: MemoryJob) -> None:
+    def _prepare_cognify_frame(
+        self, job: MemoryJob, *, now_iso: str | None = None
+    ) -> tuple[int, CognifyResult] | None:
         payload = job.payload
         frame_id = int(payload["frame_id"])
         entities: list[dict[str, Any]] = list(payload.get("entities") or [])
@@ -131,9 +154,9 @@ class MemoryWorker:
 
         frame = self._store.get_frame(frame_id, scope=job.scope)
         if not is_recall_eligible(frame):
-            return
+            return None
 
-        self._renew(job)
+        self._renew(job, now_iso=now_iso)
         if entities or relations:
             raw = CognifyResult(
                 entities=[
@@ -159,11 +182,25 @@ class MemoryWorker:
                     if str(rel.get("source", "")).strip() and str(rel.get("target", "")).strip()
                 ],
             )
-        elif self._extractors is not None and self._cfg.write.cognify.enabled:
+        elif (
+            self._extractors is not None
+            and not isinstance(self._extractors, NullExtractors)
+            and self._cfg.write.cognify.enabled
+        ):
             raw = self._extractors.cognify(frame.content)
         else:
-            return
+            return None
+        return frame_id, raw
 
+    def _commit_cognify_frame(
+        self, job: MemoryJob, prepared: tuple[int, CognifyResult] | None
+    ) -> None:
+        if prepared is None:
+            return
+        frame_id, raw = prepared
+        frame = self._store.get_frame(frame_id, scope=job.scope)
+        if not is_recall_eligible(frame):
+            return
         resolved = resolve_cognify_result(
             raw,
             kg=self._kg,
@@ -179,6 +216,10 @@ class MemoryWorker:
             scope=job.scope,
         )
 
+    def _handle_cognify_frame(self, job: MemoryJob) -> None:
+        prepared = self._prepare_cognify_frame(job)
+        self._commit_cognify_frame(job, prepared)
+
     def _handle_compact_gop(self, job: MemoryJob) -> None:
         gop_id = str(job.payload["gop_id"])
         self._store.compact(gop_id, self._cfg, scope=job.scope)
@@ -192,7 +233,7 @@ class MemoryWorker:
         )
 
     def run_once(self, *, now_iso: str | None = None) -> MemoryJob | None:
-        """Execute one leased job; stale writes roll back and retry at the new generation."""
+        """Execute one leased job; Phase 1 runs outside DB lock, Phase 2 commits atomically."""
         if self._should_pause is not None and self._should_pause():
             return None
         try:
@@ -200,12 +241,41 @@ class MemoryWorker:
                 self._worker_id, lease_seconds=self._lease_seconds, now_iso=now_iso
             )
         except ValueError:
-            _LOG.exception("Invalid job payload dead-lettered")
+            _LOG.exception(
+                "Invalid job payload dead-lettered",
+                extra={"event": "job_invalid_payload", "worker_id": self._worker_id},
+            )
             return None
         if job is None:
             return None
+
+        started = time.perf_counter()
+        log_ctx: dict[str, Any] = {
+            "job_id": job.id,
+            "job_type": job.job_type,
+            "worker_id": self._worker_id,
+            "attempt_count": job.attempt_count,
+            "scope": job.scope.as_dict(),
+        }
+        _LOG.info("Job leased", extra={**log_ctx, "event": "job_leased"})
+
         try:
             try:
+                handler = self._handlers.get(job.job_type)
+                if handler is None:
+                    raise ValueError(f"unknown_job_type:{job.job_type}")
+
+                # Phase 1: Read + LLM/embedding compute outside the fenced DB write lock.
+                prepared_ingest: PreparedSourceEvent | None = None
+                prepared_cognify: tuple[int, CognifyResult] | None = None
+                has_work = bool(job.payload) or job.job_type not in _PAYLOAD_JOB_TYPES
+                if has_work:
+                    if job.job_type == "ingest_event" and handler == self._handle_ingest_event:
+                        prepared_ingest = self._prepare_ingest_event(job, now_iso=now_iso)
+                    elif job.job_type == "cognify_frame" and handler == self._handle_cognify_frame:
+                        prepared_cognify = self._prepare_cognify_frame(job, now_iso=now_iso)
+
+                # Phase 2: Short atomic DB write transaction holding the scope generation lock.
                 self._before_write(job)
                 with write_transaction(self._db.backend):
                     self._assert_not_fenced(job)
@@ -216,24 +286,55 @@ class MemoryWorker:
                         lease_seconds=self._lease_seconds,
                         now_iso=now_iso,
                     )
-                    handler = self._handlers.get(job.job_type)
-                    if handler is None:
-                        raise ValueError(f"unknown_job_type:{job.job_type}")
-                    # Forget and retract redact queued payloads to {}; nothing is left to write.
-                    if job.payload or job.job_type not in _PAYLOAD_JOB_TYPES:
-                        handler(job)
-                    return self._queue.complete(
+                    if has_work:
+                        if prepared_ingest is not None:
+                            commit_source_event(
+                                prepared_ingest,
+                                store=self._store,
+                                kg=self._kg,
+                            )
+                        elif (
+                            job.job_type == "cognify_frame"
+                            and handler == self._handle_cognify_frame
+                        ):
+                            self._commit_cognify_frame(job, prepared_cognify)
+                        else:
+                            handler(job)
+                    completed = self._queue.complete(
                         job.id,
                         worker_id=self._worker_id,
                         attempt_count=job.attempt_count,
                         now_iso=now_iso,
                     )
+                duration_ms = round((time.perf_counter() - started) * 1000, 3)
+                _LOG.info(
+                    "Job succeeded",
+                    extra={
+                        **log_ctx,
+                        "event": "job_succeeded",
+                        "status": completed.status,
+                        "duration_ms": duration_ms,
+                    },
+                )
+                return completed
             except StaleScopeGenerationError as exc:
-                return self._queue.requeue_stale(job, exc.current_generation, now_iso=now_iso)
+                requeued = self._queue.requeue_stale(job, exc.current_generation, now_iso=now_iso)
+                duration_ms = round((time.perf_counter() - started) * 1000, 3)
+                _LOG.info(
+                    "Job requeued after scope generation bump",
+                    extra={
+                        **log_ctx,
+                        "event": "job_requeued_stale",
+                        "status": requeued.status,
+                        "scope_generation": requeued.scope_generation,
+                        "duration_ms": duration_ms,
+                    },
+                )
+                return requeued
             except LeaseLostError:
                 raise
             except Exception as exc:
-                return self._queue.fail(
+                failed = self._queue.fail(
                     job.id,
                     f"{type(exc).__name__}: {exc}",
                     worker_id=self._worker_id,
@@ -241,8 +342,27 @@ class MemoryWorker:
                     retry_backoff_seconds=self._retry_backoff_seconds,
                     now_iso=now_iso,
                 )
+                duration_ms = round((time.perf_counter() - started) * 1000, 3)
+                event_name = "job_dead_letter" if failed.status == "dead_letter" else "job_failed"
+                _LOG.warning(
+                    "Job execution failed",
+                    extra={
+                        **log_ctx,
+                        "event": event_name,
+                        "status": failed.status,
+                        "error": failed.last_error,
+                        "duration_ms": duration_ms,
+                    },
+                )
+                return failed
         except LeaseLostError:
-            _LOG.warning("Lost lease for job %s attempt %s", job.id, job.attempt_count)
+            duration_ms = round((time.perf_counter() - started) * 1000, 3)
+            _LOG.warning(
+                "Lost lease for job %s attempt %s",
+                job.id,
+                job.attempt_count,
+                extra={**log_ctx, "event": "job_lease_lost", "duration_ms": duration_ms},
+            )
             return None
 
     def run_until_empty(

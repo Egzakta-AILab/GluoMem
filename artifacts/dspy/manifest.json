@@ -1,0 +1,23 @@
+{
+  "artifacts": {
+    "consolidate": {
+      "created_at": "2026-10-15T16:26:48+00:00",
+      "dspy_version": "3.4.1",
+      "file": "consolidate.json",
+      "model_ref": "deepseek-flash",
+      "sha256": "c6559a3517eed808a5a705fa1a94eb7d007bfb3299615ab4a3e106a0167a5001",
+      "task": "consolidate"
+    },
+    "event_claims": {
+      "created_at": "2026-10-15T16:26:48+00:00",
+      "dspy_version": "3.4.1",
+      "file": "event_claims.json",
+      "model_ref": "deepseek-flash",
+      "sha256": "bd24475fe2733437ba1724756fb909612b2ef4b93d0daf25e1f346d5cfc6799c",
+      "task": "event_claims"
+    }
+  },
+  "consolidate": "c6559a3517eed808a5a705fa1a94eb7d007bfb3299615ab4a3e106a0167a5001",
+  "event_claims": "bd24475fe2733437ba1724756fb909612b2ef4b93d0daf25e1f346d5cfc6799c",
+  "version": 1
+}

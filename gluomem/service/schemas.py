@@ -30,7 +30,7 @@ class IngestEventRequest(_Req):
     event_time: str | None = Field(default=None, max_length=64)
     created_at: str | None = Field(default=None, max_length=64)
     force_reassert: bool = False
-    async_mode: bool = False
+    async_mode: bool | None = None
 
     @field_validator("event_time", "created_at")
     @classmethod

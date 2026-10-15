@@ -1,0 +1,30 @@
+{
+  "demos": [],
+  "lm": null,
+  "metadata": {
+    "dependency_versions": {
+      "cloudpickle": "3.1",
+      "dspy": "3.4.1",
+      "python": "3.14"
+    }
+  },
+  "signature": {
+    "fields": [
+      {
+        "description": "${new_claim}",
+        "prefix": "New Claim:"
+      },
+      {
+        "description": "${candidates}",
+        "prefix": "Candidates:"
+      },
+      {
+        "description": "${decision}",
+        "prefix": "Decision:"
+      }
+    ],
+    "instructions": "Decide whether a new claim is new (ADD), already stored (NOOP), updates/replaces\nan existing stored candidate (SUPERSEDE), or requires review (CANDIDATE)."
+  },
+  "traces": [],
+  "train": []
+}

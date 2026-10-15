@@ -119,6 +119,10 @@ def make_cognify_signature(allowed_types: Sequence[str]) -> type[dspy.Signature]
     )
 
 
+# Aliases matching Iteration 6 naming conventions.
+ExtractEventClaimsSignature = EventClaimExtraction
+ConsolidateClaimSignature = ClaimConsolidation
+
 # Task-name -> signature map (config ``dspy.tasks`` keys).
 TASK_SIGNATURES: dict[str, type[dspy.Signature]] = {
     "fact_extraction": FactExtraction,
@@ -128,3 +132,16 @@ TASK_SIGNATURES: dict[str, type[dspy.Signature]] = {
     "event_claims": EventClaimExtraction,
     "consolidate": ClaimConsolidation,
 }
+
+__all__ = [
+    "TASK_SIGNATURES",
+    "ClaimConsolidation",
+    "CognifyExtraction",
+    "ConsolidateClaimSignature",
+    "ContradictionCheck",
+    "EventClaimExtraction",
+    "EventExtraction",
+    "ExtractEventClaimsSignature",
+    "FactExtraction",
+    "make_cognify_signature",
+]

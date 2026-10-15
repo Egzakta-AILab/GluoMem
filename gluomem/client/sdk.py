@@ -149,9 +149,11 @@ class _Operations:
         )
 
     def ingest_event(self, **kwargs: Any) -> _Spec[IngestEventResponse]:
-        return self._event(**kwargs)
+        kwargs.pop("async_mode", None)
+        return self._event(async_mode=False, **kwargs)
 
     def enqueue_event(self, **kwargs: Any) -> _Spec[JobResponse]:
+        kwargs.pop("async_mode", None)
         return self._event(async_mode=True, **kwargs)
 
     def recall(
@@ -480,6 +482,9 @@ def _group_frames(
     return kinds, refs
 
 
+_UNSET: Any = object()
+
+
 class EmbeddedMemoryClient:
     """In-process memory client with the same surface and contracts as ``GluoMemClient``."""
 
@@ -552,11 +557,12 @@ class EmbeddedMemoryClient:
         default_scope: Any = None,
         embedder: Embedder | None = None,
         reranker: Reranker | None = None,
-        extractors: Extractors | None = None,
+        extractors: Extractors | None = _UNSET,
     ) -> EmbeddedMemoryClient:
         from gluomem.config.app_config import AppConfig as _AppConfig
         from gluomem.embedding.providers import make_embedder
         from gluomem.frames.store import FrameStore as _FrameStore
+        from gluomem.llm import make_extractors
         from gluomem.storage.db import MindDB as _MindDB
         from gluomem.storage.scope import (
             MemoryScope as _MemoryScope,
@@ -567,6 +573,9 @@ class EmbeddedMemoryClient:
 
         eff_cfg = cfg if cfg is not None else _AppConfig()
         eff_embedder = embedder if embedder is not None else make_embedder(eff_cfg)
+        eff_extractors: Extractors | None = (
+            make_extractors(eff_cfg) if extractors is _UNSET else extractors
+        )
         if default_scope is None:
             scope = resolve_scope(None)
         elif isinstance(default_scope, _MemoryScope):
@@ -597,7 +606,7 @@ class EmbeddedMemoryClient:
             cfg=eff_cfg,
             default_scope=scope,
             reranker=reranker,
-            extractors=extractors,
+            extractors=eff_extractors,
             owns_db=True,
         )
 

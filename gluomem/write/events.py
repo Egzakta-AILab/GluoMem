@@ -39,6 +39,7 @@ from gluomem.frames.review import (
     review_memory as review_memory,
 )
 from gluomem.frames.store import FrameSource
+from gluomem.llm.fake import NullExtractors
 from gluomem.llm.outputs import (
     CognifyResult,
     ConsolidationDecision,
@@ -65,16 +66,20 @@ if TYPE_CHECKING:
 SourceType = Literal[
     "chat_turn",
     "document",
+    "doc_chunk",
     "explicit_memory",
     "tool_result",
+    "tool_output",
     "import",
 ]
 
 _SOURCE_TYPE_TO_FRAME_SOURCE: dict[str, FrameSource] = {
     "chat_turn": "user_stated",
     "document": "import",
+    "doc_chunk": "import",
     "explicit_memory": "user_stated",
     "tool_result": "tool_verified",
+    "tool_output": "tool_verified",
     "import": "import",
 }
 
@@ -198,13 +203,20 @@ def _format_event_source(event: SourceEvent) -> tuple[str, dict[str, str | None]
     return "", msg_timestamps, None
 
 
+def _active_extractors(extractors: Extractors | None) -> Extractors | None:
+    if extractors is None or isinstance(extractors, NullExtractors):
+        return None
+    return extractors
+
+
 def extract_event_claims_from_envelope(
     event: SourceEvent,
     *,
     extractors: Extractors | None = None,
 ) -> list[ExtractedClaim]:
     """Extract atomic claims from a SourceEvent using single-pass Extractors when configured."""
-    if (event.source_type == "explicit_memory" and event.kind is not None) or extractors is None:
+    active_ext = _active_extractors(extractors)
+    if (event.source_type == "explicit_memory" and event.kind is not None) or active_ext is None:
         return _direct_claims(event)
 
     source_text, msg_timestamps, default_mid = _format_event_source(event)
@@ -219,7 +231,7 @@ def extract_event_claims_from_envelope(
         except ValueError:
             ref_dt = None
 
-    specs = extractors.extract_event_claims(source_text, reference_date=ref_dt)
+    specs = active_ext.extract_event_claims(source_text, reference_date=ref_dt)
     claims: list[ExtractedClaim] = []
     for spec in specs:
         text = spec.text.strip()
@@ -312,7 +324,60 @@ def _gop_for_source_ref(source_ref: str) -> str:
     return "src:" + hashlib.sha256(source_ref.encode("utf-8")).hexdigest()
 
 
-def ingest_source_event(
+@dataclass(slots=True)
+class PreparedSourceEvent:
+    """Phase 1 output of SourceEvent ingestion (computed outside any DB write lock)."""
+
+    event: SourceEvent
+    scope: MemoryScope
+    payload_json: str
+    payload_hash: str
+    eff_cfg: AppConfig
+    scanner: Scanner
+    frame_source: FrameSource
+    claims: list[ExtractedClaim] = field(default_factory=list)
+    prepared: list[_PreparedIndex] = field(default_factory=list)
+    verdicts: list[Any] = field(default_factory=list)
+    cognified: list[CognifyResult | None] = field(default_factory=list)
+    decisions: list[ConsolidationDecision] = field(default_factory=list)
+    early_duplicate: IngestEventResult | None = None
+
+
+def _duplicate_result(
+    existing: Mapping[str, Any],
+    *,
+    event: SourceEvent,
+    scope: MemoryScope,
+    payload_hash: str,
+    store: FrameStore,
+) -> IngestEventResult:
+    from gluomem.frames.provenance import get_frames_provenance
+
+    backend = store._backend
+    if str(existing["payload_hash"]) != payload_hash:
+        raise EventConflictError(
+            f"SourceEvent ({event.event_id!r}, revision={event.revision}) already "
+            f"ingested with a different payload"
+        )
+    row_id = int(existing["id"])
+    rows = backend.fetchall(
+        f"SELECT DISTINCT frame_id FROM memory_provenance WHERE {scope_sql()} AND "
+        f"source_event_id = ? ORDER BY frame_id",
+        (*scope.as_tuple(), row_id),
+    )
+    ids = [int(r["frame_id"]) for r in rows]
+    frames = store.get_frames(ids, scope=scope)
+    return IngestEventResult(
+        row_id,
+        event.event_id,
+        event.revision,
+        True,
+        [frames[i] for i in ids if i in frames and frames[i].status in ("active", "candidate")],
+        get_frames_provenance(backend, ids, scope=scope),
+    )
+
+
+def prepare_source_event(
     event: SourceEvent,
     *,
     store: FrameStore,
@@ -320,63 +385,52 @@ def ingest_source_event(
     cfg: AppConfig | None = None,
     scanner: Scanner | None = None,
     extractors: Extractors | None = None,
-    write_guard: Callable[[], None] | None = None,
-) -> IngestEventResult:
-    """Extract, consolidate, embed, and scan first, then commit claims and provenance atomically."""
-    from gluomem.frames.content_hash import suppression_key
-    from gluomem.frames.eligibility import is_recall_eligible
-    from gluomem.frames.expiry import episode_expiry
-    from gluomem.frames.generation import bump_scope_generation
-    from gluomem.frames.lifecycle import _scrub_frames
-    from gluomem.frames.provenance import get_frames_provenance
-    from gluomem.write.cognify import link_and_retire_resolved, resolve_cognify_result
-    from gluomem.write.gate import admit
-
+    on_progress: Callable[[], None] | None = None,
+) -> PreparedSourceEvent:
+    """Phase 1: Read + LLM/embedding compute outside any DB write lock."""
     backend = store._backend
     scope = resolve_scope(event.scope, default=store.scope)
-    event = event.model_copy(update={"scope": scope})
-    payload_json, payload_hash = _canonical_event_payload(event)
+    scoped_event = event.model_copy(update={"scope": scope})
+    payload_json, payload_hash = _canonical_event_payload(scoped_event)
+    eff_cfg = cfg or _default_config()
+    eff_scanner = scanner or (_default_scanner() if cfg is None else make_scanner(eff_cfg))
+    frame_source = _SOURCE_TYPE_TO_FRAME_SOURCE[scoped_event.source_type]
+
     lookup_sql = (
         f"SELECT id, payload_hash FROM source_events WHERE {scope_sql()} "
         "AND event_id = ? AND revision = ?"
     )
-    lookup_params = (*scope.as_tuple(), event.event_id, event.revision)
-
-    def duplicate(existing: Mapping[str, Any]) -> IngestEventResult:
-        if str(existing["payload_hash"]) != payload_hash:
-            raise EventConflictError(
-                f"SourceEvent ({event.event_id!r}, revision={event.revision}) already "
-                f"ingested with a different payload"
-            )
-        row_id = int(existing["id"])
-        rows = backend.fetchall(
-            f"SELECT DISTINCT frame_id FROM memory_provenance WHERE {scope_sql()} AND "
-            f"source_event_id = ? ORDER BY frame_id",
-            (*scope.as_tuple(), row_id),
-        )
-        ids = [int(r["frame_id"]) for r in rows]
-        frames = store.get_frames(ids, scope=scope)
-        return IngestEventResult(
-            row_id,
-            event.event_id,
-            event.revision,
-            True,
-            [frames[i] for i in ids if i in frames and frames[i].status in ("active", "candidate")],
-            get_frames_provenance(backend, ids, scope=scope),
-        )
-
+    lookup_params = (*scope.as_tuple(), scoped_event.event_id, scoped_event.revision)
     existing = backend.fetchone(lookup_sql, lookup_params)
     if existing is not None:
-        return duplicate(existing)
-    eff_cfg = cfg or _default_config()
-    scanner = scanner or (_default_scanner() if cfg is None else make_scanner(eff_cfg))
-    claims = extract_event_claims_from_envelope(event, extractors=extractors)
-    frame_source = _SOURCE_TYPE_TO_FRAME_SOURCE[event.source_type]
+        return PreparedSourceEvent(
+            event=scoped_event,
+            scope=scope,
+            payload_json=payload_json,
+            payload_hash=payload_hash,
+            eff_cfg=eff_cfg,
+            scanner=eff_scanner,
+            frame_source=frame_source,
+            early_duplicate=_duplicate_result(
+                existing,
+                event=scoped_event,
+                scope=scope,
+                payload_hash=payload_hash,
+                store=store,
+            ),
+        )
+
+    if on_progress is not None:
+        on_progress()
+    active_ext = _active_extractors(extractors)
+    claims = extract_event_claims_from_envelope(scoped_event, extractors=active_ext)
     prepared = [store._prepare_index(claim.content) for claim in claims]
-    verdicts = [scanner.scan(claim.content, context=frame_source) for claim in claims]
+    verdicts = [eff_scanner.scan(claim.content, context=frame_source) for claim in claims]
 
     cognified: list[CognifyResult | None] = []
-    used_single_pass = not (event.source_type == "explicit_memory" and event.kind is not None)
+    used_single_pass = not (
+        scoped_event.source_type == "explicit_memory" and scoped_event.kind is not None
+    )
     for claim in claims:
         if kg is not None and eff_cfg.write.cognify.enabled:
             if claim.entities or claim.relations:
@@ -386,8 +440,10 @@ def ingest_source_event(
                         relations=list(claim.relations),
                     )
                 )
-            elif extractors is not None and not used_single_pass:
-                cognified.append(extractors.cognify(claim.content))
+            elif active_ext is not None and not used_single_pass:
+                if on_progress is not None:
+                    on_progress()
+                cognified.append(active_ext.cognify(claim.content))
             else:
                 cognified.append(None)
         else:
@@ -395,15 +451,72 @@ def ingest_source_event(
 
     decisions: list[ConsolidationDecision] = []
     for claim, index in zip(claims, prepared, strict=True):
-        if extractors is not None:
+        if active_ext is not None:
             candidates = _retrieve_consolidation_candidates(store, index, scope=scope)
             if candidates:
-                decisions.append(extractors.consolidate_claim(claim.content, candidates))
+                if on_progress is not None:
+                    on_progress()
+                decisions.append(active_ext.consolidate_claim(claim.content, candidates))
             else:
                 decisions.append(ConsolidationDecision(action="ADD"))
         else:
             decisions.append(ConsolidationDecision(action="ADD"))
 
+    return PreparedSourceEvent(
+        event=scoped_event,
+        scope=scope,
+        payload_json=payload_json,
+        payload_hash=payload_hash,
+        eff_cfg=eff_cfg,
+        scanner=eff_scanner,
+        frame_source=frame_source,
+        claims=claims,
+        prepared=prepared,
+        verdicts=verdicts,
+        cognified=cognified,
+        decisions=decisions,
+    )
+
+
+def commit_source_event(
+    prepared_event: PreparedSourceEvent,
+    *,
+    store: FrameStore,
+    kg: KnowledgeGraph | None = None,
+    write_guard: Callable[[], None] | None = None,
+) -> IngestEventResult:
+    """Phase 2: Short atomic DB write transaction for a prepared SourceEvent."""
+    from gluomem.frames.content_hash import suppression_key
+    from gluomem.frames.eligibility import is_recall_eligible
+    from gluomem.frames.expiry import episode_expiry
+    from gluomem.frames.generation import bump_scope_generation
+    from gluomem.frames.lifecycle import _scrub_frames
+    from gluomem.frames.provenance import get_frames_provenance
+    from gluomem.write.cognify import link_and_retire_resolved, resolve_cognify_result
+    from gluomem.write.gate import admit
+
+    if prepared_event.early_duplicate is not None:
+        return prepared_event.early_duplicate
+
+    backend = store._backend
+    event = prepared_event.event
+    scope = prepared_event.scope
+    payload_json = prepared_event.payload_json
+    payload_hash = prepared_event.payload_hash
+    eff_cfg = prepared_event.eff_cfg
+    scanner = prepared_event.scanner
+    frame_source = prepared_event.frame_source
+    claims = prepared_event.claims
+    prepared = prepared_event.prepared
+    verdicts = prepared_event.verdicts
+    cognified = prepared_event.cognified
+    decisions = prepared_event.decisions
+
+    lookup_sql = (
+        f"SELECT id, payload_hash FROM source_events WHERE {scope_sql()} "
+        "AND event_id = ? AND revision = ?"
+    )
+    lookup_params = (*scope.as_tuple(), event.event_id, event.revision)
     now_s = to_storage(event.created_at) or now_utc_iso()
     untrusted_sources = set(eff_cfg.safety.untrusted_sources)
     with backend.transaction():
@@ -430,7 +543,13 @@ def ingest_source_event(
         if row is None:
             existing = backend.fetchone(lookup_sql, lookup_params)
             assert existing is not None
-            return duplicate(existing)
+            return _duplicate_result(
+                existing,
+                event=event,
+                scope=scope,
+                payload_hash=payload_hash,
+                store=store,
+            )
         result = IngestEventResult(int(row["id"]), event.event_id, event.revision, False)
         for claim, index, verdict, cognify_res, decision in zip(
             claims, prepared, verdicts, cognified, decisions, strict=True
@@ -580,6 +699,33 @@ def ingest_source_event(
             backend, [f.id for f in result.frames], scope=scope
         )
     return result
+
+
+def ingest_source_event(
+    event: SourceEvent,
+    *,
+    store: FrameStore,
+    kg: KnowledgeGraph | None = None,
+    cfg: AppConfig | None = None,
+    scanner: Scanner | None = None,
+    extractors: Extractors | None = None,
+    write_guard: Callable[[], None] | None = None,
+) -> IngestEventResult:
+    """Two-phase SourceEvent ingestion: Phase 1 outside DB lock, Phase 2 atomic commit."""
+    prepared_event = prepare_source_event(
+        event,
+        store=store,
+        kg=kg,
+        cfg=cfg,
+        scanner=scanner,
+        extractors=extractors,
+    )
+    return commit_source_event(
+        prepared_event,
+        store=store,
+        kg=kg,
+        write_guard=write_guard,
+    )
 
 
 @lru_cache(maxsize=1)

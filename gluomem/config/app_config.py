@@ -152,6 +152,8 @@ class StorageConfig(BaseModel):
     path: str = "~/.gluomem/default.mind"
     dsn: str | None = None
     postgres_schema: str = "gluomem"
+    pool_min_size: int = Field(default=2, ge=1)
+    pool_max_size: int = Field(default=16, ge=1)
 
     @model_validator(mode="before")
     @classmethod
@@ -175,6 +177,11 @@ class StorageConfig(BaseModel):
             )
         if self.backend == "postgres" and not (self.dsn and self.dsn.strip()):
             raise ValueError("storage.dsn is required when storage.backend == 'postgres'")
+        if self.pool_max_size < self.pool_min_size:
+            raise ValueError(
+                f"storage.pool_max_size ({self.pool_max_size}) must be >= "
+                f"storage.pool_min_size ({self.pool_min_size})"
+            )
         return self
 
 

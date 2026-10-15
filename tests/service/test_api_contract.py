@@ -83,7 +83,12 @@ def test_invalid_input_is_422(
 
 
 def test_scope_isolation_and_pagination(client: TestClient) -> None:
-    event = {"event_id": "a1", "source_ref": "doc", "content": "SSH bastion port is 22022."}
+    event = {
+        "event_id": "a1",
+        "source_ref": "doc",
+        "content": "SSH bastion port is 22022.",
+        "async_mode": False,
+    }
     frame_id = client.post("/v1/events", json=event, headers=HEADERS).json()["frames"][0]["id"]
     event.update(event_id="a2", content="Our proxy port is 21000.")
     client.post("/v1/events", json=event, headers=HEADERS)
@@ -145,7 +150,12 @@ def test_failed_request_cannot_rollback_concurrent_write(
                 client.post,
                 "/v1/events",
                 headers=HEADERS,
-                json={"event_id": name, "source_ref": name, "content": "Persist this decision."},
+                json={
+                    "event_id": name,
+                    "source_ref": name,
+                    "content": "Persist this decision.",
+                    "async_mode": False,
+                },
             )
             for name in ("fails", "succeeds")
         ]
@@ -153,3 +163,37 @@ def test_failed_request_cannot_rollback_concurrent_write(
     frames = client.get("/v1/memories", headers=HEADERS).json()["active_frames"]
     assert len(frames) == 1
     assert frames[0]["provenance"][0]["source_ref"] == "succeeds"
+
+
+def test_smart_async_default_by_source_type(client: TestClient) -> None:
+    explicit = client.post(
+        "/v1/events",
+        headers=HEADERS,
+        json={
+            "event_id": "exp-1",
+            "source_type": "explicit_memory",
+            "source_ref": "manual",
+            "content": "Primary region is eu-central-1.",
+            "kind": "fact",
+        },
+    )
+    assert explicit.status_code == 200
+    assert len(explicit.json()["frames"]) == 1
+
+    for idx, src_type in enumerate(
+        ("chat_turn", "document", "doc_chunk", "tool_result", "tool_output", "import")
+    ):
+        resp = client.post(
+            "/v1/events",
+            headers=HEADERS,
+            json={
+                "event_id": f"bg-{idx}",
+                "source_type": src_type,
+                "source_ref": f"ref-{idx}",
+                "content": f"Background observation {idx}.",
+            },
+        )
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["job_type"] == "ingest_event"
+        assert body["status"] == "queued"
