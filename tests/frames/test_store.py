@@ -47,9 +47,7 @@ def _fts_ids(db: MindDB, term: str) -> list[int]:
     ]
 
 
-def test_ipb_roundtrip_and_importance_inheritance(
-    mind_db: MindDB, frame_store: FrameStore
-) -> None:
+def test_ipb_roundtrip_and_importance_inheritance(mind_db: MindDB, frame_store: FrameStore) -> None:
     i = frame_store.create_i_frame(
         "gop-1",
         "remember the milk",
@@ -85,17 +83,13 @@ def test_ipb_roundtrip_and_importance_inheritance(
     )
     assert b_exp.importance == "temporary"
 
-    mind_db.conn.execute(
-        'UPDATE memory_frames SET content=\'{"oops": 1}\' WHERE id=?', (b_exp.id,)
-    )
+    mind_db.conn.execute("UPDATE memory_frames SET content='{\"oops\": 1}' WHERE id=?", (b_exp.id,))
     mind_db.conn.commit()
     with pytest.raises(ValueError, match="not a valid correction payload"):
         frame_store.get_b_correction(b_exp.id)
 
 
-def test_dedup_hash_lookup_and_set_importance(
-    mind_db: MindDB, frame_store: FrameStore
-) -> None:
+def test_dedup_hash_lookup_and_set_importance(mind_db: MindDB, frame_store: FrameStore) -> None:
     f1 = frame_store.create_i_frame("gop-1", "  remember   the   milk  ")
     f2 = frame_store.create_i_frame("gop-1", "remember the milk")
     assert f1.id == f2.id
@@ -134,9 +128,7 @@ def test_reconstruct_state_and_eligibility(frame_store: FrameStore) -> None:
     assert ps_all == []
 
 
-def test_index_sync_for_i_p_b_and_dedup(
-    mind_db: MindDB, frame_store: FrameStore
-) -> None:
+def test_index_sync_for_i_p_b_and_dedup(mind_db: MindDB, frame_store: FrameStore) -> None:
     i = frame_store.create_i_frame("gop-1", "alpha beta gamma")
     p = frame_store.create_p_frame("gop-1", "refinement delta", base_id=i.id)
     b = frame_store.create_b_frame(
@@ -236,9 +228,7 @@ def test_sql_failure_rollback_and_repair_indexes(
 
     missing = _legacy_unindexed("beta missing")
     stale = store.create_i_frame("gop-1", "gamma stale")
-    db.conn.execute(
-        "UPDATE memory_frames SET content='gamma rewritten' WHERE id=?", (stale.id,)
-    )
+    db.conn.execute("UPDATE memory_frames SET content='gamma rewritten' WHERE id=?", (stale.id,))
     db.conn.commit()
     assert store.repair_indexes() == [missing, stale.id]
     assert store.repair_indexes() == []

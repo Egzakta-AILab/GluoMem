@@ -26,9 +26,7 @@ if TYPE_CHECKING:
 def build_answer_module(cfg: AppConfig) -> dspy.Module:
     task_cfg = cfg.dspy.tasks[cfg.benchmark.answer.task]
     signature = (
-        AnswerQAPreferenceAware
-        if cfg.benchmark.answer.style == "preference_aware"
-        else AnswerQA
+        AnswerQAPreferenceAware if cfg.benchmark.answer.style == "preference_aware" else AnswerQA
     )
     if task_cfg.module == "cot":
         return dspy.ChainOfThought(signature)
@@ -64,12 +62,8 @@ class Answerer:
         usage = pred.get_lm_usage() if self._track_usage else None
         if usage:
             # One entry per model slug; sum across (usually exactly one).
-            prompt_tokens = sum(
-                u.get("prompt_tokens", 0) or 0 for u in usage.values()
-            )
-            completion_tokens = sum(
-                u.get("completion_tokens", 0) or 0 for u in usage.values()
-            )
+            prompt_tokens = sum(u.get("prompt_tokens", 0) or 0 for u in usage.values())
+            completion_tokens = sum(u.get("completion_tokens", 0) or 0 for u in usage.values())
         return AnswerResult(
             text=str(pred.answer),
             prompt_tokens=prompt_tokens,

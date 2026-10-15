@@ -54,9 +54,7 @@ def extract_observations(
         thunks.append(("fact", lambda: _fact_observations(facade, session_text)))
 
     if _lane_cfg("event", cfg).enabled:
-        thunks.append(
-            ("event", lambda: _event_observations(facade, session_text, reference_date))
-        )
+        thunks.append(("event", lambda: _event_observations(facade, session_text, reference_date)))
 
     if _lane_cfg("profile", cfg).enabled:
         for speaker in speakers:
@@ -66,9 +64,7 @@ def extract_observations(
             thunks.append(
                 (
                     f"profile:{speaker}",
-                    lambda text=text, speaker=speaker: _profile_observations(
-                        facade, text, speaker
-                    ),
+                    lambda text=text, speaker=speaker: _profile_observations(facade, text, speaker),
                 )
             )
 
@@ -92,9 +88,7 @@ def _event_observations(
     out: list[Observation] = []
     for event in facade.extract_events(session_text, reference_date):
         event_time = (
-            event.event_date.isoformat(timespec="seconds")
-            if event.event_date is not None
-            else None
+            event.event_date.isoformat(timespec="seconds") if event.event_date is not None else None
         )
         out.append(
             Observation(
@@ -107,9 +101,7 @@ def _event_observations(
     return out
 
 
-def _profile_observations(
-    facade: Extractors, text: str, speaker: str
-) -> list[Observation]:
+def _profile_observations(facade: Extractors, text: str, speaker: str) -> list[Observation]:
     return [
         Observation(lane="profile", text=f.text, speaker=speaker, confidence=f.confidence)
         for f in facade.extract_profile(text, speaker=speaker)

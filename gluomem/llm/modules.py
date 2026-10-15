@@ -67,9 +67,7 @@ def build_module(task: str, cfg: AppConfig) -> dspy.Module:
         return dspy.Predict(signature)
     if tc.module == "cot":
         return dspy.ChainOfThought(signature)
-    raise ValueError(
-        f"dspy.tasks.{task}.module '{tc.module}' invalid; expected 'predict' or 'cot'"
-    )
+    raise ValueError(f"dspy.tasks.{task}.module '{tc.module}' invalid; expected 'predict' or 'cot'")
 
 
 def _refine_wrap(module: dspy.Module, tc: DspyTaskConfig) -> dspy.Module:
@@ -122,9 +120,7 @@ class DspyExtractors:
         except Exception as exc:
             raise ExtractionError(f"dspy task '{task}' failed: {exc}") from exc
         if pred is None:
-            raise ExtractionError(
-                f"dspy task '{task}' produced no valid output after retries"
-            )
+            raise ExtractionError(f"dspy task '{task}' produced no valid output after retries")
         if self._cfg.dspy.track_usage:
             self.usage.add(pred.get_lm_usage())
         return pred
@@ -135,9 +131,7 @@ class DspyExtractors:
         pred = self._run("fact_extraction", text=text)
         return list(pred.facts)
 
-    def extract_events(
-        self, source_text: str, reference_date: datetime
-    ) -> list[ExtractedEvent]:
+    def extract_events(self, source_text: str, reference_date: datetime) -> list[ExtractedEvent]:
         pred = self._run(
             "event_extraction",
             source_text=source_text,
@@ -154,9 +148,7 @@ class DspyExtractors:
 
     def cognify(self, text: str) -> CognifyResult:
         pred = self._run("cognify", text=text)
-        return CognifyResult(
-            entities=list(pred.entities), relations=list(pred.relations)
-        )
+        return CognifyResult(entities=list(pred.entities), relations=list(pred.relations))
 
     def check_contradiction(
         self, new_statement: str, stored_statement: str

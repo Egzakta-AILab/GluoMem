@@ -72,9 +72,7 @@ def test_relevance_weighted_sum_and_signal_zeroability() -> None:
         importance_level="normal",
         scoring=scoring,
     )
-    w_zero_c = ProfileWeights(
-        temporal=0.6, popularity=0.2, contextual=0.0, importance=0.2
-    )
+    w_zero_c = ProfileWeights(temporal=0.6, popularity=0.2, contextual=0.0, importance=0.2)
     assert relevance(weights=w_zero_c, bfs_distance=0, **common) == approx(
         relevance(weights=w_zero_c, bfs_distance=4, **common)
     )

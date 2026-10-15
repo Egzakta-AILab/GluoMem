@@ -327,9 +327,7 @@ def test_cli_components_and_index(
         ),
     ],
 )
-def test_invalid_config_overrides_fail_loudly(
-    overrides: dict[str, object], match: str
-) -> None:
+def test_invalid_config_overrides_fail_loudly(overrides: dict[str, object], match: str) -> None:
     cfg = load_config()
     with pytest.raises(ValidationError, match=match):
         cfg.with_overrides(overrides)
@@ -351,7 +349,5 @@ def test_lazy_imports_do_not_load_heavy_packages() -> None:
         "loaded = [m for m in ('dspy', 'mem0', 'sentence_transformers') if m in sys.modules]; "
         "sys.exit(1 if loaded else 0)"
     )
-    proc = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, check=False
-    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
     assert proc.returncode == 0, proc.stderr

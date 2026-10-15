@@ -113,9 +113,7 @@ class FakeExtractors:
                 return self._facts_queue.pop(0)
         return [ExtractedFact(text=s, confidence=1.0) for s in _sentences(text)]
 
-    def extract_events(
-        self, source_text: str, reference_date: datetime
-    ) -> list[ExtractedEvent]:
+    def extract_events(self, source_text: str, reference_date: datetime) -> list[ExtractedEvent]:
         with self._lock:
             self.calls["extract_events"] += 1
             if self._events_queue:
@@ -140,10 +138,7 @@ class FakeExtractors:
             self.calls["extract_profile"] += 1
             if self._facts_queue:
                 return self._facts_queue.pop(0)
-        return [
-            ExtractedFact(text=f"{speaker}: {s}", confidence=1.0)
-            for s in _sentences(text)
-        ]
+        return [ExtractedFact(text=f"{speaker}: {s}", confidence=1.0) for s in _sentences(text)]
 
     def cognify(self, text: str) -> CognifyResult:  # noqa: ARG002
         with self._lock:

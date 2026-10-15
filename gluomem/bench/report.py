@@ -59,9 +59,7 @@ def _provenance_lines(manifest: dict[str, Any]) -> list[str]:
     judge = manifest["judge"]
     slugs = judge.get("model_slugs")
     if slugs:
-        lines.append(
-            "- judge models: " + ", ".join(f"{b}=`{s}`" for b, s in sorted(slugs.items()))
-        )
+        lines.append("- judge models: " + ", ".join(f"{b}=`{s}`" for b, s in sorted(slugs.items())))
     if "prompt_sha" in judge:
         lines.append(f"- judge prompt sha: `{judge['prompt_sha']}`")
     return lines
@@ -133,18 +131,14 @@ def render_report(
         if mixed != {key}:
             raise AssertionError(f"mixed protocol groups in one table: {mixed}")
         judge_desc = (
-            "objective (no LLM judge)"
-            if judge_family == "none"
-            else f"{judge_family} ({backbone})"
+            "objective (no LLM judge)" if judge_family == "none" else f"{judge_family} ({backbone})"
         )
         lines.append(f"## {metric_family} — {judge_desc} — `{protocol}`")
         lines.append("")
         lines.append("| scope | value | n |")
         lines.append("|---|---|---|")
         for entry in sorted(group, key=lambda e: e["scope"]):
-            lines.append(
-                f"| {entry['scope']} | {entry['value']:.4f} | {entry['n']} |"
-            )
+            lines.append(f"| {entry['scope']} | {entry['value']:.4f} | {entry['n']} |")
         lines.append("")
 
     lines.append(_CITATIONS)

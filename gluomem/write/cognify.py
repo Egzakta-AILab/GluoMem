@@ -55,9 +55,7 @@ def _resolve_entity(
             if cfg.kg.entity_type_mode == "drop":
                 return None
             entity_type = cfg.kg.retype_to
-    existing = kg.find_valid_entities(
-        candidate.name, cfg.kg, entity_type=entity_type, scope=scope
-    )
+    existing = kg.find_valid_entities(candidate.name, cfg.kg, entity_type=entity_type, scope=scope)
     if existing:
         return existing[0].id
     created = kg.create_entity(
@@ -144,9 +142,7 @@ def cognify_texts(
             out.append(result)
             continue
         out.append(
-            resolve_cognify_result(
-                result, kg=kg, cfg=cfg, valid_from=valid_from, scope=scope
-            )
+            resolve_cognify_result(result, kg=kg, cfg=cfg, valid_from=valid_from, scope=scope)
         )
     return out
 
@@ -199,9 +195,7 @@ def resolve_cognify_result(
                 raise
             existing = [
                 r
-                for r in kg.find_valid_relations(
-                    source_id, rel.relation_type, scope=scope
-                )
+                for r in kg.find_valid_relations(source_id, rel.relation_type, scope=scope)
                 if r.target_id == target_id
             ]
             if existing:
@@ -212,16 +206,12 @@ def resolve_cognify_result(
                 )
                 if retired_row is None:
                     raise
-                created = kg.reopen_relation(
-                    retired_row.id, valid_from=valid_from, scope=scope
-                )
+                created = kg.reopen_relation(retired_row.id, valid_from=valid_from, scope=scope)
         if created.id not in relation_ids:
             relation_ids.append(created.id)
             relations.append(created)
 
-    return ResolvedGraph(
-        entity_ids=entity_ids, relation_ids=relation_ids, relations=relations
-    )
+    return ResolvedGraph(entity_ids=entity_ids, relation_ids=relation_ids, relations=relations)
 
 
 def retire_conflicting_relations(
@@ -239,9 +229,7 @@ def retire_conflicting_relations(
         else:
             rtypes = (rel.relation_type,)
         for rtype in rtypes:
-            for existing in kg.find_valid_relations(
-                rel.source_id, rtype, scope=scope
-            ):
+            for existing in kg.find_valid_relations(rel.source_id, rtype, scope=scope):
                 if (
                     existing.id == rel.id
                     or existing.target_id == rel.target_id
@@ -250,13 +238,9 @@ def retire_conflicting_relations(
                 ):
                     continue
                 if utc_key(rel.valid_from) >= utc_key(existing.valid_from):
-                    kg.retire_relation(
-                        existing.id, valid_to=rel.valid_from, scope=scope
-                    )
+                    kg.retire_relation(existing.id, valid_to=rel.valid_from, scope=scope)
                     retired.append(existing.id)
                 else:
-                    kg.retire_relation(
-                        rel.id, valid_to=existing.valid_from, scope=scope
-                    )
+                    kg.retire_relation(rel.id, valid_to=existing.valid_from, scope=scope)
                     retired.append(rel.id)
     return retired

@@ -271,9 +271,7 @@ class Mem0Retriever:
                     f"{conv_dir} — run `gluomem bench ingest --dataset locomo "
                     f"--system mem0 --db-dir {self._db_dir}` first"
                 )
-            memory = self._memory_cls.from_config(
-                build_mem0_config(self._cfg, conv_dir=conv_dir)
-            )
+            memory = self._memory_cls.from_config(build_mem0_config(self._cfg, conv_dir=conv_dir))
             self._memories[conv_id] = memory
         return memory
 
@@ -286,9 +284,7 @@ class Mem0Retriever:
                 filters={"user_id": s.conv_id},
                 top_k=self._top_k,
             )
-        results = (
-            response.get("results", []) if isinstance(response, dict) else []
-        )
+        results = response.get("results", []) if isinstance(response, dict) else []
         if not results:
             return Prediction(
                 sample_id=s.id,
@@ -331,9 +327,7 @@ class Mem0Retriever:
         return {
             "system": "mem0-oss",
             "versions": _installed_versions(),
-            "mem0_config": build_mem0_config(
-                self._cfg, conv_dir=self._db_dir / "<conv_id>"
-            ),
+            "mem0_config": build_mem0_config(self._cfg, conv_dir=self._db_dir / "<conv_id>"),
             "llm_policy": "openai-compatible OpenRouter endpoint",
             "search_params": {
                 "top_k": self._top_k,

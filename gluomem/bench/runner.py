@@ -150,9 +150,7 @@ def _make_judge_fns(
     return {b: j.judge for b, j in judges.items()}, harvest
 
 
-def usage_cost(
-    cfg: AppConfig, usage: dict[str, dict[str, int]]
-) -> float | None:
+def usage_cost(cfg: AppConfig, usage: dict[str, dict[str, int]]) -> float | None:
     """USD estimate from registry per-1k rates; None when no slug has rates."""
     by_slug = {
         entry.provider_model: entry
@@ -166,9 +164,7 @@ def usage_cost(
             continue
         matched = True
         cost += stats.get("prompt_tokens", 0) / 1000.0 * (entry.cost_per_1k_in or 0.0)
-        cost += stats.get("completion_tokens", 0) / 1000.0 * (
-            entry.cost_per_1k_out or 0.0
-        )
+        cost += stats.get("completion_tokens", 0) / 1000.0 * (entry.cost_per_1k_out or 0.0)
     return cost if matched else None
 
 
@@ -270,17 +266,11 @@ def _make_retriever(
     if name == "bm25":
         return Bm25Retriever(cfg, adapter.conversations(), answer_fn)
     if name == "vector_rag":
-        return VectorRagRetriever(
-            cfg, adapter.conversations(), answer_fn, embedder=embedder
-        )
-    raise ValueError(
-        f"unknown retriever '{name}'; known: {', '.join(RETRIEVER_NAMES)}"
-    )
+        return VectorRagRetriever(cfg, adapter.conversations(), answer_fn, embedder=embedder)
+    raise ValueError(f"unknown retriever '{name}'; known: {', '.join(RETRIEVER_NAMES)}")
 
 
-def _run_dir(
-    cfg: AppConfig, out_root: str | Path | None, dataset: str, retriever: str
-) -> Path:
+def _run_dir(cfg: AppConfig, out_root: str | Path | None, dataset: str, retriever: str) -> Path:
     root = Path(out_root) if out_root is not None else Path(cfg.benchmark.run_dir)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     base = root / f"{stamp}_{dataset}_{retriever}"
@@ -336,9 +326,7 @@ def compute_score_entries(
             entries.append(_score_entry(f"category:{cat}", score))
     for per_sample in singles.values():
         if per_sample:
-            entries.append(
-                _score_entry("overall", registry.aggregate(per_sample.values()))
-            )
+            entries.append(_score_entry("overall", registry.aggregate(per_sample.values())))
 
     # Retrieval diagnostics: group per-sample scores by metric family.
     families: dict[str, dict[str, Score]] = {}
@@ -346,14 +334,10 @@ def compute_score_entries(
         s = samples[sample_id]
         if retrieval_not_applicable(s, retrieves=retrieves) is not None:
             continue
-        for score in retrieval_scores(
-            p, s, ks=ks, dataset_sha=dataset_sha, protocol=protocol
-        ):
+        for score in retrieval_scores(p, s, ks=ks, dataset_sha=dataset_sha, protocol=protocol):
             families.setdefault(score.tag.metric_family, {})[sample_id] = score
     for per_sample in families.values():
-        entries.append(
-            _score_entry("overall", registry.aggregate(per_sample.values()))
-        )
+        entries.append(_score_entry("overall", registry.aggregate(per_sample.values())))
         for cat, score in by_category(per_sample, samples).items():
             entries.append(_score_entry(f"category:{cat}", score))
 
@@ -465,24 +449,16 @@ def run_benchmark(
     parallelism = cfg.benchmark.parallelism
     predict_started = time.perf_counter()
     predict_thunks = [(s.id, lambda s=s: _predict(s)) for s in samples]
-    predictions: dict[str, Prediction] = dict(
-        run_ordered(predict_thunks, max_workers=parallelism)
-    )
+    predictions: dict[str, Prediction] = dict(run_ordered(predict_thunks, max_workers=parallelism))
     predict_seconds = time.perf_counter() - predict_started
     samples_by_id = {s.id: s for s in samples}
     with paths.predictions.open("w", encoding="utf-8") as fh:
         for s in samples:
-            fh.write(
-                json.dumps(_prediction_row(s, predictions[s.id]), sort_keys=True)
-                + "\n"
-            )
+            fh.write(json.dumps(_prediction_row(s, predictions[s.id]), sort_keys=True) + "\n")
 
     # --- judge phase (parallel across samples, sequential within a sample) --
     backbones = sorted(fns)
-    slugs = {
-        b: (cfg.models[b].provider_model if b in cfg.models else b)
-        for b in backbones
-    }
+    slugs = {b: (cfg.models[b].provider_model if b in cfg.models else b) for b in backbones}
 
     judge_family = cfg.benchmark.judge.family
     judge_failures: list[str] = []
@@ -541,9 +517,7 @@ def run_benchmark(
         protocol=protocol,
         retrieves=retrieves,
     )
-    paths.scores.write_text(
-        json.dumps(entries, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    paths.scores.write_text(json.dumps(entries, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     denominators = compute_denominators(
         predictions,
         records,
@@ -631,9 +605,7 @@ def run_benchmark(
     paths.manifest.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    paths.report.write_text(
-        render_report(entries, manifest, denominators), encoding="utf-8"
-    )
+    paths.report.write_text(render_report(entries, manifest, denominators), encoding="utf-8")
 
     headline = _headline(entries)
     if headline is not None:
@@ -804,9 +776,7 @@ def ingest_per_conversation(
         }
         sentinel = _ingest_sentinel(db_dir, conv.conv_id)
         tmp = sentinel.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        tmp.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         tmp.replace(sentinel)
         reports_by_index[index] = report  # distinct keys → GIL-atomic, no lock
         counts = (
@@ -853,9 +823,7 @@ def ingest_per_conversation(
     # the cache sha (portable, order-independent) + live-miss count so an ablation
     # arm can prove it replayed the recorded extraction (record: all live; replay/
     # readthrough hits: misses≈0). Written to a sidecar for durable provenance.
-    if getattr(cfg.write.extraction_cache, "mode", "off") != "off" and hasattr(
-        facade, "cache_sha"
-    ):
+    if getattr(cfg.write.extraction_cache, "mode", "off") != "off" and hasattr(facade, "cache_sha"):
         sha = facade.cache_sha()
         misses = getattr(facade, "cache_misses", 0)
         print(
@@ -911,8 +879,7 @@ def verify_ingest_completeness(
         try:
             found = int(
                 db.scalar(
-                    "SELECT COUNT(DISTINCT gop_id) FROM memory_frames "
-                    "WHERE gop_id LIKE ?",
+                    "SELECT COUNT(DISTINCT gop_id) FROM memory_frames WHERE gop_id LIKE ?",
                     (f"{conv.conv_id}:session:%",),
                 )
                 or 0

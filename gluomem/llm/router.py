@@ -57,9 +57,7 @@ class LMRouter:
             return self._cfg.dspy.tasks[task]
         except KeyError as exc:
             known = ", ".join(sorted(self._cfg.dspy.tasks)) or "(none)"
-            raise KeyError(
-                f"unknown dspy task '{task}'; configured tasks: {known}"
-            ) from exc
+            raise KeyError(f"unknown dspy task '{task}'; configured tasks: {known}") from exc
 
     def _build_lm(
         self,
@@ -91,9 +89,7 @@ class LMRouter:
             if reasoning.get("enabled") is not False:
                 raise
             clean_kwargs = {
-                k: v
-                for k, v in kwargs.items()
-                if k not in ("temperature", "max_tokens")
+                k: v for k, v in kwargs.items() if k not in ("temperature", "max_tokens")
             }
             lm = dspy.LM(
                 entry.provider_model,
@@ -110,11 +106,7 @@ class LMRouter:
     def _reasoning_extra_body(self, entry: ModelEntry) -> dict[str, Any]:
         extra_body: dict[str, Any] = dict(entry.extra.get("extra_body") or {})
         policy = self._cfg.dspy.reasoning_enabled
-        if (
-            entry.provider == "openrouter"
-            and policy is not None
-            and "reasoning" not in extra_body
-        ):
+        if entry.provider == "openrouter" and policy is not None and "reasoning" not in extra_body:
             extra_body["reasoning"] = {"enabled": policy}
         return extra_body
 
@@ -122,9 +114,7 @@ class LMRouter:
         """Return the ``dspy.LM`` for a configured task."""
         tc = self._task_cfg(task)
         entry = self._registry.resolve(tc.model)
-        return self._build_lm(
-            entry, temperature=tc.temperature, max_tokens=tc.max_tokens
-        )
+        return self._build_lm(entry, temperature=tc.temperature, max_tokens=tc.max_tokens)
 
     def lm_for_model(
         self,

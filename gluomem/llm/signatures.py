@@ -88,9 +88,7 @@ class JudgeQATyped(dspy.Signature):
     question: str = dspy.InputField()
     gold: str = dspy.InputField()
     prediction: str = dspy.InputField()
-    rubric: str = dspy.InputField(
-        desc="Grading rubric for this question type; follow it exactly."
-    )
+    rubric: str = dspy.InputField(desc="Grading rubric for this question type; follow it exactly.")
     verdict: Verdict = dspy.OutputField()
 
 

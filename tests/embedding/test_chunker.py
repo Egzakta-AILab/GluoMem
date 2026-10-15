@@ -22,6 +22,4 @@ def test_chunker_split_overlap_and_wholeframe() -> None:
     short = "a" * 1499
     assert chunk(short, cfg.chunking) == [Chunk(content=short, char_start=0, char_end=1499)]
     boundary = "a" * 1500
-    assert chunk(boundary, cfg.chunking) == [
-        Chunk(content=boundary, char_start=0, char_end=1500)
-    ]
+    assert chunk(boundary, cfg.chunking) == [Chunk(content=boundary, char_start=0, char_end=1500)]

@@ -59,9 +59,7 @@ def test_output_models_validation_and_protocol_conformance() -> None:
 
 def test_importing_llm_seam_never_imports_dspy() -> None:
     code = "import sys; import gluomem.llm; sys.exit(1 if 'dspy' in sys.modules else 0)"
-    proc = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, check=False
-    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
     assert proc.returncode == 0, proc.stderr
 
 

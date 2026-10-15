@@ -36,14 +36,10 @@ class SemanticDeduper:
     def __init__(self, embedder: Embedder, *, threshold: float) -> None:
         self._embedder = embedder
         self._threshold = float(threshold)
-        self._by_gop: dict[
-            tuple[str, str, str, str], tuple[list[int], list[np.ndarray]]
-        ] = {}
+        self._by_gop: dict[tuple[str, str, str, str], tuple[list[int], list[np.ndarray]]] = {}
 
     @staticmethod
-    def _key(
-        gop: str, scope: MemoryScope | None
-    ) -> tuple[str, str, str, str]:
+    def _key(gop: str, scope: MemoryScope | None) -> tuple[str, str, str, str]:
         s = resolve_scope(scope)
         return (s.tenant_id, s.principal_id, s.namespace, gop)
 

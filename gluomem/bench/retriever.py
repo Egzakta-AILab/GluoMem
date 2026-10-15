@@ -111,9 +111,7 @@ class GluoMemRetriever:
                 )
             db = MindDB(db_path, dim=self._cfg.storage.vector_dim)
             embedder = self._resolve_embedder(db)
-            store = FrameStore(
-                db, embedder=embedder, chunking=self._cfg.chunking
-            )
+            store = FrameStore(db, embedder=embedder, chunking=self._cfg.chunking)
             kg = KnowledgeGraph(db)
             stack = HybridSearch(
                 db,

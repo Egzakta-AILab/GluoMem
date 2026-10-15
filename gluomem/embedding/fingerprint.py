@@ -40,11 +40,7 @@ class EmbedderFingerprint:
         return hashlib.sha256(self.to_json().encode("utf-8")).hexdigest()[:16]
 
     def differences(self, other: EmbedderFingerprint) -> list[str]:
-        return [
-            f.name
-            for f in fields(self)
-            if getattr(self, f.name) != getattr(other, f.name)
-        ]
+        return [f.name for f in fields(self) if getattr(self, f.name) != getattr(other, f.name)]
 
 
 def fingerprint_of(embedder: Any) -> EmbedderFingerprint:

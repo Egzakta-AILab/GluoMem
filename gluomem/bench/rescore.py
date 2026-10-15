@@ -143,9 +143,7 @@ def rescore_run(run_dir: str | Path, *, check: bool = False) -> list[dict[str, A
             )
         committed_report = report_path.read_text(encoding="utf-8")
         if committed_report != report_text:
-            raise RescoreMismatchError(
-                f"{report_path}: committed report diverges from re-render"
-            )
+            raise RescoreMismatchError(f"{report_path}: committed report diverges from re-render")
     else:
         scores_path.write_text(scores_text, encoding="utf-8")
         denominators_path.write_text(denominators_text, encoding="utf-8")

@@ -164,8 +164,7 @@ def test_retrieval_metrics_math_and_applicability() -> None:
     s = _sample(0)
     p = _prediction(["D1:1", "D9:9", None, "D2:3", "D8:8"])
     scores = {
-        sc.tag.metric_family: sc.value
-        for sc in retrieval_scores(p, s, ks=[5], dataset_sha=SHA)
+        sc.tag.metric_family: sc.value for sc in retrieval_scores(p, s, ks=[5], dataset_sha=SHA)
     }
     assert scores["precision@5"] == pytest.approx(0.4)
     assert scores["evidence_recall@5"] == pytest.approx(1.0)

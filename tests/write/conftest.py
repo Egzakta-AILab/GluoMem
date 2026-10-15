@@ -90,9 +90,7 @@ class ScriptedFacade:
                 out.extend(facts)
         return out
 
-    def extract_events(
-        self, source_text: str, reference_date: datetime
-    ) -> list[ExtractedEvent]:  # noqa: ARG002
+    def extract_events(self, source_text: str, reference_date: datetime) -> list[ExtractedEvent]:  # noqa: ARG002
         with self._lock:
             self.calls["extract_events"] += 1
         out: list[ExtractedEvent] = []

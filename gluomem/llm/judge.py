@@ -65,9 +65,7 @@ class QAJudge:
         grading, e.g. LongMemEval)."""
         with dspy.context(lm=self._lm, track_usage=self._track_usage):
             if rubric is None:
-                pred = self._module(
-                    question=question, gold=gold, prediction=prediction
-                )
+                pred = self._module(question=question, gold=gold, prediction=prediction)
             else:
                 pred = self._typed_module(
                     question=question,

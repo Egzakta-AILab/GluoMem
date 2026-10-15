@@ -71,9 +71,7 @@ class KGRelation(BaseModel):
 
     source: str = Field(description="Source entity name; must appear in entities.")
     target: str = Field(description="Target entity name; must appear in entities.")
-    relation_type: str = Field(
-        description="UPPER_SNAKE_CASE predicate, e.g. LIVES_IN, WORKS_AT."
-    )
+    relation_type: str = Field(description="UPPER_SNAKE_CASE predicate, e.g. LIVES_IN, WORKS_AT.")
     confidence: float = Field(default=1.0, ge=0, le=1)
 
 

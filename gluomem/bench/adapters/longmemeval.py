@@ -56,9 +56,7 @@ CATEGORY_NAMES: dict[int, str] = {
     6: "knowledge-update",
     7: "abstention",
 }
-_TYPE_TO_CATEGORY: dict[str, int] = {
-    name: cat for cat, name in CATEGORY_NAMES.items() if cat != 7
-}
+_TYPE_TO_CATEGORY: dict[str, int] = {name: cat for cat, name in CATEGORY_NAMES.items() if cat != 7}
 
 # Per-category grading rubrics for the typed judge (JudgeQATyped). Semantics
 # transcribed from the official evaluate_qa.py per-question-type prompts.
@@ -139,9 +137,7 @@ class LongMemEvalAdapter:
             )
         self._entry: BenchmarkDatasetEntry = entry
         self._path = (
-            Path(path)
-            if path is not None
-            else Path(cfg.benchmark.datasets_dir) / self._entry.file
+            Path(path) if path is not None else Path(cfg.benchmark.datasets_dir) / self._entry.file
         ).expanduser()
         self._sha: str | None = None
         self._raw: list[dict[str, Any]] | None = None
@@ -177,9 +173,12 @@ class LongMemEvalAdapter:
             return self._path
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".tmp")
-        with urllib.request.urlopen(self._entry.url) as resp, tmp.open(  # noqa: S310
-            "wb"
-        ) as out:
+        with (
+            urllib.request.urlopen(self._entry.url) as resp,
+            tmp.open(  # noqa: S310
+                "wb"
+            ) as out,
+        ):
             shutil.copyfileobj(resp, out, length=1 << 20)
         got = _sha256_file(tmp)
         if got != self._entry.sha256:
@@ -211,9 +210,7 @@ class LongMemEvalAdapter:
             return 7
         category = _TYPE_TO_CATEGORY.get(question_type)
         if category is None:
-            raise DatasetError(
-                f"{question_id}: unknown question_type {question_type!r}"
-            )
+            raise DatasetError(f"{question_id}: unknown question_type {question_type!r}")
         return category
 
     def load(self) -> list[Sample]:
@@ -223,9 +220,7 @@ class LongMemEvalAdapter:
             qid = str(raw.get("question_id", "")).strip()
             question = str(raw.get("question", "")).strip()
             if not qid or not question:
-                raise DatasetError(
-                    f"{self._path}: row missing question_id/question: {raw!r:.120}"
-                )
+                raise DatasetError(f"{self._path}: row missing question_id/question: {raw!r:.120}")
             category = self._category_of(qid, str(raw.get("question_type", "")))
             gold = str(raw.get("answer", "")).strip()  # answer is str OR int
             if not gold:
@@ -238,9 +233,7 @@ class LongMemEvalAdapter:
                     gold=gold,
                     category=category,
                     category_name=CATEGORY_NAMES[category],
-                    evidence=tuple(
-                        str(e) for e in raw.get("answer_session_ids", []) or []
-                    ),
+                    evidence=tuple(str(e) for e in raw.get("answer_session_ids", []) or []),
                 )
             )
         return samples
@@ -295,17 +288,11 @@ class LongMemEvalAdapter:
                 sessions.append(
                     Session(
                         index=i + 1,
-                        date_time=_parse_session_date(
-                            date_raw, where=f"{qid} session[{i}]"
-                        ),
+                        date_time=_parse_session_date(date_raw, where=f"{qid} session[{i}]"),
                         turns=turns,
                     )
                 )
-            out.append(
-                Conversation(
-                    conv_id=qid, speakers=("user", "assistant"), sessions=sessions
-                )
-            )
+            out.append(Conversation(conv_id=qid, speakers=("user", "assistant"), sessions=sessions))
         return out
 
     def dia_content(self) -> dict[str, str]:

@@ -48,9 +48,8 @@ class InjectionScanner:
         folded = fold_to_ascii(content)
         needs_folded_pass = folded != content.lower()
         for pattern, weight in self._patterns:
-            if (
-                pattern.search(content) is not None
-                or (needs_folded_pass and pattern.search(folded) is not None)
+            if pattern.search(content) is not None or (
+                needs_folded_pass and pattern.search(folded) is not None
             ):
                 matched.append(pattern.pattern)
                 score = max(score, weight)
@@ -68,9 +67,7 @@ _STOPWORDS = frozenset(
 def _fact_terms(text: str) -> frozenset[str]:
     """Content words of ``text``; digits always count, other one-letter words do not."""
     return frozenset(
-        t
-        for t in canonical_terms(text)
-        if t not in _STOPWORDS and (len(t) > 1 or t.isdigit())
+        t for t in canonical_terms(text) if t not in _STOPWORDS and (len(t) > 1 or t.isdigit())
     )
 
 

@@ -46,8 +46,7 @@ def _p_rows(db: MindDB, gop: str) -> list[tuple[int, str]]:
     return [
         (int(r[0]), str(r[1]))
         for r in db.conn.execute(
-            "SELECT id, trust FROM memory_frames WHERE frame_type='P' AND gop_id=? "
-            "ORDER BY id ASC",
+            "SELECT id, trust FROM memory_frames WHERE frame_type='P' AND gop_id=? ORDER BY id ASC",
             (gop,),
         ).fetchall()
     ]
@@ -58,16 +57,13 @@ def test_compaction_trigger_merge_and_override(
 ) -> None:
     i = frame_store.create_i_frame("gop-1", "base fact")
     p_ids = [
-        frame_store.create_p_frame("gop-1", f"delta body {k}", base_id=i.id).id
-        for k in range(10)
+        frame_store.create_p_frame("gop-1", f"delta body {k}", base_id=i.id).id for k in range(10)
     ]
     frame_store.compact("gop-1", cfg)
     assert len(_p_rows(mind_db, "gop-1")) == 10
     assert frame_store.get_frame(i.id).content == "base fact"
 
-    p_ids.append(
-        frame_store.create_p_frame("gop-1", "delta body 10", base_id=i.id).id
-    )
+    p_ids.append(frame_store.create_p_frame("gop-1", "delta body 10", base_id=i.id).id)
     before_vec = mind_db.conn.execute(
         "SELECT embedding FROM memory_frames_vec WHERE rowid=?", (i.id,)
     ).fetchone()[0]
@@ -75,9 +71,7 @@ def test_compaction_trigger_merge_and_override(
     frame_store.compact("gop-1", cfg)
     assert [pid for pid, _ in _p_rows(mind_db, "gop-1")] == p_ids[6:]
     i_back = frame_store.get_frame(i.id)
-    expected_merged = cfg.write.compaction.separator.join(
-        f"delta body {k}" for k in range(6)
-    )
+    expected_merged = cfg.write.compaction.separator.join(f"delta body {k}" for k in range(6))
     assert expected_merged in i_back.content
     after_vec = mind_db.conn.execute(
         "SELECT embedding FROM memory_frames_vec WHERE rowid=?", (i.id,)
@@ -100,13 +94,9 @@ def test_compaction_trust_and_scope_compatibility(
     for k in range(11):
         frame_store.create_p_frame("gop-1", f"delta body {k}", base_id=i.id)
         if k % 4 == 0:
-            frame_store.create_p_frame(
-                "gop-1", f"injected {k}", base_id=i.id, trust="quarantined"
-            )
+            frame_store.create_p_frame("gop-1", f"injected {k}", base_id=i.id, trust="quarantined")
     frame_store.create_p_frame("gop-1", "weak hint", base_id=i.id, trust="low")
-    frame_store.create_p_frame(
-        "gop-1", "inferred note", base_id=i.id, source="agent_inferred"
-    )
+    frame_store.create_p_frame("gop-1", "inferred note", base_id=i.id, source="agent_inferred")
     frame_store.create_p_frame("gop-1", "verified detail", base_id=i.id, trust="trusted")
 
     frame_store.compact("gop-1", cfg)
@@ -152,10 +142,7 @@ def test_compaction_sql_failure_rollback_and_lineage(
     kg = KnowledgeGraph(db)
     cfg = AppConfig()
     i = store.create_i_frame("gop-1", "base fact")
-    p_ids = [
-        store.create_p_frame("gop-1", f"delta body {k}", base_id=i.id).id
-        for k in range(11)
-    ]
+    p_ids = [store.create_p_frame("gop-1", f"delta body {k}", base_id=i.id).id for k in range(11)]
     ent = kg.create_entity("concept", "delta")
     kg.link_entity_frame(ent.id, p_ids[0])
 
@@ -177,9 +164,9 @@ def test_compaction_sql_failure_rollback_and_lineage(
 
     store.compact("gop-1", cfg)
     entries = store.lineage(i.id)
-    assert [(e.source_frame_id, e.operation) for e in entries] == [
-        (i.id, "compaction_base")
-    ] + [(pid, "compaction_merge") for pid in p_ids[:6]]
+    assert [(e.source_frame_id, e.operation) for e in entries] == [(i.id, "compaction_base")] + [
+        (pid, "compaction_merge") for pid in p_ids[:6]
+    ]
     assert entries[0].source_content_hash == content_hash("base fact")
     assert i.id in kg.frame_ids_for_entity(ent.id)
     db.close()

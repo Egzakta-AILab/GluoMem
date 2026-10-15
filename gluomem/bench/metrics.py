@@ -39,13 +39,11 @@ class MetricRegistry:
         tags = {s.tag for s in items}
         if len(tags) > 1:
             fams = sorted(
-                f"{t.protocol}/{t.metric_family}/{t.judge_family}/{t.backbone}/"
-                f"{t.dataset_sha[:8]}"
+                f"{t.protocol}/{t.metric_family}/{t.judge_family}/{t.backbone}/{t.dataset_sha[:8]}"
                 for t in tags
             )
             raise IncompatibleMetricsError(
-                f"refusing to aggregate {len(tags)} incompatible protocol "
-                f"tags: {fams}"
+                f"refusing to aggregate {len(tags)} incompatible protocol tags: {fams}"
             )
         total_n = sum(s.n for s in items)
         value = sum(s.value * s.n for s in items) / total_n
@@ -178,24 +176,16 @@ def qa_scores_from_records(
     trio: dict[str, Score] = {}
     singles: dict[str, dict[str, Score]] = {b: {} for b in expected}
     for sample_id, verdicts in sorted(by_sample.items()):
-        unanimous = all(
-            b in verdicts and verdicts[b].correct for b in expected
-        )
-        trio[sample_id] = Score(
-            value=1.0 if unanimous else 0.0, tag=trio_tag, n=1
-        )
+        unanimous = all(b in verdicts and verdicts[b].correct for b in expected)
+        trio[sample_id] = Score(value=1.0 if unanimous else 0.0, tag=trio_tag, n=1)
         for b in expected:
             rec = verdicts.get(b)
             correct = rec is not None and rec.correct
-            singles[b][sample_id] = Score(
-                value=1.0 if correct else 0.0, tag=single_tags[b], n=1
-            )
+            singles[b][sample_id] = Score(value=1.0 if correct else 0.0, tag=single_tags[b], n=1)
     return trio, singles
 
 
-def by_category(
-    per_sample: Mapping[str, Score], samples: Mapping[str, Sample]
-) -> dict[str, Score]:
+def by_category(per_sample: Mapping[str, Score], samples: Mapping[str, Sample]) -> dict[str, Score]:
     """Aggregate per-sample scores into one Score per category_name."""
     registry = MetricRegistry()
     buckets: dict[str, list[Score]] = {}

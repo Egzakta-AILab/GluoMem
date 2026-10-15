@@ -49,7 +49,7 @@ def test_gluomem_retriever_dia_mapping_and_date_prefix(
     assert p.retrieved
     assert {d.dia_id for d in p.retrieved if d.dia_id is not None}
     assert all(d.frame_id is not None for d in p.retrieved)
-    (_, context), = answer_fn.calls
+    ((_, context),) = answer_fn.calls
     assert all(line.startswith("[") for line in context.splitlines())
 
 
@@ -144,9 +144,7 @@ def test_gluomem_reranker_injection_negative_logit_and_manifest_extra(
     monkeypatch.setattr(
         retr, "make_reranker", lambda cfg: pytest.fail("must not resolve from config")
     )
-    cfg = bench_cfg.with_overrides(
-        {"search.rerank.enabled": True, "search.abstain.enabled": False}
-    )
+    cfg = bench_cfg.with_overrides({"search.rerank.enabled": True, "search.abstain.enabled": False})
     r = GluoMemRetriever(
         cfg,
         db_dir=ingested_db_dir,
@@ -169,7 +167,7 @@ def test_bm25_baseline(bench_cfg, fixture_adapter, answer_fn) -> None:
     assert not p.abstained
     assert "D3:1" in {d.dia_id for d in p.retrieved}
     assert [d.rank for d in p.retrieved] == list(range(len(p.retrieved)))
-    (_, context), = answer_fn.calls
+    ((_, context),) = answer_fn.calls
     assert context.splitlines()[0].startswith("[")
 
     assert r.answer(_sample('cat AND (job* OR "promo:tion) - NEAR')).answer
@@ -199,7 +197,7 @@ def test_vector_rag_and_full_context_baselines(
     fc_r = FullContextRetriever(bench_cfg, convs, answer_fn)
     p_fc = fc_r.answer(_sample("What happened?"))
     assert p_fc.retrieved == ()
-    (_, context), = answer_fn.calls
+    ((_, context),) = answer_fn.calls
     for date in ("2023-05-08", "2023-06-21", "2023-08-02"):
         assert date in context
 
