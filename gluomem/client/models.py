@@ -13,7 +13,15 @@ MemoryKind = Literal[
     "fact", "profile", "preference", "decision", "procedure", "episode", "correction", "summary"
 ]
 FrameStatus = Literal["candidate", "active", "superseded", "expired", "forgotten", "tombstoned"]
-SourceType = Literal["chat_turn", "document", "explicit_memory", "tool_result", "import"]
+SourceType = Literal[
+    "chat_turn",
+    "document",
+    "doc_chunk",
+    "explicit_memory",
+    "tool_result",
+    "tool_output",
+    "import",
+]
 
 
 class _Resp(BaseModel):

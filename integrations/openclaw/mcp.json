@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "gluomem": {
+      "command": "gluomem",
+      "args": [
+        "mcp",
+        "--url",
+        "${GLUOMEM_URL:-http://127.0.0.1:8080}",
+        "--tenant-id",
+        "${GLUOMEM_TENANT_ID:-local}",
+        "--principal-id",
+        "${GLUOMEM_PRINCIPAL_ID:-default}",
+        "--namespace",
+        "${GLUOMEM_NAMESPACE:-openclaw}"
+      ],
+      "env": {
+        "GLUOMEM_SERVICE_KEY": "${GLUOMEM_SERVICE_KEY}"
+      }
+    }
+  }
+}

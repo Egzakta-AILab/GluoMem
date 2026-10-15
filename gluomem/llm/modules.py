@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import dspy
 
+from gluomem.llm import make_extractors
 from gluomem.llm.bootstrap import load_or_build
 from gluomem.llm.outputs import (
     CognifyResult,
@@ -185,3 +186,6 @@ class DspyExtractors:
             candidates=list(candidates),
         )
         return pred.decision
+
+
+__all__ = ["DspyExtractors", "build_module", "make_extractors"]

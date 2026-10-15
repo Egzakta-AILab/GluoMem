@@ -30,7 +30,7 @@ EXTRAS: dict[str, tuple[tuple[str, ...], str]] = {
         "zero-shot prompt-injection classifier (GLiNER2.5-multi)",
     ),
     "postgres": (
-        ("psycopg", "pgvector", "alembic", "sqlalchemy"),
+        ("psycopg", "psycopg_pool", "pgvector", "alembic", "sqlalchemy"),
         "PostgreSQL + pgvector storage backend",
     ),
     "service": (

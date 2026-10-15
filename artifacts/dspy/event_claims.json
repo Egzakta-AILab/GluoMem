@@ -1,0 +1,30 @@
+{
+  "demos": [],
+  "lm": null,
+  "metadata": {
+    "dependency_versions": {
+      "cloudpickle": "3.1",
+      "dspy": "3.4.1",
+      "python": "3.14"
+    }
+  },
+  "signature": {
+    "fields": [
+      {
+        "description": "${source_text}",
+        "prefix": "Source Text:"
+      },
+      {
+        "description": "${reference_date}",
+        "prefix": "Reference Date:"
+      },
+      {
+        "description": "${claims}",
+        "prefix": "Claims:"
+      }
+    ],
+    "instructions": "Extract atomic, self-contained memory claims from a source event; classify\neach claim's kind, resolve relative dates against reference_date, attach the\nsupporting verbatim quote, and extract typed entities and relations."
+  },
+  "traces": [],
+  "train": []
+}

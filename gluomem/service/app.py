@@ -1,16 +1,20 @@
 """Authenticated, request-isolated GluoMem HTTP service."""
 
+import logging
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from importlib.metadata import version
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+
+if TYPE_CHECKING:
+    from gluomem.storage.postgres_backend import PostgresConnectionPool
 
 from gluomem.client.models import (
     CorrectResponse,
@@ -62,9 +66,11 @@ from gluomem.service.schemas import (
     SweepExpiredRequest,
 )
 from gluomem.storage.db import MindDB
-from gluomem.storage.scope import MemoryKind, MemoryScope, eligible_sql, scope_sql
+from gluomem.storage.scope import DEFAULT_SCOPE, MemoryKind, MemoryScope, eligible_sql, scope_sql
 from gluomem.timeutil import now_utc_iso
 from gluomem.write.events import ingest_source_event, review_memory
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -118,6 +124,7 @@ def create_app(
     queue: JobQueue | None = None,
     extractors: Extractors | None = None,
     max_pending_per_scope: int = 50,
+    pg_pool: PostgresConnectionPool | None = None,
 ) -> FastAPI:
     """Use one shared secret; deploy behind a trusted gateway asserting tenant/principal headers."""
     require("service", "GluoMem HTTP service")
@@ -129,9 +136,27 @@ def create_app(
     backend: Any = db.backend
     live: dict[int, MindDB] = {}
     lock = threading.Lock()
+    pool_ref: list[PostgresConnectionPool | None] = [pg_pool]
+    owns_pool = pg_pool is None
+
+    def _ensure_pg_pool() -> PostgresConnectionPool:
+        with lock:
+            if pool_ref[0] is None:
+                from gluomem.storage.postgres_backend import PostgresConnectionPool as _Pool
+
+                pool_ref[0] = _Pool(
+                    backend.dsn,
+                    dim=db.dim,
+                    postgres_schema=backend.postgres_schema,
+                    min_size=cfg.storage.pool_min_size,
+                    max_size=cfg.storage.pool_max_size,
+                )
+            return pool_ref[0]
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        if db.dialect == "postgres":
+            _app.state.pg_pool = _ensure_pg_pool()
         try:
             yield
         finally:
@@ -139,50 +164,97 @@ def create_app(
                 for handle in live.values():
                     handle.close()
                 live.clear()
+                active_pool = pool_ref[0]
+                if owns_pool and active_pool is not None:
+                    active_pool.close()
+                    pool_ref[0] = None
 
     def runtime() -> Iterator[_Runtime]:
-        if db.dialect == "postgres":
-            handle = MindDB(
-                dim=db.dim,
-                backend_type="postgres",
-                dsn=backend.dsn,
-                postgres_schema=backend.postgres_schema,
-            )
-        else:
-            handle = MindDB(db.path, dim=db.dim)
-        with lock:
-            live[id(handle)] = handle
-        try:
-            local_store = FrameStore(
-                handle,
-                embedder=store.embedder,
-                chunking=store.chunking,
-                scope=store.scope,
-                lifecycle=cfg.lifecycle,
-            )
-            local_kg = KnowledgeGraph(handle, scope=store.scope)
-            local_search = HybridSearch(
-                handle,
-                local_store,
-                cfg,
-                kg=local_kg,
-                reranker=search._reranker if search is not None else None,
-                clock=search._clock if search is not None else None,
-            )
-            local_queue = JobQueue(
-                handle.backend,
-                max_pending_per_scope=(
-                    queue._max_pending_per_scope if queue is not None else max_pending_per_scope
-                ),
-                default_max_attempts=queue._default_max_attempts if queue is not None else 3,
-            )
-            yield _Runtime(handle, local_store, local_kg, local_search, local_queue)
-        finally:
+        conn_ctx = _ensure_pg_pool().connection() if db.dialect == "postgres" else nullcontext(None)
+        with conn_ctx as pooled_conn:
+            if db.dialect == "postgres":
+                handle = MindDB(
+                    dim=db.dim,
+                    backend_type="postgres",
+                    dsn=backend.dsn,
+                    postgres_schema=backend.postgres_schema,
+                    conn=pooled_conn,
+                    verify_schema=False,
+                    owns_connection=False,
+                )
+            else:
+                handle = MindDB(db.path, dim=db.dim)
             with lock:
-                if live.pop(id(handle), None) is not None:
-                    handle.close()
+                live[id(handle)] = handle
+            try:
+                local_store = FrameStore(
+                    handle,
+                    embedder=store.embedder,
+                    chunking=store.chunking,
+                    scope=store.scope,
+                    lifecycle=cfg.lifecycle,
+                )
+                local_kg = KnowledgeGraph(handle, scope=store.scope)
+                local_search = HybridSearch(
+                    handle,
+                    local_store,
+                    cfg,
+                    kg=local_kg,
+                    reranker=search._reranker if search is not None else None,
+                    clock=search._clock if search is not None else None,
+                )
+                local_queue = JobQueue(
+                    handle.backend,
+                    max_pending_per_scope=(
+                        queue._max_pending_per_scope if queue is not None else max_pending_per_scope
+                    ),
+                    default_max_attempts=queue._default_max_attempts if queue is not None else 3,
+                )
+                yield _Runtime(handle, local_store, local_kg, local_search, local_queue)
+            finally:
+                if handle.in_transaction:
+                    handle.rollback()
+                with lock:
+                    if live.pop(id(handle), None) is not None:
+                        handle.close()
 
     app = FastAPI(title="GluoMem Service", version=version("gluomem"), lifespan=lifespan)
+
+    @app.middleware("http")
+    async def log_requests(request: Request, call_next: Any) -> Response:
+        started = time.perf_counter()
+        tenant = (request.headers.get(HEADER_TENANT) or "").strip()
+        principal = (request.headers.get(HEADER_PRINCIPAL) or "").strip()
+        namespace = (request.headers.get(HEADER_NAMESPACE) or "").strip() or DEFAULT_SCOPE.namespace
+        req_scope: MemoryScope | None = None
+        if tenant and principal:
+            try:
+                req_scope = MemoryScope(
+                    tenant_id=tenant,
+                    principal_id=principal,
+                    namespace=namespace,
+                )
+            except ValueError:
+                req_scope = None
+        response: Response = await call_next(request)
+        latency_ms = round((time.perf_counter() - started) * 1000, 3)
+        extra: dict[str, Any] = {
+            "event": "http_request",
+            "method": request.method,
+            "path": request.url.path,
+            "status": response.status_code,
+            "status_code": response.status_code,
+            "latency_ms": latency_ms,
+            "scope": req_scope.as_dict() if req_scope is not None else None,
+        }
+        if req_scope is not None:
+            extra["tenant_id"] = req_scope.tenant_id
+            extra["principal_id"] = req_scope.principal_id
+            extra["namespace"] = req_scope.namespace
+        _LOG.info(
+            "%s %s -> %s", request.method, request.url.path, response.status_code, extra=extra
+        )
+        return response
 
     @app.exception_handler(KeyError)
     async def missing(_request: Request, _error: KeyError) -> JSONResponse:
@@ -243,7 +315,10 @@ def create_app(
         scope: Annotated[MemoryScope, Depends(require_scope)],
         rt: Annotated[_Runtime, Depends(runtime)],
     ) -> IngestEventResponse | JobResponse:
-        if req.async_mode:
+        effective_async = (
+            req.async_mode if req.async_mode is not None else (req.source_type != "explicit_memory")
+        )
+        if effective_async:
             job = rt.queue.enqueue(
                 scope,
                 "ingest_event",
