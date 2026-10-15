@@ -32,9 +32,7 @@ def chunk(text: str, cfg: ChunkingConfig) -> list[Chunk]:
             f"or the window would not advance"
         )
     if min_chunk < 0:
-        raise ValueError(
-            f"chunking.min_chunk_chars must be non-negative, got {min_chunk}"
-        )
+        raise ValueError(f"chunking.min_chunk_chars must be non-negative, got {min_chunk}")
 
     n = len(text)
     if n < min_chunk:

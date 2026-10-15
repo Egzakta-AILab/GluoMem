@@ -38,7 +38,7 @@ EVALUATOR_VERSION = 1
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "extraction_v1.json"
 # Changing any gold claim, span, split or alias changes this pin on purpose:
 # the evaluator is frozen, so a gold edit is a new evaluator version.
-FIXTURE_SHA256 = "86fb45c12911014262b31ed49fbfd826ee034322e4c4e63722f8bef447b447ce"
+FIXTURE_SHA256 = "82edcf4d0dd17be84630dc699e9a7f81d8708d4da28af395d771207c15d8ad5c"
 
 SPLITS = ("train", "dev", "sealed_test")
 SEALED_SPLIT = "sealed_test"
@@ -63,29 +63,103 @@ CAPABILITIES = ("support", "subject", "negation", "modality", "update", "tempora
 # Cue lexicons are part of the frozen evaluator (they feed the fingerprint).
 LEXICON: dict[str, tuple[str, ...]] = {
     "negation": (
-        "not", "no", "never", "none", "nobody", "nothing", "without", "nor",
-        "neither", "ne", "nije", "nisu", "nisam", "nema", "nemaju", "nemam",
-        "nikad", "nikada", "nista", "nece",
+        "not",
+        "no",
+        "never",
+        "none",
+        "nobody",
+        "nothing",
+        "without",
+        "nor",
+        "neither",
+        "ne",
+        "nije",
+        "nisu",
+        "nisam",
+        "nema",
+        "nemaju",
+        "nemam",
+        "nikad",
+        "nikada",
+        "nista",
+        "nece",
     ),
     "hypothetical": (
-        "might", "could", "would", "maybe", "perhaps", "possibly", "plan",
-        "plans", "planning", "intend*", "consider*", "hope*", "want*", "wish*",
-        "will", "potential*", "likely", "expect*", "mozda", "planira*",
-        "namerava*", "razmatra*", "razmislja*", "ce", "cu", "ces", "cemo",
-        "cete", "bi", "hoce", "zeli*", "verovatno", "eventualno",
+        "might",
+        "could",
+        "would",
+        "maybe",
+        "perhaps",
+        "possibly",
+        "plan",
+        "plans",
+        "planning",
+        "intend*",
+        "consider*",
+        "hope*",
+        "want*",
+        "wish*",
+        "will",
+        "potential*",
+        "likely",
+        "expect*",
+        "mozda",
+        "planira*",
+        "namerava*",
+        "razmatra*",
+        "razmislja*",
+        "ce",
+        "cu",
+        "ces",
+        "cemo",
+        "cete",
+        "bi",
+        "hoce",
+        "zeli*",
+        "verovatno",
+        "eventualno",
     ),
     # Marks a state as no longer current. Also satisfies superseded claims.
     "stale_strong": (
-        "previously", "formerly", "former", "earlier", "originally",
-        "initially", "before", "until", "used to", "no longer", "not anymore",
-        "anymore", "ranije", "prethodno", "nekada", "nekad", "bivs*",
-        "prvobitno", "pre toga", "vise ne", "dotad",
+        "previously",
+        "formerly",
+        "former",
+        "earlier",
+        "originally",
+        "initially",
+        "before",
+        "until",
+        "used to",
+        "no longer",
+        "not anymore",
+        "anymore",
+        "ranije",
+        "prethodno",
+        "nekada",
+        "nekad",
+        "bivs*",
+        "prvobitno",
+        "pre toga",
+        "vise ne",
+        "dotad",
     ),
     # Past or origin markers; enough for a superseded claim, never an error
     # on a current one ("moved from Belgrade to Novi Sad").
     "stale_weak": (
-        "from", "lived", "worked", "was", "were", "had", "iz", "ziveo",
-        "zivela", "radio", "radila", "bio", "bila", "bili",
+        "from",
+        "lived",
+        "worked",
+        "was",
+        "were",
+        "had",
+        "iz",
+        "ziveo",
+        "zivela",
+        "radio",
+        "radila",
+        "bio",
+        "bila",
+        "bili",
     ),
 }
 # Tokens of these phrases are consumed before negation is read, so "no
@@ -93,11 +167,36 @@ LEXICON: dict[str, tuple[str, ...]] = {
 _NEGATION_EXEMPT = ("no longer", "not anymore", "vise ne")
 
 _CYRILLIC = {
-    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "ђ": "dj", "е": "e",
-    "ж": "z", "з": "z", "и": "i", "ј": "j", "к": "k", "л": "l", "љ": "lj",
-    "м": "m", "н": "n", "њ": "nj", "о": "o", "п": "p", "р": "r", "с": "s",
-    "т": "t", "ћ": "c", "у": "u", "ф": "f", "х": "h", "ц": "c", "ч": "c",
-    "џ": "dz", "ш": "s",
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "ђ": "dj",
+    "е": "e",
+    "ж": "z",
+    "з": "z",
+    "и": "i",
+    "ј": "j",
+    "к": "k",
+    "л": "l",
+    "љ": "lj",
+    "м": "m",
+    "н": "n",
+    "њ": "nj",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "ћ": "c",
+    "у": "u",
+    "ф": "f",
+    "х": "h",
+    "ц": "c",
+    "ч": "c",
+    "џ": "dz",
+    "ш": "s",
 }
 _SECRET = re.compile(
     r"(?i)\b(?:sk-[a-z0-9_-]{8,}|bearer\s+\S+|[a-z0-9_]*(?:api_?key|token|secret|password)"
@@ -260,16 +359,12 @@ class Fixture:
                 return case
         raise KeyError(f"unknown extraction case {case_id!r}")
 
-    def select(
-        self, *, task: str | None = None, splits: Iterable[str] = SPLITS
-    ) -> list[Case]:
+    def select(self, *, task: str | None = None, splits: Iterable[str] = SPLITS) -> list[Case]:
         wanted = tuple(splits)
         unknown = set(wanted) - set(SPLITS)
         if unknown:
             raise FixtureError(f"unknown splits {sorted(unknown)}; expected {SPLITS}")
-        return [
-            c for c in self.cases if c.split in wanted and (task is None or c.task == task)
-        ]
+        return [c for c in self.cases if c.split in wanted and (task is None or c.task == task)]
 
     def split_manifest(self) -> dict[str, Any]:
         """Versioned grouping and per-split digests, for receipts."""
@@ -607,9 +702,7 @@ _ADVICE = {
         "records a plan or possibility as done; keep the hedge (might, plans to)"
     ),
     "completed_as_hypothetical": "hedges something the source states as done",
-    "stale_as_current": (
-        "presents a superseded state as current; say it was previous or changed"
-    ),
+    "stale_as_current": ("presents a superseded state as current; say it was previous or changed"),
     "current_as_stale": "marks a current state as past",
     "missing_date": "has no event_date although the source gives {date}",
     "wrong_date": "has event_date {got_date} but the source gives {date}",
@@ -624,8 +717,7 @@ def _feedback(
     if not case.claims:
         if items:
             lines.append(
-                "The source holds no durable facts (greeting or small talk); "
-                "return an empty list."
+                "The source holds no durable facts (greeting or small talk); return an empty list."
             )
         else:
             lines.append("Correctly extracted nothing from a source with no durable facts.")
@@ -642,9 +734,7 @@ def _feedback(
         for code in result.best.errors:
             slots = {"named": "?", "subject": "?", "date": "?", "got_date": "?"}
             advice = _ADVICE[code].format_map({**slots, **result.best.detail})
-            lines.append(
-                f"'{_quote(result.text)}' {advice} (source: '{_quote(claim.support)}')."
-            )
+            lines.append(f"'{_quote(result.text)}' {advice} (source: '{_quote(claim.support)}').")
     for claim in missed:
         lines.append(f"Missed: no faithful fact covers '{_quote(claim.support)}'.")
     if len(lines) == 1:
@@ -677,13 +767,26 @@ def score_case(case: Case, raw_items: Any, *, purpose: Purpose = "optimize") -> 
             "support_recall": 0.0 if required else None,
             "abstention": None,
         }
-        feedback = "" if sealed else (
-            "Score 0.00.\nOutput is not a list of items with non-empty text, "
-            "confidence in [0, 1] and an ISO event_date or null."
+        feedback = (
+            ""
+            if sealed
+            else (
+                "Score 0.00.\nOutput is not a list of items with non-empty text, "
+                "confidence in [0, 1] and an ISO event_date or null."
+            )
         )
         return CaseScore(
-            case.case_id, case.split, case.language, 0.0, components, {"invalid_schema": 1},
-            (), tuple(c.claim_id for c in required), (), capability_counts, feedback,
+            case.case_id,
+            case.split,
+            case.language,
+            0.0,
+            components,
+            {"invalid_schema": 1},
+            (),
+            tuple(c.claim_id for c in required),
+            (),
+            capability_counts,
+            feedback,
             no_fact=not case.claims,
         )
 
@@ -728,9 +831,7 @@ def score_case(case: Case, raw_items: Any, *, purpose: Purpose = "optimize") -> 
         score = _f1(faithful_items / n_items, recall)
     score = round(score, 4)
 
-    def fidelity(
-        codes: tuple[str, ...], applies: Callable[[ItemResult], bool]
-    ) -> float | None:
+    def fidelity(codes: tuple[str, ...], applies: Callable[[ItemResult], bool]) -> float | None:
         anchored = [r for r in results if r.best is not None]
         relevant = [r for r in anchored if applies(r) or set(codes) & set(r.errors)]
         return _rate(sum(not set(codes) & set(r.errors) for r in relevant), len(relevant))
@@ -765,9 +866,7 @@ def score_case(case: Case, raw_items: Any, *, purpose: Purpose = "optimize") -> 
             ("missing_date", "wrong_date"), lambda r: claim_of(r).date is not None
         ),
         "abstention": (
-            (1.0 if n_items == 0 else 0.0)
-            if not case.claims
-            else (0.0 if n_items == 0 else None)
+            (1.0 if n_items == 0 else 0.0) if not case.claims else (0.0 if n_items == 0 else None)
         ),
     }
     feedback = "" if sealed else _feedback(case, results, missed, score)

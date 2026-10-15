@@ -151,9 +151,7 @@ def test_bench_types_frozen_equality_and_dspy_free_import() -> None:
     assert d.dia_id is None and d.frame_id is None
 
     code = "import gluomem.bench, sys; sys.exit(1 if 'dspy' in sys.modules else 0)"
-    proc = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, check=False
-    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
     assert proc.returncode == 0, proc.stderr
 
 
@@ -175,9 +173,7 @@ def test_locomo_load_eligibility_categories_and_evidence(
     assert samples[0].evidence == ("D1:2", "D3:1")
 
 
-def test_locomo_sha_verify_missing_file_and_fetch(
-    locomo_cfg: AppConfig, tmp_path: Path
-) -> None:
+def test_locomo_sha_verify_missing_file_and_fetch(locomo_cfg: AppConfig, tmp_path: Path) -> None:
     LoCoMoAdapter(locomo_cfg, path=FIXTURE).verify()
     bad = locomo_cfg.with_overrides({"benchmark.datasets.locomo.sha256": "0" * 64})
     with pytest.raises(DatasetError, match="sha256 mismatch"):

@@ -20,7 +20,7 @@ from gluomem.embedding.base import Embedder
 from gluomem.embedding.providers import make_embedder
 from gluomem.search.hybrid import HybridSearch
 from gluomem.timeutil import parse_utc
-from gluomem.write.gate import InjectionScanner, admit
+from gluomem.write.gate import admit, make_scanner
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 ADVERSARIAL_FIXTURES: dict[str, Path] = {
@@ -158,6 +158,8 @@ class AdversarialRunner:
         unquarantined_recalled = 0
         adv_held = 0
         benign_held = 0
+        benign_import_total = 0
+        benign_import_held = 0
 
         for scenario in scenarios:
             row = self._evaluate_scenario(scenario)
@@ -166,6 +168,8 @@ class AdversarialRunner:
             benign_total += row["benign_total"]
             benign_quarantined += row["benign_quarantined"]
             benign_held += row["benign_held_for_review"]
+            benign_import_total += row["benign_import_total"]
+            benign_import_held += row["benign_import_held_for_review"]
             adv_held += len(row["adversarial_held_for_review"])
             quarantined_total += len(row["adversarial_quarantined"])
             quarantined_leaks += row["quarantined_recalled"]
@@ -183,6 +187,9 @@ class AdversarialRunner:
             else 0.0,
             "benign_quarantine_rate": benign_quarantined / benign_total if benign_total else 0.0,
             "benign_review_rate": benign_held / benign_total if benign_total else 0.0,
+            "benign_import_review_rate": benign_import_held / benign_import_total
+            if benign_import_total
+            else 0.0,
             "poison_review_rate": adv_held / total_adv if total_adv else 0.0,
             f"quarantine_recall_leak_rate@{self._k}": quarantined_leaks / quarantined_total
             if quarantined_total
@@ -206,6 +213,7 @@ class AdversarialRunner:
             "denominators": {
                 "adversarial_events": total_adv,
                 "benign_events": benign_total,
+                "benign_import_events": benign_import_total,
                 "quarantined_adversarial_events": quarantined_total,
             },
             "by_split": {
@@ -230,13 +238,17 @@ class AdversarialRunner:
         safe_id = scenario.scenario_id.replace(":", "_")
         cfg = self._cfg
         with fresh_store(self._work_dir, safe_id, cfg, self._embedder) as (db, store):
-            scanner = InjectionScanner(cfg.safety)
+            scanner = make_scanner(cfg)
             gop_id = f"{scenario.scenario_id}:adversarial"
 
             frame_to_event: dict[int, str] = {}
             benign_quarantined = 0
             benign_held = 0
-            for ev in scenario.benign_events:
+            benign_import_total = 0
+            benign_import_held = 0
+            for idx, ev in enumerate(scenario.benign_events):
+                is_benign_import = idx >= 6 and ev.event_id != scenario.expected_evidence_id
+                source = "import" if is_benign_import else "user_stated"
                 res = admit(
                     ev.text,
                     gop=gop_id,
@@ -244,7 +256,7 @@ class AdversarialRunner:
                     store=store,
                     kg=None,
                     cfg=cfg,
-                    source="user_stated",
+                    source=source,
                     trust="normal",
                     event_time=ev.at,
                     created_at=ev.at,
@@ -252,8 +264,12 @@ class AdversarialRunner:
                 if res.frame is not None:
                     frame_to_event[res.frame.id] = ev.event_id
 
+                held = int(res.frame is not None and res.frame.status == "candidate")
                 benign_quarantined += int(res.trust == "quarantined")
-                benign_held += int(res.frame is not None and res.frame.status == "candidate")
+                benign_held += held
+                if is_benign_import:
+                    benign_import_total += 1
+                    benign_import_held += held
 
             adv_admitted_eligible = 0
             quarantined_ids: list[str] = []
@@ -306,6 +322,8 @@ class AdversarialRunner:
                 "benign_total": len(scenario.benign_events),
                 "benign_quarantined": benign_quarantined,
                 "benign_held_for_review": benign_held,
+                "benign_import_total": benign_import_total,
+                "benign_import_held_for_review": benign_import_held,
                 "adversarial_held_for_review": held_ids,
                 "quarantined_recalled": len(set(quarantined_ids) & set(retrieved_events)),
                 "unquarantined_recalled": len(

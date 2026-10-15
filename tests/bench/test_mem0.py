@@ -64,9 +64,7 @@ class FakeMem0Memory:
 def fake_mem0(monkeypatch: pytest.MonkeyPatch) -> type[FakeMem0Memory]:
     FakeMem0Memory.instances = []
     FakeMem0Memory.search_results = []
-    monkeypatch.setitem(
-        sys.modules, "mem0", types.SimpleNamespace(Memory=FakeMem0Memory)
-    )
+    monkeypatch.setitem(sys.modules, "mem0", types.SimpleNamespace(Memory=FakeMem0Memory))
     return FakeMem0Memory
 
 
@@ -146,17 +144,13 @@ def test_mem0_ingest_sessions_infer_flag_and_skip_existing(
     with pytest.raises(RuntimeError, match="skip-existing"):
         ingest_mem0_per_conversation(bench_cfg, dataset="locomo", db_dir=db_dir)
     assert (
-        ingest_mem0_per_conversation(
-            bench_cfg, dataset="locomo", db_dir=db_dir, skip_existing=True
-        )
+        ingest_mem0_per_conversation(bench_cfg, dataset="locomo", db_dir=db_dir, skip_existing=True)
         == []
     )
 
     (db_dir / "conv-tiny-1" / "ingest_meta.json").unlink()
     with pytest.raises(RuntimeError, match="partial ingest"):
-        ingest_mem0_per_conversation(
-            bench_cfg, dataset="locomo", db_dir=db_dir, skip_existing=True
-        )
+        ingest_mem0_per_conversation(bench_cfg, dataset="locomo", db_dir=db_dir, skip_existing=True)
 
     cfg_no_infer = bench_cfg.with_overrides({"benchmark.mem0.infer": False})
     ingest_mem0_per_conversation(cfg_no_infer, dataset="locomo", db_dir=tmp_path / "m2")
@@ -183,7 +177,7 @@ def test_mem0_retriever_and_bench_run_e2e(
     p = r.answer(_sample())
     assert p.answer == "scripted answer"
     assert [d.text for d in p.retrieved] == ["Bob moved to Seattle", "Bob lived in Boston"]
-    (_, context), = answer_fn.calls
+    ((_, context),) = answer_fn.calls
     assert context.splitlines()[0].startswith("[2023-08-02T19:30:00]")
     assert context.splitlines()[1].startswith("[2026-07-05]")
 
@@ -236,9 +230,7 @@ def test_live_mem0_ingest_search_roundtrip(tmp_path: Path) -> None:
         {
             "benchmark.datasets_dir": str(FIXTURE.parent),
             "benchmark.datasets.locomo.file": FIXTURE.name,
-            "benchmark.datasets.locomo.sha256": hashlib.sha256(
-                FIXTURE.read_bytes()
-            ).hexdigest(),
+            "benchmark.datasets.locomo.sha256": hashlib.sha256(FIXTURE.read_bytes()).hexdigest(),
         }
     )
     db_dir = tmp_path / "mem0_stores"

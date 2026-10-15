@@ -22,7 +22,7 @@ from gluomem.bench.types import Score
 from gluomem.embedding.fingerprint import fingerprint_of
 from gluomem.search.hybrid import HybridSearch
 from gluomem.timeutil import parse_utc
-from gluomem.write.gate import InjectionScanner, admit
+from gluomem.write.gate import admit, make_scanner
 
 if TYPE_CHECKING:
     from gluomem.config.app_config import AppConfig
@@ -32,6 +32,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 REPLAY_FIXTURES: dict[str, Path] = {
     "mab_fixture": FIXTURES_DIR / "mab_tiny.json",
     "sr_en_kvark_v1": FIXTURES_DIR / "sr_en_kvark_v1.json",
+    "sr_en_translation_v1": FIXTURES_DIR / "sr_en_translation_v1.json",
 }
 
 NOT_OFFICIAL_LABEL = (
@@ -206,7 +207,7 @@ class ReplayRunner:
             db,
             store,
         ):
-            scanner = InjectionScanner(cfg.safety)
+            scanner = make_scanner(cfg)
             frame_event: dict[int, str] = {}
             visible: list[str] = []
             quarantined = 0

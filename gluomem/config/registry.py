@@ -24,17 +24,13 @@ class ModelRegistry:
             return self._models[name]
         except KeyError as exc:
             known = ", ".join(sorted(self._models)) or "(none)"
-            raise UnknownModelError(
-                f"Unknown model '{name}'; registered models: {known}"
-            ) from exc
+            raise UnknownModelError(f"Unknown model '{name}'; registered models: {known}") from exc
 
     def dim_of(self, name: str) -> int:
         """Return the native embedding dim of model ``name``."""
         entry = self.resolve(name)
         if entry.dim is None:
-            raise ValueError(
-                f"Model '{name}' has no native dim (provider={entry.provider})"
-            )
+            raise ValueError(f"Model '{name}' has no native dim (provider={entry.provider})")
         return entry.dim
 
     def names(self) -> list[str]:

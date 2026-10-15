@@ -189,14 +189,10 @@ def _structural_metric(task: str) -> Callable:
 def _default_teleprompter_factory(cfg: AppConfig) -> TeleprompterFactory:
     auto = cfg.dspy.optimizer.auto
     if auto not in ("light", "medium", "heavy"):
-        raise ValueError(
-            f"dspy.optimizer.auto '{auto}' invalid; expected light|medium|heavy"
-        )
+        raise ValueError(f"dspy.optimizer.auto '{auto}' invalid; expected light|medium|heavy")
 
     def factory(metric: Callable) -> Any:
-        return dspy.MIPROv2(
-            metric=metric, auto=cast(Literal["light", "medium", "heavy"], auto)
-        )
+        return dspy.MIPROv2(metric=metric, auto=cast(Literal["light", "medium", "heavy"], auto))
 
     return factory
 
@@ -267,9 +263,7 @@ def main(argv: list[str] | None = None) -> int:
     tasks = sorted(TASK_SIGNATURES) if args.task == "all" else [args.task]
     for task in tasks:
         trainset = (
-            Path(args.trainset) / f"{task}.jsonl"
-            if args.task == "all"
-            else Path(args.trainset)
+            Path(args.trainset) / f"{task}.jsonl" if args.task == "all" else Path(args.trainset)
         )
         target = optimize_task(task, cfg, trainset)
         print(f"optimized '{task}' -> {target}")

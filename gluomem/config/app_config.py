@@ -155,9 +155,7 @@ class StorageConfig(BaseModel):
                 f"storage.backend must be 'sqlite' or 'postgres', got {self.backend!r}"
             )
         if self.backend == "postgres" and not (self.dsn and self.dsn.strip()):
-            raise ValueError(
-                "storage.dsn is required when storage.backend == 'postgres'"
-            )
+            raise ValueError("storage.dsn is required when storage.backend == 'postgres'")
         return self
 
 
@@ -225,24 +223,16 @@ class ScoringProfile(BaseModel):
 def _default_scoring_profiles() -> dict[str, ScoringProfile]:
     return {
         "balanced": ScoringProfile(
-            weights=ProfileWeights(
-                temporal=0.4, popularity=0.2, contextual=0.2, importance=0.2
-            )
+            weights=ProfileWeights(temporal=0.4, popularity=0.2, contextual=0.2, importance=0.2)
         ),
         "recent": ScoringProfile(
-            weights=ProfileWeights(
-                temporal=0.6, popularity=0.1, contextual=0.2, importance=0.1
-            )
+            weights=ProfileWeights(temporal=0.6, popularity=0.1, contextual=0.2, importance=0.1)
         ),
         "important": ScoringProfile(
-            weights=ProfileWeights(
-                temporal=0.1, popularity=0.1, contextual=0.2, importance=0.6
-            )
+            weights=ProfileWeights(temporal=0.1, popularity=0.1, contextual=0.2, importance=0.6)
         ),
         "connected": ScoringProfile(
-            weights=ProfileWeights(
-                temporal=0.1, popularity=0.1, contextual=0.6, importance=0.2
-            )
+            weights=ProfileWeights(temporal=0.1, popularity=0.1, contextual=0.6, importance=0.2)
         ),
     }
 
@@ -251,9 +241,7 @@ class ScoringConfig(BaseModel):
     half_life_days: float = 30
     flat_boost_days: float = 7
     log_coef: float = 0.1
-    bfs_steps: list[float] = Field(
-        default_factory=lambda: [1.0, 0.7, 0.4, 0.2, 0.0]
-    )
+    bfs_steps: list[float] = Field(default_factory=lambda: [1.0, 0.7, 0.4, 0.2, 0.0])
     bfs_depth: int = 3
     importance_mult: dict[str, float] = Field(
         default_factory=lambda: {
@@ -264,9 +252,7 @@ class ScoringConfig(BaseModel):
             "deprecated": 0.3,
         }
     )
-    profiles: dict[str, ScoringProfile] = Field(
-        default_factory=_default_scoring_profiles
-    )
+    profiles: dict[str, ScoringProfile] = Field(default_factory=_default_scoring_profiles)
 
 
 class KgConfig(BaseModel):
@@ -319,18 +305,15 @@ class KgConfig(BaseModel):
         modes = {"off", "retype", "drop"}
         if self.entity_type_mode not in modes:
             raise ValueError(
-                f"kg.entity_type_mode must be one of {sorted(modes)}, "
-                f"got {self.entity_type_mode!r}"
+                f"kg.entity_type_mode must be one of {sorted(modes)}, got {self.entity_type_mode!r}"
             )
         if self.entity_type_mode != "off" and not self.entity_type_allowlist:
             raise ValueError(
-                "kg.entity_type_allowlist must be non-empty when "
-                "entity_type_mode != 'off'"
+                "kg.entity_type_allowlist must be non-empty when entity_type_mode != 'off'"
             )
         if self.entity_type_prompt_enum and not self.entity_type_allowlist:
             raise ValueError(
-                "kg.entity_type_allowlist must be non-empty when "
-                "entity_type_prompt_enum is true"
+                "kg.entity_type_allowlist must be non-empty when entity_type_prompt_enum is true"
             )
         return self
 
@@ -388,10 +371,9 @@ def _default_scanner_patterns() -> list[ScannerPattern]:
     )
     return [ScannerPattern(regex=pattern, weight=1.0) for pattern in patterns]
 
+
 class ScannerConfig(BaseModel):
-    patterns: list[ScannerPattern] = Field(
-        default_factory=_default_scanner_patterns
-    )
+    patterns: list[ScannerPattern] = Field(default_factory=_default_scanner_patterns)
 
 
 _REVIEWED_SOURCES: list[FrameSource] = ["import"]
@@ -444,9 +426,7 @@ class LaneConfig(BaseModel):
 class LanesConfig(BaseModel):
     fact: LaneConfig = Field(default_factory=lambda: LaneConfig(importance="normal"))
     event: LaneConfig = Field(default_factory=lambda: LaneConfig(importance="normal"))
-    profile: LaneConfig = Field(
-        default_factory=lambda: LaneConfig(importance="important")
-    )
+    profile: LaneConfig = Field(default_factory=lambda: LaneConfig(importance="important"))
 
 
 class SubjectConfig(BaseModel):
@@ -458,8 +438,7 @@ class SubjectConfig(BaseModel):
         triggers = {"entity_overlap", "kg_edge_conflict", "both"}
         if self.trigger not in triggers:
             raise ValueError(
-                f"write.subject.trigger must be one of {sorted(triggers)}, "
-                f"got {self.trigger!r}"
+                f"write.subject.trigger must be one of {sorted(triggers)}, got {self.trigger!r}"
             )
         return self
 
@@ -483,13 +462,10 @@ class WriteDedupConfig(BaseModel):
     @model_validator(mode="after")
     def _check_mode(self) -> WriteDedupConfig:
         if self.mode not in ("exact", "semantic"):
-            raise ValueError(
-                f"write.dedup.mode must be 'exact' or 'semantic', got {self.mode!r}"
-            )
+            raise ValueError(f"write.dedup.mode must be 'exact' or 'semantic', got {self.mode!r}")
         if self.on_hit not in ("drop", "keep_longest"):
             raise ValueError(
-                f"write.dedup.on_hit must be 'drop' or 'keep_longest', "
-                f"got {self.on_hit!r}"
+                f"write.dedup.on_hit must be 'drop' or 'keep_longest', got {self.on_hit!r}"
             )
         return self
 
@@ -503,13 +479,10 @@ class WriteExtractionCacheConfig(BaseModel):
         modes = {"off", "record", "replay", "readthrough"}
         if self.mode not in modes:
             raise ValueError(
-                f"write.extraction_cache.mode must be one of {sorted(modes)}, "
-                f"got {self.mode!r}"
+                f"write.extraction_cache.mode must be one of {sorted(modes)}, got {self.mode!r}"
             )
         if self.mode != "off" and not self.path:
-            raise ValueError(
-                "write.extraction_cache.path is required when mode != 'off'"
-            )
+            raise ValueError("write.extraction_cache.path is required when mode != 'off'")
         return self
 
 
@@ -525,9 +498,7 @@ class WriteConfig(BaseModel):
     subject: SubjectConfig = Field(default_factory=SubjectConfig)
     cognify: WriteCognifyConfig = Field(default_factory=WriteCognifyConfig)
     dedup: WriteDedupConfig = Field(default_factory=WriteDedupConfig)
-    extraction_cache: WriteExtractionCacheConfig = Field(
-        default_factory=WriteExtractionCacheConfig
-    )
+    extraction_cache: WriteExtractionCacheConfig = Field(default_factory=WriteExtractionCacheConfig)
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
     contradiction: ContradictionConfig = Field(default_factory=ContradictionConfig)
 
@@ -560,9 +531,7 @@ def _default_dspy_tasks() -> dict[str, DspyTaskConfig]:
             refine={"enabled": False, "N": 2},
         ),
         "cognify": DspyTaskConfig(model="deepseek-flash", module="predict"),
-        "contradiction": DspyTaskConfig(
-            model="deepseek-flash", module="predict", temperature=0.0
-        ),
+        "contradiction": DspyTaskConfig(model="deepseek-flash", module="predict", temperature=0.0),
         "answer": DspyTaskConfig(
             model="deepseek-flash",
             module="predict",
@@ -595,9 +564,7 @@ class DspyConfig(BaseModel):
 
 class BenchmarkJudgeConfig(BaseModel):
     family: str = "trio_strict"
-    backbones: list[str] = Field(
-        default_factory=lambda: ["haiku", "gpt5-mini", "qwen3"]
-    )
+    backbones: list[str] = Field(default_factory=lambda: ["haiku", "gpt5-mini", "qwen3"])
     also_record_single: bool = True
     backend: str = "dspy"
 
@@ -613,8 +580,7 @@ class BenchmarkAnswerConfig(BaseModel):
     def _check_style(self) -> BenchmarkAnswerConfig:
         if self.style not in ("base", "preference_aware"):
             raise ValueError(
-                f"benchmark.answer.style must be 'base' or 'preference_aware', "
-                f"got {self.style!r}"
+                f"benchmark.answer.style must be 'base' or 'preference_aware', got {self.style!r}"
             )
         return self
 
@@ -676,17 +642,11 @@ class BenchmarkCiGateConfig(BaseModel):
 class BenchmarkConfig(BaseModel):
     judge: BenchmarkJudgeConfig = Field(default_factory=BenchmarkJudgeConfig)
     answer: BenchmarkAnswerConfig = Field(default_factory=BenchmarkAnswerConfig)
-    retrieval: BenchmarkRetrievalConfig = Field(
-        default_factory=BenchmarkRetrievalConfig
-    )
+    retrieval: BenchmarkRetrievalConfig = Field(default_factory=BenchmarkRetrievalConfig)
     sample: BenchmarkSampleConfig = Field(default_factory=BenchmarkSampleConfig)
-    datasets: dict[str, BenchmarkDatasetEntry] = Field(
-        default_factory=_default_benchmark_datasets
-    )
+    datasets: dict[str, BenchmarkDatasetEntry] = Field(default_factory=_default_benchmark_datasets)
     datasets_dir: str = "benchmarks_data"
-    full_context: BenchmarkFullContextConfig = Field(
-        default_factory=BenchmarkFullContextConfig
-    )
+    full_context: BenchmarkFullContextConfig = Field(default_factory=BenchmarkFullContextConfig)
     run_dir: str = "experiments"
     parallelism: int = Field(default=8, ge=1)
     mem0: BenchmarkMem0Config = Field(default_factory=BenchmarkMem0Config)
@@ -696,15 +656,11 @@ class BenchmarkConfig(BaseModel):
 class _PydanticDefaultsSource(PydanticBaseSettingsSource):
     """Settings source backed by the Pydantic models' default values."""
 
-    def __init__(
-        self, settings_cls: type[BaseSettings], data: dict[str, Any]
-    ) -> None:
+    def __init__(self, settings_cls: type[BaseSettings], data: dict[str, Any]) -> None:
         super().__init__(settings_cls)
         self._data = data
 
-    def get_field_value(
-        self, field: Any, field_name: str
-    ) -> tuple[Any, str, bool]:
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
         return self._data.get(field_name), field_name, False
 
     def __call__(self) -> dict[str, Any]:
@@ -788,9 +744,7 @@ class AppConfig(BaseSettings):
         for ref in refs:
             if ref not in self.models:
                 known = ", ".join(sorted(self.models)) or "(none)"
-                raise ValueError(
-                    f"Unknown model reference '{ref}'; not in registry: {known}"
-                )
+                raise ValueError(f"Unknown model reference '{ref}'; not in registry: {known}")
         return self
 
     @model_validator(mode="after")
@@ -921,13 +875,11 @@ class AppConfig(BaseSettings):
             if name not in self.models:
                 known = ", ".join(sorted(self.models)) or "(none)"
                 raise ValueError(
-                    f"benchmark.judge.backbones entry '{name}' not in model "
-                    f"registry: {known}"
+                    f"benchmark.judge.backbones entry '{name}' not in model registry: {known}"
                 )
         if len(set(judge.backbones)) != len(judge.backbones) or not judge.backbones:
             raise ValueError(
-                f"benchmark.judge.backbones must be non-empty and unique, "
-                f"got: {judge.backbones}"
+                f"benchmark.judge.backbones must be non-empty and unique, got: {judge.backbones}"
             )
         families = {"trio_strict", "single"}
         if judge.family not in families:
@@ -946,10 +898,7 @@ class AppConfig(BaseSettings):
             ("benchmark.answer.backend", self.benchmark.answer.backend),
         ):
             if backend not in backends:
-                raise ValueError(
-                    f"{where} '{backend}' invalid; must be one of: "
-                    f"{sorted(backends)}"
-                )
+                raise ValueError(f"{where} '{backend}' invalid; must be one of: {sorted(backends)}")
         if self.benchmark.answer.task not in self.dspy.tasks:
             raise ValueError(
                 f"benchmark.answer.task '{self.benchmark.answer.task}' not in "
@@ -973,9 +922,7 @@ class AppConfig(BaseSettings):
         ):
             if name not in self.models:
                 known = ", ".join(sorted(self.models)) or "(none)"
-                raise ValueError(
-                    f"{where} '{name}' not in model registry: {known}"
-                )
+                raise ValueError(f"{where} '{name}' not in model registry: {known}")
         embedder = self.models[mem0.embedder_model]
         if embedder.dim is None:
             raise ValueError(
@@ -989,13 +936,10 @@ class AppConfig(BaseSettings):
         cats = self.benchmark.sample.categories
         if not cats or len(set(cats)) != len(cats):
             raise ValueError(
-                f"benchmark.sample.categories must be non-empty and unique, "
-                f"got: {cats}"
+                f"benchmark.sample.categories must be non-empty and unique, got: {cats}"
             )
         if not all(1 <= c <= 7 for c in cats):
-            raise ValueError(
-                f"benchmark.sample.categories must be within 1..7, got: {cats}"
-            )
+            raise ValueError(f"benchmark.sample.categories must be within 1..7, got: {cats}")
         return self
 
     @model_validator(mode="after")
@@ -1020,9 +964,7 @@ class AppConfig(BaseSettings):
                     f"{self.benchmark.retrieval.ks})"
                 )
         if not 0.0 <= gate.min <= 1.0:
-            raise ValueError(
-                f"benchmark.ci_gate.min {gate.min} must be within [0, 1]"
-            )
+            raise ValueError(f"benchmark.ci_gate.min {gate.min} must be within [0, 1]")
         return self
 
     def with_overrides(self, overrides: dict[str, Any]) -> AppConfig:

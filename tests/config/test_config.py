@@ -174,9 +174,7 @@ def test_precedence_and_with_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg3.scoring.profiles["balanced"].weights.popularity == 1.0
 
 
-def test_dotenv_populates_os_environ(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_dotenv_populates_os_environ(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     env_file = tmp_path / ".env"
     env_file.write_text("OPENROUTER_API_KEY=sk-from-dotenv\n", encoding="utf-8")

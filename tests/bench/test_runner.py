@@ -110,8 +110,16 @@ def test_run_benchmark_artifacts_scores_manifest_and_limit(
     assert len(pred_rows) == 4
     for row in pred_rows:
         for key in (
-            "sample_id", "category", "category_name", "question", "gold",
-            "evidence", "answer", "abstained", "retrieved", "abstention",
+            "sample_id",
+            "category",
+            "category_name",
+            "question",
+            "gold",
+            "evidence",
+            "answer",
+            "abstained",
+            "retrieved",
+            "abstention",
         ):
             assert key in row, key
 
@@ -125,8 +133,7 @@ def test_run_benchmark_artifacts_scores_manifest_and_limit(
     entries = json.loads(paths.scores.read_text())
     overall = [e for e in entries if e["scope"] == "overall"]
     families = {
-        (e["tag"]["metric_family"], e["tag"]["judge_family"], e["tag"]["backbone"])
-        for e in overall
+        (e["tag"]["metric_family"], e["tag"]["judge_family"], e["tag"]["backbone"]) for e in overall
     }
     assert ("qa_accuracy", "trio_strict", "gpt5-mini+haiku+qwen3") in families
     assert ("qa_accuracy", "single", "haiku") in families

@@ -132,16 +132,12 @@ def test_frame_models_ablation(
         cognify_map={
             _F1: CognifyResult(
                 entities=[_ALICE, _BOSTON],
-                relations=[
-                    KGRelation(source="alice", target="boston", relation_type="LIVES_IN")
-                ],
+                relations=[KGRelation(source="alice", target="boston", relation_type="LIVES_IN")],
             ),
             _F2: CognifyResult(entities=[_ALICE, _BOSTON]),
             _F3: CognifyResult(
                 entities=[_ALICE, _BOSTON, _SEATTLE],
-                relations=[
-                    KGRelation(source="alice", target="seattle", relation_type="LIVES_IN")
-                ],
+                relations=[KGRelation(source="alice", target="seattle", relation_type="LIVES_IN")],
             ),
         },
         verdicts={

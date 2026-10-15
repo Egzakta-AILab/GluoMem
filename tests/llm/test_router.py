@@ -40,9 +40,7 @@ def test_lm_for_and_model_swap(monkeypatch: pytest.MonkeyPatch) -> None:
     assert lm.kwargs["max_tokens"] == 4096
     assert lm.kwargs["api_key"] == "sk-or-test-123"
 
-    swapped = _router({"dspy.tasks.fact_extraction.model": "sonnet5"}).lm_for(
-        "fact_extraction"
-    )
+    swapped = _router({"dspy.tasks.fact_extraction.model": "sonnet5"}).lm_for("fact_extraction")
     assert swapped.model == "openrouter/anthropic/claude-sonnet-5"
 
     reg_lm = router.lm_for_model("gpt5-mini", temperature=0.7)
@@ -170,15 +168,12 @@ def test_usage_accumulator_deltas_and_judge_surface() -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(
-    not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set"
-)
+@pytest.mark.skipif(not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set")
 def test_live_openrouter_smoke() -> None:
     fx = DspyExtractors(load_config())
     facts = fx.extract_facts("Alice moved to Boston in 2021.")
     assert len(facts) >= 1 and all(0.0 <= f.confidence <= 1.0 for f in facts)
     events = fx.extract_events("We signed the contract yesterday.", datetime(2023, 5, 8))
     assert any(
-        e.event_date is not None and e.event_date.date().isoformat() == "2023-05-07"
-        for e in events
+        e.event_date is not None and e.event_date.date().isoformat() == "2023-05-07" for e in events
     )

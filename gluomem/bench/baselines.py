@@ -133,20 +133,22 @@ class Bm25Retriever:
         rows: list[tuple[int, float]] = []
         if query:  # empty sanitize output = no usable tokens; retrieve nothing
             with self._lock:
-                rows = self._conns[s.conv_id].execute(
-                    "SELECT rowid, bm25(docs) FROM docs WHERE docs MATCH ? "
-                    "ORDER BY bm25(docs) LIMIT ?",
-                    (query, self._cfg.benchmark.answer.context_k),
-                ).fetchall()
+                rows = (
+                    self._conns[s.conv_id]
+                    .execute(
+                        "SELECT rowid, bm25(docs) FROM docs WHERE docs MATCH ? "
+                        "ORDER BY bm25(docs) LIMIT ?",
+                        (query, self._cfg.benchmark.answer.context_k),
+                    )
+                    .fetchall()
+                )
         retrieved: list[RetrievedDoc] = []
         lines: list[str] = []
         for rank, (rowid, bm25_score) in enumerate(rows):
             dia_id, date_iso, content = docs[rowid - 1]
             # bm25() returns lower-is-better; negate so higher = more relevant.
             retrieved.append(
-                RetrievedDoc(
-                    rank=rank, text=content, score=-bm25_score, dia_id=dia_id
-                )
+                RetrievedDoc(rank=rank, text=content, score=-bm25_score, dia_id=dia_id)
             )
             lines.append(f"[{date_iso}] {content}")
         if not retrieved:
@@ -219,9 +221,7 @@ class VectorRagRetriever:
         for rank, idx in enumerate(top):
             dia_id, date_iso, content = docs[int(idx)]
             retrieved.append(
-                RetrievedDoc(
-                    rank=rank, text=content, score=float(sims[idx]), dia_id=dia_id
-                )
+                RetrievedDoc(rank=rank, text=content, score=float(sims[idx]), dia_id=dia_id)
             )
             lines.append(f"[{date_iso}] {content}")
         out = self._answer_fn(s.question, "\n".join(lines))

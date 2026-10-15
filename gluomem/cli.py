@@ -23,9 +23,7 @@ def _parse_override(raw: str) -> tuple[str, object]:
     """``K=V`` → (dotted key, value); bools/ints/floats coerced, else string."""
     key, sep, value = raw.partition("=")
     if not sep or not key:
-        raise argparse.ArgumentTypeError(
-            f"override {raw!r} must be dotted.key=value"
-        )
+        raise argparse.ArgumentTypeError(f"override {raw!r} must be dotted.key=value")
     lowered = value.lower()
     if lowered in ("true", "false"):
         return key, lowered == "true"
@@ -36,8 +34,7 @@ def _parse_override(raw: str) -> tuple[str, object]:
             return key, json.loads(value)
         except json.JSONDecodeError as exc:
             raise argparse.ArgumentTypeError(
-                f"override {raw!r}: value looks like JSON but fails to "
-                f"parse ({exc})"
+                f"override {raw!r}: value looks like JSON but fails to parse ({exc})"
             ) from None
     try:
         return key, int(value)
@@ -197,8 +194,7 @@ def _gate_verdict(entries: list[dict], cfg: AppConfig) -> int:
         return 1
     if not ok:
         print(
-            f"GATE FAIL metric={gate.metric} value={entry['value']:.4f} "
-            f"min={gate.min}",
+            f"GATE FAIL metric={gate.metric} value={entry['value']:.4f} min={gate.min}",
             file=sys.stderr,
         )
         return 1
@@ -269,9 +265,7 @@ def _cmd_bench_sample(args: argparse.Namespace) -> int:
             seed=cfg.benchmark.sample.seed,
         )
         manifest_path = Path(cfg.benchmark.sample.manifest)
-        write_sample_manifest(
-            samples, adapter=adapter, cfg=cfg, path=manifest_path
-        )
+        write_sample_manifest(samples, adapter=adapter, cfg=cfg, path=manifest_path)
     except (DatasetError, ValueError) as exc:
         print(f"gluomem bench: {exc}", file=sys.stderr)
         return 1
@@ -329,10 +323,7 @@ def _cmd_bench_ingest(args: argparse.Namespace) -> int:
         except (DatasetError, ValueError, RuntimeError) as exc:
             print(f"gluomem bench: {exc}", file=sys.stderr)
             return 1
-        print(
-            f"ingested {len(mem0_reports)} conversation(s) into "
-            f"{args.db_dir} (mem0)"
-        )
+        print(f"ingested {len(mem0_reports)} conversation(s) into {args.db_dir} (mem0)")
         return 0
 
     from gluomem.bench.runner import ingest_per_conversation
@@ -380,18 +371,15 @@ def _cmd_bench_verify(args: argparse.Namespace) -> int:
     absent = sum(1 for r in rows if r["status"] == "absent")
     for r in incomplete:
         print(
-            f"INCOMPLETE {r['conv_id']}: {r['found_sessions']}/"
-            f"{r['expected_sessions']} sessions",
+            f"INCOMPLETE {r['conv_id']}: {r['found_sessions']}/{r['expected_sessions']} sessions",
             file=sys.stderr,
         )
     print(
-        f"verify {args.db_dir}: {complete} complete, "
-        f"{len(incomplete)} incomplete, {absent} absent"
+        f"verify {args.db_dir}: {complete} complete, {len(incomplete)} incomplete, {absent} absent"
     )
     if incomplete:
         print(
-            "delete the incomplete .mind files and re-ingest with "
-            "--skip-existing",
+            "delete the incomplete .mind files and re-ingest with --skip-existing",
             file=sys.stderr,
         )
         return 1
@@ -463,9 +451,7 @@ def _add_bench_parsers(sub: argparse._SubParsersAction) -> None:
     run.add_argument("--db-dir", default=None, help="per-conversation .mind dir")
     run.add_argument("--out", default=None, help="run-dir root (default: config)")
     run.add_argument("--limit", type=int, default=None, help="truncate sample")
-    run.add_argument(
-        "--gate", action="store_true", help="apply the CI gate to this run"
-    )
+    run.add_argument("--gate", action="store_true", help="apply the CI gate to this run")
     _add_config_args(run)
 
     rescore = bench_sub.add_parser(
@@ -487,9 +473,7 @@ def _add_bench_parsers(sub: argparse._SubParsersAction) -> None:
     fetch.add_argument("--force", action="store_true", help="re-download")
     _add_config_args(fetch)
 
-    sample = bench_sub.add_parser(
-        "sample", help="write the committed stratified sample manifest"
-    )
+    sample = bench_sub.add_parser("sample", help="write the committed stratified sample manifest")
     sample.add_argument("--dataset", required=True)
     _add_config_args(sample)
 
@@ -648,7 +632,9 @@ def _add_tune_and_ablate_parsers(sub: argparse._SubParsersAction) -> None:
     tune.add_argument("--dataset", default="locomo", help="dataset name when building cache")
     tune.add_argument("--sample-manifest", default=None, help="optional sample manifest JSON")
     tune.add_argument(
-        "--lane-fetch", type=int, default=None,
+        "--lane-fetch",
+        type=int,
+        default=None,
         help="per-lane pool (default: limit × multiplier)",
     )
     tune.add_argument("--rebuild-cache", action="store_true", help="force cache rebuild")
@@ -677,7 +663,9 @@ def _add_tune_and_ablate_parsers(sub: argparse._SubParsersAction) -> None:
     ablate.add_argument("--dataset", default="locomo", help="dataset name when building cache")
     ablate.add_argument("--sample-manifest", default=None, help="optional sample manifest JSON")
     ablate.add_argument(
-        "--lane-fetch", type=int, default=None,
+        "--lane-fetch",
+        type=int,
+        default=None,
         help="per-lane pool (default: limit × multiplier)",
     )
     ablate.add_argument("--limit", type=int, default=10, help="cache retrieval limit")
@@ -775,9 +763,7 @@ def _cmd_worker(args: argparse.Namespace) -> int:
     embedder = make_embedder(cfg)
     db = MindDB.from_config(cfg, path_override=args.db)
     try:
-        store = FrameStore(
-            db, embedder=embedder, chunking=cfg.chunking, lifecycle=cfg.lifecycle
-        )
+        store = FrameStore(db, embedder=embedder, chunking=cfg.chunking, lifecycle=cfg.lifecycle)
         kg = KnowledgeGraph(db)
         queue = JobQueue(
             db.backend,
@@ -807,9 +793,7 @@ def _cmd_worker(args: argparse.Namespace) -> int:
 
 
 def _add_worker_parser(sub: argparse._SubParsersAction) -> None:
-    worker = sub.add_parser(
-        "worker", help="run durable memory_jobs background worker"
-    )
+    worker = sub.add_parser("worker", help="run durable memory_jobs background worker")
     worker.add_argument("--db", default=None, help="mind db path (default: config)")
     worker.add_argument(
         "--worker-id", default=None, help="worker identifier (default: hostname-pid)"
@@ -870,9 +854,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     embedder = make_embedder(cfg)
     db = MindDB.from_config(cfg, path_override=args.db)
     try:
-        store = FrameStore(
-            db, embedder=embedder, chunking=cfg.chunking, lifecycle=cfg.lifecycle
-        )
+        store = FrameStore(db, embedder=embedder, chunking=cfg.chunking, lifecycle=cfg.lifecycle)
         kg = KnowledgeGraph(db)
         queue = JobQueue(db.backend, max_pending_per_scope=args.max_pending_per_scope)
         app = create_app(
@@ -880,8 +862,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             store,
             cfg=cfg,
             service_key=(
-                Path(args.service_key_file).read_text().strip()
-                if args.service_key_file else None
+                Path(args.service_key_file).read_text().strip() if args.service_key_file else None
             ),
             kg=kg,
             queue=queue,
@@ -903,7 +884,9 @@ def _add_serve_parser(sub: argparse._SubParsersAction) -> None:
         help="file containing bearer secret (default: GLUOMEM_SERVICE_KEY)",
     )
     serve.add_argument(
-        "--max-pending-per-scope", type=int, default=50,
+        "--max-pending-per-scope",
+        type=int,
+        default=50,
         help="per-scope pending job cap (default: 50)",
     )
     _add_config_args(serve)
@@ -929,9 +912,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command")
 
-    ingest = sub.add_parser(
-        "ingest", help="ingest a LoCoMo-format benchmark file into memory"
-    )
+    ingest = sub.add_parser("ingest", help="ingest a LoCoMo-format benchmark file into memory")
     ingest.add_argument("path", help="path to a LoCoMo-format JSON file")
     ingest.add_argument("--db", default=None, help="mind db path (default: config)")
     _add_config_args(ingest)
@@ -1006,8 +987,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         handler = _BENCH_HANDLERS.get(args.bench_command or "")
         if handler is None:
             print(
-                "gluomem bench: pick a subcommand "
-                f"({', '.join(sorted(_BENCH_HANDLERS))})",
+                f"gluomem bench: pick a subcommand ({', '.join(sorted(_BENCH_HANDLERS))})",
                 file=sys.stderr,
             )
             return 1

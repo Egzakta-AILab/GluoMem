@@ -505,6 +505,1045 @@
           "support": "Ne radi vikendom."
         }
       ]
+    },
+    {
+      "case_id": "sr-latn-plant-migration",
+      "task": "fact_extraction",
+      "language": "sr-Latn",
+      "split": "train",
+      "source_family": "plant-migration",
+      "source": "Fabrika u Kragujevcu je u 2025. godini prešla na SAP. Fabrika u Čačku još nije prešla. Planira prelazak u 2027. godini.",
+      "entities": {
+        "Kragujevac plant": [
+          "kragujev*"
+        ],
+        "Čačak plant": [
+          "cacak",
+          "cacku",
+          "cacka"
+        ]
+      },
+      "claims": [
+        {
+          "claim_id": "c1",
+          "subject": "Kragujevac plant",
+          "anchors": [
+            [
+              "sap"
+            ],
+            [
+              "presl*",
+              "prelaz*",
+              "migr*"
+            ]
+          ],
+          "support": "Fabrika u Kragujevcu je u 2025. godini prešla na SAP."
+        },
+        {
+          "claim_id": "c2",
+          "subject": "Čačak plant",
+          "negated": true,
+          "anchors": [
+            [
+              "presl*",
+              "prelaz*",
+              "migr*"
+            ]
+          ],
+          "support": "Fabrika u Čačku još nije prešla."
+        },
+        {
+          "claim_id": "c3",
+          "subject": "Čačak plant",
+          "modality": "hypothetical",
+          "anchors": [
+            [
+              "2027"
+            ]
+          ],
+          "support": "Planira prelazak u 2027. godini."
+        }
+      ]
+    },
+    {
+      "case_id": "en-nikola-clinic",
+      "task": "fact_extraction",
+      "language": "en",
+      "split": "train",
+      "source_family": "nikola-clinic",
+      "source": "Dr. Nikola worked at the Vračar clinic until 2024 and now practices at the Zemun hospital. Nurse Milica works at the Vračar clinic. Nikola does not treat pediatric patients. He might open a dental lab in autumn.",
+      "entities": {
+        "Nikola": [
+          "nikola"
+        ],
+        "Milica": [
+          "milica"
+        ]
+      },
+      "claims": [
+        {
+          "claim_id": "c1",
+          "subject": "Nikola",
+          "anchors": [
+            [
+              "zemun"
+            ],
+            [
+              "practic*",
+              "work*"
+            ]
+          ],
+          "support": "Dr. Nikola worked at the Vračar clinic until 2024 and now practices at the Zemun hospital."
+        },
+        {
+          "claim_id": "c2",
+          "subject": "Nikola",
+          "status": "superseded",
+          "anchors": [
+            [
+              "vracar"
+            ],
+            [
+              "work*",
+              "practic*"
+            ]
+          ],
+          "support": "Dr. Nikola worked at the Vračar clinic until 2024 and now practices at the Zemun hospital.",
+          "required": false
+        },
+        {
+          "claim_id": "c3",
+          "subject": "Milica",
+          "anchors": [
+            [
+              "vracar"
+            ],
+            [
+              "work*"
+            ]
+          ],
+          "support": "Nurse Milica works at the Vračar clinic."
+        },
+        {
+          "claim_id": "c4",
+          "subject": "Nikola",
+          "negated": true,
+          "anchors": [
+            [
+              "pediatric*"
+            ],
+            [
+              "treat*"
+            ]
+          ],
+          "support": "Nikola does not treat pediatric patients."
+        },
+        {
+          "claim_id": "c5",
+          "subject": "Nikola",
+          "modality": "hypothetical",
+          "anchors": [
+            [
+              "dental"
+            ],
+            [
+              "open*"
+            ]
+          ],
+          "support": "He might open a dental lab in autumn."
+        }
+      ]
+    },
+    {
+      "case_id": "sr-cyrl-nikola-clinic",
+      "task": "fact_extraction",
+      "language": "sr-Cyrl",
+      "split": "train",
+      "source_family": "nikola-clinic",
+      "source": "Др Никола је радио у дому здравља на Врачару до 2024, а сада ради у болници у Земуну. Сестра Милица ради на Врачару. Никола не прима педијатријске пацијенте. Можда ће на јесен отворити стоматолошку ординацију.",
+      "entities": {
+        "Nikola": [
+          "nikol*"
+        ],
+        "Milica": [
+          "milic*"
+        ]
+      },
+      "claims": [
+        {
+          "claim_id": "c1",
+          "subject": "Nikola",
+          "anchors": [
+            [
+              "zemun*"
+            ],
+            [
+              "radi",
+              "rad*"
+            ]
+          ],
+          "support": "Др Никола је радио у дому здравља на Врачару до 2024, а сада ради у болници у Земуну."
+        },
+        {
+          "claim_id": "c2",
+          "subject": "Nikola",
+          "status": "superseded",
+          "anchors": [
+            [
+              "vracar*"
+            ],
+            [
+              "radi*",
+              "rad*"
+            ]
+          ],
+          "support": "Др Никола је радио у дому здравља на Врачару до 2024, а сада ради у болници у Земуну.",
+          "required": false
+        },
+        {
+          "claim_id": "c3",
+          "subject": "Milica",
+          "anchors": [
+            [
+              "vracar*"
+            ],
+            [
+              "radi",
+              "rad*"
+            ]
+          ],
+          "support": "Сестра Милица ради на Врачару."
+        },
+        {
+          "claim_id": "c4",
+          "subject": "Nikola",
+          "negated": true,
+          "anchors": [
+            [
+              "pedijatrij*"
+            ],
+            [
+              "prima*",
+              "leci*"
+            ]
+          ],
+          "support": "Никола не прима педијатријске пацијенте."
+        },
+        {
+          "claim_id": "c5",
+          "subject": "Nikola",
+          "modality": "hypothetical",
+          "anchors": [
+            [
+              "stomatolosk*"
+            ],
+            [
+              "otvor*"
+            ]
+          ],
+          "support": "Можда ће на јесен отворити стоматолошку ординацију."
+        }
+      ]
+    },
+    {
+      "case_id": "en-audit-schedule",
+      "task": "event_extraction",
+      "language": "en",
+      "split": "train",
+      "source_family": "audit-schedule",
+      "source": "The security audit started on 12 January 2026. The board review was postponed from 5 February to 19 February 2026.",
+      "reference_date": "2026-02-01T00:00:00",
+      "entities": {},
+      "claims": [
+        {
+          "claim_id": "e1",
+          "anchors": [
+            [
+              "audit"
+            ]
+          ],
+          "date": "2026-01-12",
+          "support": "The security audit started on 12 January 2026."
+        },
+        {
+          "claim_id": "e2",
+          "anchors": [
+            [
+              "board",
+              "review"
+            ]
+          ],
+          "date": "2026-02-19",
+          "support": "The board review was postponed from 5 February to 19 February 2026."
+        },
+        {
+          "claim_id": "e3",
+          "status": "superseded",
+          "anchors": [
+            [
+              "board",
+              "review"
+            ]
+          ],
+          "date": "2026-02-05",
+          "support": "The board review was postponed from 5 February to 19 February 2026.",
+          "required": false
+        }
+      ]
+    },
+    {
+      "case_id": "sr-latn-audit-schedule",
+      "task": "event_extraction",
+      "language": "sr-Latn",
+      "split": "train",
+      "source_family": "audit-schedule",
+      "source": "Bezbednosna revizija je počela 12. januara 2026. Sednica odbora je pomerena sa 5. februara na 19. februar 2026.",
+      "reference_date": "2026-02-01T00:00:00",
+      "entities": {},
+      "claims": [
+        {
+          "claim_id": "e1",
+          "anchors": [
+            [
+              "revizij*"
+            ]
+          ],
+          "date": "2026-01-12",
+          "support": "Bezbednosna revizija je počela 12. januara 2026."
+        },
+        {
+          "claim_id": "e2",
+          "anchors": [
+            [
+              "sednic*",
+              "odbor*"
+            ]
+          ],
+          "date": "2026-02-19",
+          "support": "Sednica odbora je pomerena sa 5. februara na 19. februar 2026."
+        },
+        {
+          "claim_id": "e3",
+          "status": "superseded",
+          "anchors": [
+            [
+              "sednic*",
+              "odbor*"
+            ]
+          ],
+          "date": "2026-02-05",
+          "support": "Sednica odbora je pomerena sa 5. februara na 19. februar 2026.",
+          "required": false
+        }
+      ]
+    },
+    {
+      "case_id": "en-weather-chat",
+      "task": "fact_extraction",
+      "language": "en",
+      "split": "train",
+      "source_family": "weather-chat",
+      "source": "Good morning! Hopefully the rain stops before noon. Have a great day.",
+      "entities": {},
+      "claims": []
+    },
+    {
+      "case_id": "sr-latn-weather-chat",
+      "task": "fact_extraction",
+      "language": "sr-Latn",
+      "split": "train",
+      "source_family": "weather-chat",
+      "source": "Dobro jutro! Nadamo se da će kiša stati pre podneva. Prijatan dan.",
+      "entities": {},
+      "claims": []
+    },
+    {
+      "case_id": "sr-cyrl-ana-move",
+      "task": "fact_extraction",
+      "language": "sr-Cyrl",
+      "split": "dev",
+      "source_family": "ana-move",
+      "source": "Ана се у марту 2026. преселила из Београда у Нови Сад. Њен брат Марко и даље живи у Београду. Ана нема аутомобил. Можда ће следеће године купити бицикл.",
+      "entities": {
+        "Ana": [
+          "ana",
+          "ane",
+          "ani",
+          "anu",
+          "anom"
+        ],
+        "Marko": [
+          "marko",
+          "marka",
+          "marku",
+          "markom"
+        ]
+      },
+      "claims": [
+        {
+          "claim_id": "c1",
+          "subject": "Ana",
+          "anchors": [
+            [
+              "nov* sad*"
+            ],
+            [
+              "presel*",
+              "ziv*",
+              "stanuje"
+            ]
+          ],
+          "support": "Ана се у марту 2026. преселила из Београда у Нови Сад."
+        },
+        {
+          "claim_id": "c2",
+          "subject": "Ana",
+          "status": "superseded",
+          "anchors": [
+            [
+              "beograd*"
+            ],
+            [
+              "presel*",
+              "ziv*",
+              "stanova*"
+            ]
+          ],
+          "support": "Ана се у марту 2026. преселила из Београда у Нови Сад.",
+          "required": false
+        },
+        {
+          "claim_id": "c3",
+          "subject": "Marko",
+          "anchors": [
+            [
+              "beograd*"
+            ],
+            [
+              "ziv*",
+              "stanuje"
+            ]
+          ],
+          "support": "Њен брат Марко и даље живи у Београду."
+        },
+        {
+          "claim_id": "c4",
+          "subject": "Ana",
+          "negated": true,
+          "anchors": [
+            [
+              "automobil*",
+              "auto",
+              "kola"
+            ],
+            [
+              "ima",
+              "nema",
+              "poseduje"
+            ]
+          ],
+          "support": "Ана нема аутомобил."
+        },
+        {
+          "claim_id": "c5",
+          "subject": "Ana",
+          "modality": "hypothetical",
+          "anchors": [
+            [
+              "bicikl*"
+            ],
+            [
+              "kup*"
+            ]
+          ],
+          "support": "Можда ће следеће године купити бицикл."
+        }
+      ]
+    },
+    {
+      "case_id": "sr-latn-demo-dates",
+      "task": "event_extraction",
+      "language": "sr-Latn",
+      "split": "dev",
+      "source_family": "demo-dates",
+      "source": "Početak projekta održan je 3. februara 2026. Prezentacija za klijenta pomerena je sa 10. marta na 24. mart 2026.",
+      "reference_date": "2026-03-01T00:00:00",
+      "entities": {},
+      "claims": [
+        {
+          "claim_id": "e1",
+          "anchors": [
+            [
+              "pocetak",
+              "projek*"
+            ]
+          ],
+          "date": "2026-02-03",
+          "support": "Početak projekta održan je 3. februara 2026."
+        },
+        {
+          "claim_id": "e2",
+          "anchors": [
+            [
+              "prezentacij*",
+              "klijent*"
+            ]
+          ],
+          "date": "2026-03-24",
+          "support": "Prezentacija za klijenta pomerena je sa 10. marta na 24. mart 2026."
+        },
+        {
+          "claim_id": "e3",
+          "status": "superseded",
+          "anchors": [
+            [
+              "prezentacij*",
+              "klijent*"
+            ]
+          ],
+          "date": "2026-03-10",
+          "support": "Prezentacija za klijenta pomerena je sa 10. marta na 24. mart 2026.",
+          "required": false
+        }
+      ]
+    },
+    {
+      "case_id": "en-datacenter-cooling",
+      "task": "fact_extraction",
+      "language": "en",
+      "split": "dev",
+      "source_family": "datacenter-cooling",
+      "source": "Hall A switched from air cooling to liquid cooling in June 2025. Hall B still uses air cooling. Hall A does not run backup diesel generators indoors. The team plans to expand Hall B in 2027.",
+      "entities": {
+        "Hall A": [
+          "hall a"
+        ],
+        "Hall B": [
+          "hall b"
+        ]
+      },
+      "claims": [
+        {
+          "claim_id": "c1",
+          "subject": "Hall A",
+          "anchors": [
+            [
+              "liquid"
+            ],
+            [
+              "cool*"
+            ]
+          ],
+          "support": "Hall A switched from air cooling to liquid cooling in June 2025."
+        },
+        {
+          "claim_id": "c2",
+          "subject": "Hall A",
+          "status": "superseded",
+          "anchors": [
+            [
+              "air"
+            ],
+            [
+              "cool*"
+            ]
+          ],
+          "support": "Hall A switched from air cooling to liquid cooling in June 2025.",
+          "required": false
+        },
+        {
+          "claim_id": "c3",
+          "subject": "Hall B",
+          "anchors": [
+            [
+              "air"
+            ],
+            [
+              "cool*",
+              "use*"
+            ]
+          ],
+          "support": "Hall B still uses air cooling."
+        },
+        {
+          "claim_id": "c4",
+          "subject": "Hall A",
+          "negated": true,
+          "anchors": [
+            [
+              "diesel",
+              "generator*"
+            ],
+            [
+              "run*",
+              "use*"
+            ]
+          ],
+          "support": "Hall A does not run backup diesel generators indoors."
+        },
+        {
+          "claim_id": "c5",
+          "subject": "Hall B",
+          "modality": "hypothetical",
+          "anchors": [
+            [
+              "expand*"
+            ],
+            [
+              "2027"
+            ]
+          ],
+          "support": "The team plans to expand Hall B in 2027."
+        }
+      ]
+    },
+    {
+      "case_id": "sr-cyrl-datacenter-cooling",
+      "task": "fact_extraction",
+      "language": "sr-Cyrl",
+      "split": "dev",
+      "source_family": "datacenter-cooling",
+      "source": "Сектор А је у јуну 2025. прешао са ваздушног на течно хлађење. Сектор Б и даље користи ваздушно хлађење. Сектор А не користи дизел агрегате у затвореном простору. Тим планира проширење Сектора Б у 2027. години.",
+      "entities": {
+        "Hall A": [
+          "sektor* a"
+        ],
+        "Hall B": [
+          "sektor* b"
+        ]
+      },
+      "claims": [
+        {
+          "claim_id": "c1",
+          "subject": "Hall A",
+          "anchors": [
+            [
+              "tecn*"
+            ],
+            [
+              "hladj*"
+            ]
+          ],
+          "support": "Сектор А је у јуну 2025. прешао са ваздушног на течно хлађење."
+        },
+        {
+          "claim_id": "c2",
+          "subject": "Hall A",
+          "status": "superseded",
+          "anchors": [
+            [
+              "vazdusn*"
+            ],
+            [
+              "hladj*"
+            ]
+          ],
+          "support": "Сектор А је у јуну 2025. прешао са ваздушног на течно хлађење.",
+          "required": false
+        },
+        {
+          "claim_id": "c3",
+          "subject": "Hall B",
+          "anchors": [
+            [
+              "vazdusn*"
+            ],
+            [
+              "hladj*",
+              "korist*"
+            ]
+          ],
+          "support": "Сектор Б и даље користи ваздушно хлађење."
+        },
+        {
+          "claim_id": "c4",
+          "subject": "Hall A",
+          "negated": true,
+          "anchors": [
+            [
+              "dizel",
+              "agregat*"
+            ],
+            [
+              "korist*"
+            ]
+          ],
+          "support": "Сектор А не користи дизел агрегате у затвореном простору."
+        },
+        {
+          "claim_id": "c5",
+          "subject": "Hall B",
+          "modality": "hypothetical",
+          "anchors": [
+            [
+              "prosir*"
+            ],
+            [
+              "2027"
+            ]
+          ],
+          "support": "Тим планира проширење Сектора Б у 2027. години."
+        }
+      ]
+    },
+    {
+      "case_id": "sr-cyrl-jelena-role",
+      "task": "fact_extraction",
+      "language": "sr-Cyrl",
+      "split": "sealed_test",
+      "source_family": "jelena-role",
+      "source": "Јелена је од септембра 2026. вођа тима за плаћања. Пре тога је радила у подршци. Не ради викендом.",
+      "entities": {
+        "Jelena": [
+          "jelena",
+          "jelene",
+          "jeleni",
+          "jelenu",
+          "jelenom"
+        ]
+      },
+      "claims": [
+        {
+          "claim_id": "c1",
+          "subject": "Jelena",
+          "anchors": [
+            [
+              "plac*"
+            ],
+            [
+              "vod*",
+              "rukovod*",
+              "lider*",
+              "sef*"
+            ]
+          ],
+          "support": "Јелена је од септембра 2026. вођа тима за плаћања."
+        },
+        {
+          "claim_id": "c2",
+          "subject": "Jelena",
+          "status": "superseded",
+          "anchors": [
+            [
+              "podrs*"
+            ]
+          ],
+          "support": "Пре тога је радила у подршци.",
+          "required": false
+        },
+        {
+          "claim_id": "c3",
+          "subject": "Jelena",
+          "negated": true,
+          "anchors": [
+            [
+              "vikend*"
+            ],
+            [
+              "radi"
+            ]
+          ],
+          "support": "Не ради викендом."
+        }
+      ]
+    },
+    {
+      "case_id": "en-warehouse-lease",
+      "task": "fact_extraction",
+      "language": "en",
+      "split": "sealed_test",
+      "source_family": "warehouse-lease",
+      "source": "Stefan relocated the spare parts depot from Subotica to Niš in April 2026. His colleague Ivana still manages the Subotica office. Stefan does not ship hazardous chemicals. He might lease a second warehouse in Pirot next spring.",
+      "entities": {
+        "Stefan": [
+          "stefan"
+        ],
+        "Ivana": [
+          "ivana"
+        ]
+      },
+      "claims": [
+        {
+          "claim_id": "c1",
+          "subject": "Stefan",
+          "anchors": [
+            [
+              "nis"
+            ],
+            [
+              "relocat*",
+              "mov*",
+              "depot"
+            ]
+          ],
+          "support": "Stefan relocated the spare parts depot from Subotica to Niš in April 2026."
+        },
+        {
+          "claim_id": "c2",
+          "subject": "Stefan",
+          "status": "superseded",
+          "anchors": [
+            [
+              "subotica"
+            ],
+            [
+              "relocat*",
+              "mov*",
+              "depot"
+            ]
+          ],
+          "support": "Stefan relocated the spare parts depot from Subotica to Niš in April 2026.",
+          "required": false
+        },
+        {
+          "claim_id": "c3",
+          "subject": "Ivana",
+          "anchors": [
+            [
+              "subotica"
+            ],
+            [
+              "manag*",
+              "office"
+            ]
+          ],
+          "support": "His colleague Ivana still manages the Subotica office."
+        },
+        {
+          "claim_id": "c4",
+          "subject": "Stefan",
+          "negated": true,
+          "anchors": [
+            [
+              "chemical*",
+              "hazardous"
+            ],
+            [
+              "ship*"
+            ]
+          ],
+          "support": "Stefan does not ship hazardous chemicals."
+        },
+        {
+          "claim_id": "c5",
+          "subject": "Stefan",
+          "modality": "hypothetical",
+          "anchors": [
+            [
+              "pirot",
+              "warehouse"
+            ],
+            [
+              "leas*"
+            ]
+          ],
+          "support": "He might lease a second warehouse in Pirot next spring."
+        }
+      ]
+    },
+    {
+      "case_id": "sr-latn-warehouse-lease",
+      "task": "fact_extraction",
+      "language": "sr-Latn",
+      "split": "sealed_test",
+      "source_family": "warehouse-lease",
+      "source": "Stefan je u aprilu 2026. preselio skladište rezervnih delova iz Subotice u Niš. Njegova koleginica Ivana i dalje vodi kancelariju u Subotici. Stefan ne transportuje opasne hemikalije. Možda će na proleće zakupiti još jedno skladište u Pirotu.",
+      "entities": {
+        "Stefan": [
+          "stefan*"
+        ],
+        "Ivana": [
+          "ivan*"
+        ]
+      },
+      "claims": [
+        {
+          "claim_id": "c1",
+          "subject": "Stefan",
+          "anchors": [
+            [
+              "nis*"
+            ],
+            [
+              "presel*",
+              "skladist*"
+            ]
+          ],
+          "support": "Stefan je u aprilu 2026. preselio skladište rezervnih delova iz Subotice u Niš."
+        },
+        {
+          "claim_id": "c2",
+          "subject": "Stefan",
+          "status": "superseded",
+          "anchors": [
+            [
+              "subotic*"
+            ],
+            [
+              "presel*",
+              "skladist*"
+            ]
+          ],
+          "support": "Stefan je u aprilu 2026. preselio skladište rezervnih delova iz Subotice u Niš.",
+          "required": false
+        },
+        {
+          "claim_id": "c3",
+          "subject": "Ivana",
+          "anchors": [
+            [
+              "subotic*"
+            ],
+            [
+              "vod*",
+              "kancelarij*"
+            ]
+          ],
+          "support": "Njegova koleginica Ivana i dalje vodi kancelariju u Subotici."
+        },
+        {
+          "claim_id": "c4",
+          "subject": "Stefan",
+          "negated": true,
+          "anchors": [
+            [
+              "hemikalij*"
+            ],
+            [
+              "transport*"
+            ]
+          ],
+          "support": "Stefan ne transportuje opasne hemikalije."
+        },
+        {
+          "claim_id": "c5",
+          "subject": "Stefan",
+          "modality": "hypothetical",
+          "anchors": [
+            [
+              "pirot*"
+            ],
+            [
+              "zakup*"
+            ]
+          ],
+          "support": "Možda će na proleće zakupiti još jedno skladište u Pirotu."
+        }
+      ]
+    },
+    {
+      "case_id": "en-release-cutover",
+      "task": "event_extraction",
+      "language": "en",
+      "split": "sealed_test",
+      "source_family": "release-cutover",
+      "source": "The database freeze happened on 14 April 2026. The production cutover was rescheduled from 20 April to 28 April 2026.",
+      "reference_date": "2026-04-01T00:00:00",
+      "entities": {},
+      "claims": [
+        {
+          "claim_id": "e1",
+          "anchors": [
+            [
+              "freeze",
+              "database"
+            ]
+          ],
+          "date": "2026-04-14",
+          "support": "The database freeze happened on 14 April 2026."
+        },
+        {
+          "claim_id": "e2",
+          "anchors": [
+            [
+              "cutover",
+              "production"
+            ]
+          ],
+          "date": "2026-04-28",
+          "support": "The production cutover was rescheduled from 20 April to 28 April 2026."
+        },
+        {
+          "claim_id": "e3",
+          "status": "superseded",
+          "anchors": [
+            [
+              "cutover",
+              "production"
+            ]
+          ],
+          "date": "2026-04-20",
+          "support": "The production cutover was rescheduled from 20 April to 28 April 2026.",
+          "required": false
+        }
+      ]
+    },
+    {
+      "case_id": "sr-cyrl-release-cutover",
+      "task": "event_extraction",
+      "language": "sr-Cyrl",
+      "split": "sealed_test",
+      "source_family": "release-cutover",
+      "source": "Замрзавање базе података обављено је 14. априла 2026. Прелазак у продукцију померен је са 20. априла на 28. април 2026.",
+      "reference_date": "2026-04-01T00:00:00",
+      "entities": {},
+      "claims": [
+        {
+          "claim_id": "e1",
+          "anchors": [
+            [
+              "zamrzav*",
+              "baz*"
+            ]
+          ],
+          "date": "2026-04-14",
+          "support": "Замрзавање базе података обављено је 14. априла 2026."
+        },
+        {
+          "claim_id": "e2",
+          "anchors": [
+            [
+              "prelaz*",
+              "produkcij*"
+            ]
+          ],
+          "date": "2026-04-28",
+          "support": "Прелазак у продукцију померен је са 20. априла на 28. април 2026."
+        },
+        {
+          "claim_id": "e3",
+          "status": "superseded",
+          "anchors": [
+            [
+              "prelaz*",
+              "produkcij*"
+            ]
+          ],
+          "date": "2026-04-20",
+          "support": "Прелазак у продукцију померен је са 20. априла на 28. април 2026.",
+          "required": false
+        }
+      ]
+    },
+    {
+      "case_id": "en-thanks-closing",
+      "task": "fact_extraction",
+      "language": "en",
+      "split": "sealed_test",
+      "source_family": "thanks-closing",
+      "source": "Thanks for checking in! Everything looks fine on our side, see you tomorrow.",
+      "entities": {},
+      "claims": []
+    },
+    {
+      "case_id": "sr-cyrl-thanks-closing",
+      "task": "fact_extraction",
+      "language": "sr-Cyrl",
+      "split": "sealed_test",
+      "source_family": "thanks-closing",
+      "source": "Хвала на јављању! Код нас је све у реду, видимо се сутра.",
+      "entities": {},
+      "claims": []
     }
   ]
 }

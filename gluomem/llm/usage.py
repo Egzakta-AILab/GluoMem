@@ -26,13 +26,9 @@ class UsageAccumulator:
             for slug, stats in usage.items():
                 if not isinstance(stats, dict):
                     continue
-                acc = self._by_model.setdefault(
-                    slug, {"prompt_tokens": 0, "completion_tokens": 0}
-                )
+                acc = self._by_model.setdefault(slug, {"prompt_tokens": 0, "completion_tokens": 0})
                 acc["prompt_tokens"] += int(stats.get("prompt_tokens", 0) or 0)
-                acc["completion_tokens"] += int(
-                    stats.get("completion_tokens", 0) or 0
-                )
+                acc["completion_tokens"] += int(stats.get("completion_tokens", 0) or 0)
 
     def snapshot(self) -> dict[str, dict[str, int]]:
         """Deep-copied ``{slug: {prompt_tokens, completion_tokens}}``."""

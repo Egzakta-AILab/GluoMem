@@ -41,9 +41,7 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def save_artifact(
-    module: dspy.Module, root: str | Path, task: str, *, model_ref: str
-) -> Path:
+def save_artifact(module: dspy.Module, root: str | Path, task: str, *, model_ref: str) -> Path:
     """Persist a compiled module + manifest; returns the artifact directory."""
     target = artifact_dir(root, task)
     target.mkdir(parents=True, exist_ok=True)
@@ -83,8 +81,7 @@ def load_artifact(root: str | Path, task: str, *, pins: dict[str, str]) -> dspy.
     pinned = pins.get(task)
     if pinned is not None and pinned != actual:
         raise ArtifactError(
-            f"artifact pin mismatch for task '{task}': config pins {pinned}, "
-            f"artifact is {actual}"
+            f"artifact pin mismatch for task '{task}': config pins {pinned}, artifact is {actual}"
         )
     return dspy.load(str(target), allow_pickle=True)
 
@@ -102,9 +99,7 @@ def load_or_build(task: str, cfg: AppConfig) -> dspy.Module:
 
     target = artifact_dir(cfg.dspy.artifacts.dir, task)
     if (target / _PROGRAM_NAME).exists():
-        return load_artifact(
-            cfg.dspy.artifacts.dir, task, pins=cfg.dspy.artifacts.pins
-        )
+        return load_artifact(cfg.dspy.artifacts.dir, task, pins=cfg.dspy.artifacts.pins)
     if cfg.dspy.artifacts.require:
         raise ArtifactError(
             f"dspy.artifacts.require=true but no compiled artifact exists for "

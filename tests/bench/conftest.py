@@ -74,7 +74,5 @@ def ingested_db_dir(bench_cfg: AppConfig, tmp_path: Path) -> Path:
     cfg = bench_cfg.with_overrides({"write.extraction_backend": "none"})
     db_dir = tmp_path / "dbs"
     db_dir.mkdir()
-    ingest_path(
-        FIXTURE, cfg, facade=NullExtractors(), db_path=db_dir / "conv-tiny-1.mind"
-    )
+    ingest_path(FIXTURE, cfg, facade=NullExtractors(), db_path=db_dir / "conv-tiny-1.mind")
     return db_dir

@@ -144,9 +144,7 @@ def test_refine_retries_and_exhaustion_raises_extraction_error() -> None:
     bad = {"events": "not-a-list"}
     good = {"events": [{"text": "ok", "event_date": None, "confidence": 1.0}]}
     lm = _StatefulDummyLM([bad, bad, good])
-    fx = _extractors(
-        lm, **{"dspy.tasks.event_extraction.refine": {"enabled": True, "N": 2}}
-    )
+    fx = _extractors(lm, **{"dspy.tasks.event_extraction.refine": {"enabled": True, "N": 2}})
     events = fx.extract_events("whatever", datetime(2023, 5, 8))
     assert len(events) == 1 and events[0].text == "ok"
 
@@ -185,9 +183,7 @@ def test_fake_and_null_extractors_and_factory(capsys) -> None:
     assert isinstance(make_extractors(cfg), DspyExtractors)
     assert isinstance(
         make_extractors(
-            cfg.with_overrides(
-                {"write.extraction_backend": "fake", "components.allow_fake": True}
-            )
+            cfg.with_overrides({"write.extraction_backend": "fake", "components.allow_fake": True})
         ),
         FakeExtractors,
     )

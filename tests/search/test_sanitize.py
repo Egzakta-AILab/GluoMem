@@ -30,9 +30,7 @@ def test_sanitized_output_is_valid_fts5_match(query: str) -> None:
     assert out != LIKE_FALLBACK
     conn = sqlite3.connect(":memory:")
     try:
-        conn.execute(
-            "CREATE VIRTUAL TABLE t USING fts5(content, tokenize='porter unicode61')"
-        )
+        conn.execute("CREATE VIRTUAL TABLE t USING fts5(content, tokenize='porter unicode61')")
         conn.execute("INSERT INTO t(content) VALUES (?)", (query,))
         rows = conn.execute("SELECT rowid FROM t WHERE t MATCH ?", (out,)).fetchall()
         assert isinstance(rows, list)

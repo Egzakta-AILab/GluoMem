@@ -208,6 +208,15 @@ def _entries() -> tuple[BenchmarkEntry, ...]:
             capabilities=("accurate_retrieval", "conflict_resolution", "cross_script_multilingual"),
         ),
         _generated_fixture(
+            "sr_en_translation_v1",
+            "Generated Serbian/English pure translation replay fixture",
+            "sr_en_translation_v1.json",
+            "9ee9893aab6bacacbee884d0ac297145892ba489eab48dfc6471e16d2b62462e",
+            scorers=("evidence_hit@k", "context_substring_match@k", "current_over_stale@k"),
+            note="Pure SR<->EN cross-lingual retrieval with zero shared lexical anchors",
+            capabilities=("cross_lingual_translation", "conflict_resolution"),
+        ),
+        _generated_fixture(
             "minja_adversarial_v1",
             "Generated MINJA-inspired adversarial memory poisoning fixture",
             "minja_adversarial_v1.json",

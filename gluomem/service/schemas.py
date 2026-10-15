@@ -86,3 +86,16 @@ class CorrectRequest(_Req):
 
 class RetractSourceRequest(_Req):
     source_ref: str = Field(min_length=1, max_length=1024)
+
+
+class SweepExpiredRequest(_Req):
+    now_iso: str | None = Field(default=None, max_length=64)
+    dedup_key: str | None = Field(default=None, min_length=1, max_length=256)
+    async_mode: bool = False
+
+    @field_validator("now_iso")
+    @classmethod
+    def valid_time(cls, value: str | None) -> str | None:
+        if value is not None:
+            parse_utc(value)
+        return value

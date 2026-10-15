@@ -6,6 +6,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from gluomem.frames.content_hash import content_hash, suppression_key
+from gluomem.frames.expiry import (
+    SweepResult as SweepResult,
+)
+from gluomem.frames.expiry import (
+    sweep_expired_episodes as sweep_expired_episodes,
+)
 from gluomem.frames.generation import (
     bump_scope_generation,
     get_scope_generation,
@@ -49,6 +55,17 @@ class ForgetResult:
     frame_id: int
     content_hash: str
     reason: TombstoneReason
+    retired_entity_ids: list[int]
+    retired_relation_ids: list[int]
+    scope_generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeForgetResult:
+    """Result of erasing all memories, provenance, and KG edges in a scope."""
+
+    scope: MemoryScope
+    forgotten_frame_ids: list[int]
     retired_entity_ids: list[int]
     retired_relation_ids: list[int]
     scope_generation: int
@@ -241,14 +258,15 @@ def _scrub_frames(
 def _forget_chain(store: FrameStore, frame_id: int, scope: MemoryScope) -> list[Frame]:
     store.get_frame(frame_id, scope=scope)
     rows = store._backend.fetchall(
-        "WITH RECURSIVE affected(id) AS (SELECT ? UNION "
-        f"SELECT m.id FROM memory_frames m JOIN affected a ON (m.supersedes = a.id OR "
-        f"m.superseded_by = a.id OR m.base_frame_id = a.id) WHERE {scope_sql('m')} UNION "
-        "SELECT l.derived_frame_id FROM memory_frame_lineage l JOIN affected a ON "
-        "l.source_frame_id = a.id) "
+        f"WITH RECURSIVE affected(id) AS ("
+        f"SELECT id FROM memory_frames WHERE id = ? AND {scope_sql()} UNION "
+        "SELECT m.id FROM memory_frames m "
+        "LEFT JOIN memory_frame_lineage l ON l.derived_frame_id = m.id "
+        "JOIN affected a ON (m.supersedes = a.id OR m.superseded_by = a.id "
+        f"OR m.base_frame_id = a.id OR l.source_frame_id = a.id) WHERE {scope_sql('m')}) "
         f"SELECT m.id FROM memory_frames m JOIN affected a ON m.id = a.id WHERE "
         f"{scope_sql('m')} ORDER BY m.id",
-        (frame_id, *scope.as_tuple(), *scope.as_tuple()),
+        (frame_id, *scope.as_tuple(), *scope.as_tuple(), *scope.as_tuple()),
     )
     ids = [int(r["id"]) for r in rows]
     frames = store.get_frames(ids, scope=scope)
@@ -330,6 +348,63 @@ def forget_memory(
         gen = bump_scope_generation(store._backend, scope)
     return ForgetResult(
         frame.id, frame.content_hash or content_hash(frame.content), reason, eids, rids, gen
+    )
+
+
+def forget_scope(
+    store: FrameStore,
+    *,
+    scope: MemoryScope | None = None,
+    reason: TombstoneReason = "forgotten",
+) -> ScopeForgetResult:
+    """Erase all memories, index projections, KG entities/relations, and payloads for ``scope``."""
+    eff_scope = resolve_scope(scope, default=store.scope)
+    backend = store._backend
+    with backend.transaction():
+        rows = backend.fetchall(
+            f"SELECT id FROM memory_frames WHERE {scope_sql()} AND status != 'forgotten' "
+            "ORDER BY id",
+            eff_scope.as_tuple(),
+        )
+        frame_ids = [int(r["id"]) for r in rows]
+        frames_map = store.get_frames(frame_ids, scope=eff_scope)
+        frames = [frames_map[i] for i in frame_ids]
+        eids, rids = _scrub_frames(
+            store, frames, scope=eff_scope, status="forgotten", reason=reason
+        )
+        backend.execute(
+            f"UPDATE source_events SET payload_json = '{{}}' WHERE {scope_sql()}",
+            eff_scope.as_tuple(),
+        )
+        backend.execute(
+            f"UPDATE memory_jobs SET payload = '{{}}', last_error = NULL WHERE {scope_sql()}",
+            eff_scope.as_tuple(),
+        )
+        backend.execute(
+            f"UPDATE memory_provenance SET verbatim_span = NULL WHERE {scope_sql()}",
+            eff_scope.as_tuple(),
+        )
+        extra_rids = [
+            int(r["id"])
+            for r in backend.fetchall(
+                f"DELETE FROM knowledge_relations WHERE {scope_sql()} RETURNING id",
+                eff_scope.as_tuple(),
+            )
+        ]
+        extra_eids = [
+            int(r["id"])
+            for r in backend.fetchall(
+                f"DELETE FROM knowledge_entities WHERE {scope_sql()} RETURNING id",
+                eff_scope.as_tuple(),
+            )
+        ]
+        gen = bump_scope_generation(backend, eff_scope)
+    return ScopeForgetResult(
+        scope=eff_scope,
+        forgotten_frame_ids=frame_ids,
+        retired_entity_ids=sorted(set(eids) | set(extra_eids)),
+        retired_relation_ids=sorted(set(rids) | set(extra_rids)),
+        scope_generation=gen,
     )
 
 

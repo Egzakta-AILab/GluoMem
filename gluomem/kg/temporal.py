@@ -9,18 +9,10 @@ __all__ = ["resolve_relative_date"]
 
 DateLike = date | str
 
-_N_UNITS_AGO_RE = re.compile(
-    r"^(\d+)\s+(day|week|month|year)s?\s+ago$", re.IGNORECASE
-)
-_IN_N_UNITS_RE = re.compile(
-    r"^in\s+(\d+)\s+(day|week|month|year)s?$", re.IGNORECASE
-)
-_LAST_N_UNITS_RE = re.compile(
-    r"^last\s+(\d+)\s+(day|week|month|year)s?$", re.IGNORECASE
-)
-_NEXT_N_UNITS_RE = re.compile(
-    r"^next\s+(\d+)\s+(day|week|month|year)s?$", re.IGNORECASE
-)
+_N_UNITS_AGO_RE = re.compile(r"^(\d+)\s+(day|week|month|year)s?\s+ago$", re.IGNORECASE)
+_IN_N_UNITS_RE = re.compile(r"^in\s+(\d+)\s+(day|week|month|year)s?$", re.IGNORECASE)
+_LAST_N_UNITS_RE = re.compile(r"^last\s+(\d+)\s+(day|week|month|year)s?$", re.IGNORECASE)
+_NEXT_N_UNITS_RE = re.compile(r"^next\s+(\d+)\s+(day|week|month|year)s?$", re.IGNORECASE)
 
 _UNIT_DAYS: dict[str, int] = {
     "day": 1,

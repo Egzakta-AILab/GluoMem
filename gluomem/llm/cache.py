@@ -104,9 +104,7 @@ class CachedExtractors:
 
     def __init__(self, inner: Extractors, *, path: str, mode: str) -> None:
         if mode not in _MODES:
-            raise ValueError(
-                f"extraction_cache.mode {mode!r} invalid; one of {list(_MODES)}"
-            )
+            raise ValueError(f"extraction_cache.mode {mode!r} invalid; one of {list(_MODES)}")
         if mode != "off" and not path:
             raise ValueError("extraction_cache.path is required when mode != 'off'")
         self._inner = inner
@@ -196,9 +194,7 @@ class CachedExtractors:
             lambda: self._inner.extract_facts(text),
         )
 
-    def extract_events(
-        self, source_text: str, reference_date: datetime
-    ) -> list[ExtractedEvent]:
+    def extract_events(self, source_text: str, reference_date: datetime) -> list[ExtractedEvent]:
         return self._serve(
             "extract_events",
             _key("extract_events", source_text, reference_date.isoformat()),

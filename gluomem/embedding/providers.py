@@ -35,9 +35,7 @@ def _emit_mock_banner() -> None:
 class MockEmbedder:
     """Deterministic, offline, hash-based embedder for tests."""
 
-    def __init__(
-        self, *, dim: int = 384, normalize: bool = False, fallback: bool = False
-    ) -> None:
+    def __init__(self, *, dim: int = 384, normalize: bool = False, fallback: bool = False) -> None:
         if dim <= 0:
             raise ValueError(f"MockEmbedder dim must be positive, got {dim}")
         self._dim: int = int(dim)
@@ -82,9 +80,7 @@ class MockEmbedder:
 class MiniLMEmbedder:
     """Real ``sentence-transformers`` embedder (native 384 dims, lazy-loaded)."""
 
-    def __init__(
-        self, model_name: str, *, dim: int, revision: str | None = None
-    ) -> None:
+    def __init__(self, model_name: str, *, dim: int, revision: str | None = None) -> None:
         if dim <= 0:
             raise ValueError(f"MiniLMEmbedder dim must be positive, got {dim}")
         self._model_name: str = model_name
@@ -113,9 +109,7 @@ class MiniLMEmbedder:
             require("embeddings", f"embedding model '{self._model_name}'")
             from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(
-                self._model_name, revision=self._revision
-            )
+            self._model = SentenceTransformer(self._model_name, revision=self._revision)
         return self._model
 
     def _vectors(self, texts: list[str]) -> list[np.ndarray]:

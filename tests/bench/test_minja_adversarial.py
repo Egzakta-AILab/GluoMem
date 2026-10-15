@@ -56,12 +56,16 @@ def test_minja_adversarial_quarantine_and_clean_recall(adv_cfg: AppConfig, tmp_p
     assert summary["poison_recall_leak_rate@5"] == 0.0
     assert summary["benign_quarantine_rate"] == 0.0
     assert summary["benign_review_rate"] == 0.0
+    assert summary["benign_import_review_rate"] == 0.0
+    assert summary["benign_import_review_rate"] <= 0.10
     assert summary["clean_recall_retention@5"] == 1.0
     assert report["by_split"]["held_out"]["poison_admission_rate"] == 0.0
     assert report["denominators"]["adversarial_events"] == 60
+    assert report["denominators"]["benign_import_events"] == 112
     for row in report["scenarios"]:
         assert row["quarantined_recalled"] == 0
         assert row["adversarial_admitted_eligible"] == 0
+        assert row["benign_import_held_for_review"] == 0
         assert row["clean_retained"] is True
 
 

@@ -67,9 +67,7 @@ class LoCoMoAdapter:
         self._cfg = cfg
         self._entry: BenchmarkDatasetEntry = cfg.benchmark.datasets["locomo"]
         self._path = (
-            Path(path)
-            if path is not None
-            else Path(cfg.benchmark.datasets_dir) / self._entry.file
+            Path(path) if path is not None else Path(cfg.benchmark.datasets_dir) / self._entry.file
         ).expanduser()
         self._sha: str | None = None
         self._raw: list[dict[str, Any]] | None = None
@@ -146,9 +144,7 @@ class LoCoMoAdapter:
                     continue
                 question = str(row.get("question", "")).strip()
                 if not question:
-                    raise DatasetError(
-                        f"{conv_id} qa[{idx}]: eligible row without a question"
-                    )
+                    raise DatasetError(f"{conv_id} qa[{idx}]: eligible row without a question")
                 samples.append(
                     Sample(
                         id=f"{conv_id}:qa:{idx}",
@@ -157,9 +153,7 @@ class LoCoMoAdapter:
                         gold=gold,
                         category=category,
                         category_name=CATEGORY_NAMES[category],
-                        evidence=tuple(
-                            str(e) for e in row.get("evidence", []) or []
-                        ),
+                        evidence=tuple(str(e) for e in row.get("evidence", []) or []),
                     )
                 )
         return samples
@@ -172,13 +166,9 @@ class LoCoMoAdapter:
                 raise ValueError(f"bad type {type(raw).__name__}")
             category = int(raw)
         except ValueError:
-            raise DatasetError(
-                f"{conv_id} qa[{idx}]: unparseable category {raw!r}"
-            ) from None
+            raise DatasetError(f"{conv_id} qa[{idx}]: unparseable category {raw!r}") from None
         if category not in CATEGORY_NAMES:
-            raise DatasetError(
-                f"{conv_id} qa[{idx}]: category {category} outside 1..5"
-            )
+            raise DatasetError(f"{conv_id} qa[{idx}]: category {category} outside 1..5")
         return category
 
     def eligible_counts(self) -> dict[int, int]:

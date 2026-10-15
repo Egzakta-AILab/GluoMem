@@ -30,9 +30,7 @@ def _lives_in(city: str) -> CognifyResult:
             KGEntity(entity_type="person", name="alice"),
             KGEntity(entity_type="city", name=city),
         ],
-        relations=[
-            KGRelation(source="alice", target=city, relation_type="LIVES_IN")
-        ],
+        relations=[KGRelation(source="alice", target=city, relation_type="LIVES_IN")],
     )
 
 
@@ -106,11 +104,7 @@ def test_bitemporal_retirement_reassertion_and_valid_time_ordering(env) -> None:
     retire_conflicting_relations(again.relations, kg=env.kg)
 
     def city_at(iso: str) -> set[int]:
-        return {
-            r.target_id
-            for r in env.kg.as_of(iso).relations
-            if r.relation_type == "LIVES_IN"
-        }
+        return {r.target_id for r in env.kg.as_of(iso).relations if r.relation_type == "LIVES_IN"}
 
     assert city_at("2023-02-01") == {boston.target_id}
     assert city_at("2023-04-01") == {seattle.target_id}
@@ -230,15 +224,11 @@ def test_contradiction_triggers(
         cognify_map={
             _F1: CognifyResult(
                 entities=[_BOB, _BOSTON],
-                relations=[
-                    KGRelation(source="bob", target="boston", relation_type="LIVES_IN")
-                ],
+                relations=[KGRelation(source="bob", target="boston", relation_type="LIVES_IN")],
             ),
             _F2: CognifyResult(
                 entities=[_BOB, _SEATTLE],
-                relations=[
-                    KGRelation(source="bob", target="seattle", relation_type="MOVED_TO")
-                ],
+                relations=[KGRelation(source="bob", target="seattle", relation_type="MOVED_TO")],
             ),
         },
         verdicts={

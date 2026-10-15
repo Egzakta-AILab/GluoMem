@@ -17,8 +17,11 @@ from gluomem.llm import (
     FakeExtractors,
 )
 from gluomem.llm.extraction_eval import (
+    CAPABILITIES,
     FIXTURE_PATH,
     SEALED_SPLIT,
+    SPLITS,
+    TASKS,
     FixtureError,
     SealedSplitError,
     evaluator_fingerprint,
@@ -165,7 +168,8 @@ GOLDEN = [
             "Ana se preselila u Novi Sad.",
             "Marko živi u Beogradu.",
             "Ana ima automobil.",
-            "Ana je kupila bicikl."),
+            "Ana je kupila bicikl.",
+        ),
         0.5,
         {"negation_lost": 1, "hypothetical_as_completed": 1},
         id="sr-latn-negation-and-modality",
@@ -227,13 +231,59 @@ GOLDEN = [
         {},
         id="plan-kept-as-plan",
     ),
+    pytest.param(
+        "en-nikola-clinic",
+        _facts(
+            "Nikola now practices at the Zemun hospital.",
+            "Nikola previously worked at the Vračar clinic.",
+            "Milica works at the Vračar clinic.",
+            "Nikola does not treat pediatric patients.",
+            "Nikola might open a dental lab in autumn.",
+        ),
+        1.0,
+        {},
+        id="en-nikola-clinic-full",
+    ),
+    pytest.param(
+        "sr-cyrl-nikola-clinic",
+        _facts(
+            "Никола сада ради у болници у Земуну.",
+            "Никола је раније радио на Врачару.",
+            "Милица ради на Врачару.",
+            "Никола не прима педијатријске пацијенте.",
+            "Никола ће можда отворити стоматолошку ординацију.",
+        ),
+        1.0,
+        {},
+        id="sr-cyrl-nikola-clinic-full",
+    ),
+    pytest.param(
+        "en-datacenter-cooling",
+        _facts(
+            "Hall A uses liquid cooling.",
+            "Hall B uses air cooling.",
+            "Hall A does not run diesel generators indoors.",
+            "Hall B plans to expand in 2027.",
+        ),
+        1.0,
+        {},
+        id="en-datacenter-cooling-full",
+    ),
+    pytest.param(
+        "sr-latn-demo-dates",
+        _events(
+            ("Početak projekta", "2026-02-03T00:00:00"),
+            ("Prezentacija za klijenta", "2026-03-24T00:00:00"),
+        ),
+        1.0,
+        {},
+        id="sr-latn-demo-dates-full",
+    ),
 ]
 
 
 @pytest.mark.parametrize(("case_id", "prediction", "expected", "errors"), GOLDEN)
-def test_golden_scores(
-    case_id: str, prediction: list, expected: float, errors: dict
-) -> None:
+def test_golden_scores(case_id: str, prediction: list, expected: float, errors: dict) -> None:
     case = load_fixture().case(case_id)
     result = score_case(case, prediction)
     assert result.score == pytest.approx(expected, abs=1e-4)
@@ -286,6 +336,15 @@ def test_evaluator_components_redaction_and_normalization() -> None:
 
 def test_splits_sealing_fixture_validation_and_scorecard(tmp_path: Path) -> None:
     fx = load_fixture()
+    assert len(fx.cases) >= 24
+    for split in SPLITS:
+        split_cases = [c for c in fx.cases if c.split == split]
+        assert len(split_cases) >= 8
+        assert {c.language for c in split_cases} == {"en", "sr-Latn", "sr-Cyrl"}
+        assert {c.task for c in split_cases} == set(TASKS)
+        assert {cap for c in split_cases for cl in c.claims for cap in cl.capabilities} == set(
+            CAPABILITIES
+        )
     manifest = fx.split_manifest()
     assert manifest["policy"]["group_by"] == "source_family"
     assert {"en-jelena-role", "sr-latn-jelena-role"} <= set(
@@ -295,9 +354,7 @@ def test_splits_sealing_fixture_validation_and_scorecard(tmp_path: Path) -> None
     sealed_case = fx.case("en-jelena-role")
     with pytest.raises(SealedSplitError):
         score_case(sealed_case, _facts("Jelena leads the payments team."))
-    rep = score_case(
-        sealed_case, _facts("Jelena leads the payments team."), purpose="report"
-    )
+    rep = score_case(sealed_case, _facts("Jelena leads the payments team."), purpose="report")
     assert rep.score > 0 and rep.feedback == ""
 
     doc = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
@@ -339,9 +396,7 @@ class _Boom:
     def extract_facts(self, text: str) -> list[ExtractedFact]:
         raise AssertionError("inner extractor called on a cache hit")
 
-    def extract_events(
-        self, source_text: str, reference_date: datetime
-    ) -> list[ExtractedEvent]:
+    def extract_events(self, source_text: str, reference_date: datetime) -> list[ExtractedEvent]:
         raise AssertionError("inner extractor called on a cache hit")
 
     def extract_profile(self, text: str, *, speaker: str) -> list[ExtractedFact]:
@@ -381,17 +436,14 @@ def test_cached_extractors_record_replay_readthrough_and_concurrency(
     verdict = rec.check_contradiction("Bob in Denver", "Bob in Boston")
 
     rep = _cache(_Boom(), tmp_path, "replay")
-    assert [f.model_dump() for f in rep.extract_facts(_TEXT)] == [
-        f.model_dump() for f in facts
-    ]
+    assert [f.model_dump() for f in rep.extract_facts(_TEXT)] == [f.model_dump() for f in facts]
     assert rep.extract_facts("") == []
     assert [
-        e.model_dump()
-        for e in rep.extract_events("She moved yesterday.", datetime(2023, 5, 8))
+        e.model_dump() for e in rep.extract_events("She moved yesterday.", datetime(2023, 5, 8))
     ] == [e.model_dump() for e in events]
-    assert [
-        p.model_dump() for p in rep.extract_profile("I love hiking.", speaker="Bob")
-    ] == [p.model_dump() for p in profile]
+    assert [p.model_dump() for p in rep.extract_profile("I love hiking.", speaker="Bob")] == [
+        p.model_dump() for p in profile
+    ]
     assert rep.cognify(_TEXT).model_dump() == cog.model_dump()
     assert (
         rep.check_contradiction("Bob in Denver", "Bob in Boston").model_dump()
@@ -420,10 +472,7 @@ def test_cached_extractors_record_replay_readthrough_and_concurrency(
     assert a.cache_sha() == b.cache_sha()
 
     t_rec = _cache(FakeExtractors(banner=False), tmp_path / "t", "record")
-    threads = [
-        threading.Thread(target=t_rec.extract_facts, args=(f"s {i}.",))
-        for i in range(16)
-    ]
+    threads = [threading.Thread(target=t_rec.extract_facts, args=(f"s {i}.",)) for i in range(16)]
     for th in threads:
         th.start()
     for th in threads:

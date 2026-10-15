@@ -50,10 +50,7 @@ class _ContentReranker:
 
     def score(self, query: str, docs: list[str]) -> list[float]:
         self.seen.extend(docs)
-        return [
-            next((v for k, v in self._map.items() if k in d.lower()), 0.0)
-            for d in docs
-        ]
+        return [next((v for k, v in self._map.items() if k in d.lower()), 0.0) for d in docs]
 
 
 class _Logits:
@@ -61,9 +58,7 @@ class _Logits:
         self._by_word = by_word
 
     def score(self, query: str, docs: list[str]) -> list[float]:
-        return [
-            next((v for w, v in self._by_word.items() if w in d), -9.0) for d in docs
-        ]
+        return [next((v for w, v in self._by_word.items() if w in d), -9.0) for d in docs]
 
 
 def test_rrf_final_relation_and_lane_fetch(tmp_path: Path) -> None:
@@ -84,9 +79,7 @@ def test_rrf_final_relation_and_lane_fetch(tmp_path: Path) -> None:
         expected_rel = w.temporal + w.popularity + w.importance
         assert hit.relevance == approx(expected_rel)
 
-        res_time = search.search(
-            "alpha beta", limit=5, since="2024-01-01", until="2024-12-31"
-        )
+        res_time = search.search("alpha beta", limit=5, since="2024-01-01", until="2024-12-31")
         assert res_time.lane_fetch == 5 * cfg.search.lane_fetch_time_mult == 50
     finally:
         db.close()
@@ -96,9 +89,7 @@ def test_rrf_final_relation_and_lane_fetch(tmp_path: Path) -> None:
     ("threshold", "expect_abstained"),
     [(999.0, True), (0.0, False)],
 )
-def test_abstain_threshold_gate(
-    tmp_path: Path, threshold: float, expect_abstained: bool
-) -> None:
+def test_abstain_threshold_gate(tmp_path: Path, threshold: float, expect_abstained: bool) -> None:
     cfg = _cfg(
         **{
             "search.rerank.enabled": False,
@@ -133,13 +124,9 @@ def test_event_time_filter_and_utc_normalization(tmp_path: Path) -> None:
         before = store.create_i_frame(
             "gop-2", "beta before", event_time="2025-06-01T01:00:00+02:00"
         )
-        inside = store.create_i_frame(
-            "gop-3", "beta inside", event_time="2025-06-01T00:30:00Z"
-        )
+        inside = store.create_i_frame("gop-3", "beta inside", event_time="2025-06-01T00:30:00Z")
         assert before.event_time == "2025-05-31T23:00:00"
-        assert {h.frame.id for h in search.search("beta", since="2025-06-01").hits} == {
-            inside.id
-        }
+        assert {h.frame.id for h in search.search("beta", since="2025-06-01").hits} == {inside.id}
         assert {
             h.frame.id
             for h in search.search(
@@ -154,12 +141,8 @@ def test_created_at_utc_decay_and_legacy_offset_rows(tmp_path: Path) -> None:
     cfg = _cfg(**{"search.rerank.enabled": False, "search.abstain.enabled": False})
     db, store, _, _ = _build(tmp_path, cfg=cfg)
     try:
-        aware = store.create_i_frame(
-            "gop-1", "alpha aware", created_at="2025-01-10T12:00:00+02:00"
-        )
-        naive = store.create_i_frame(
-            "gop-2", "alpha naive", created_at="2025-01-10T10:00:00"
-        )
+        aware = store.create_i_frame("gop-1", "alpha aware", created_at="2025-01-10T12:00:00+02:00")
+        naive = store.create_i_frame("gop-2", "alpha naive", created_at="2025-01-10T10:00:00")
         legacy = store.create_i_frame("gop-3", "alpha legacy")
         db.conn.execute(
             "UPDATE memory_frames SET created_at=? WHERE id=?",
@@ -214,16 +197,12 @@ def test_like_fallback_escapes_metacharacters(tmp_path: Path) -> None:
 def test_quarantine_exclusion_across_lanes_rerank_and_kg(tmp_path: Path) -> None:
     cfg = _cfg(**{"search.rerank.enabled": True, "search.abstain.enabled": False})
     reranker = _ContentReranker()
-    db, store, search, kg = _build(
-        tmp_path, cfg=cfg, reranker=reranker, with_kg=True
-    )
+    db, store, search, kg = _build(tmp_path, cfg=cfg, reranker=reranker, with_kg=True)
     assert kg is not None
     try:
         ok1 = store.create_i_frame("gop-1", "alpha one", trust="trusted")
         ok2 = store.create_i_frame("gop-1", "alpha two", trust="low")
-        q = store.create_i_frame(
-            "gop-1", "alpha three 100%", trust="quarantined"
-        )
+        q = store.create_i_frame("gop-1", "alpha three 100%", trust="quarantined")
         entity = kg.create_entity("concept", "alpha")
         kg.link_entity_frame(entity.id, ok1.id)
         kg.link_entity_frame(entity.id, q.id)
@@ -269,21 +248,15 @@ def test_contextual_boost_linked_outranks_unlinked_and_zero_weight_equalizes(
                 "scoring.profiles.balanced.weights.importance": 0.25,
             }
         )
-        zero_search = HybridSearch(
-            db, store, zero_cfg, embedder=store.embedder, kg=kg
-        )
+        zero_search = HybridSearch(db, store, zero_cfg, embedder=store.embedder, kg=kg)
         res_zero = zero_search.search("alpha", limit=10)
         by_id_zero = {h.frame.id: h for h in res_zero.hits}
-        assert by_id_zero[linked.id].relevance == approx(
-            by_id_zero[unlinked.id].relevance
-        )
+        assert by_id_zero[linked.id].relevance == approx(by_id_zero[unlinked.id].relevance)
     finally:
         db.close()
 
 
-def _both(
-    tmp_path: Path, query: str, **overrides: object
-) -> tuple[SearchResult, SearchResult]:
+def _both(tmp_path: Path, query: str, **overrides: object) -> tuple[SearchResult, SearchResult]:
     off = _cfg(**{**overrides, "search.rerank.enabled": False})
     on = _cfg(**{**overrides, "search.rerank.enabled": True})
     db1, store1, s_off, _ = _build(tmp_path, cfg=off, name="off.mind")
@@ -316,16 +289,12 @@ def test_abstention_contract_across_evidence_levels(tmp_path: Path) -> None:
     assert on.hits[0].final == on.hits[0].rerank == approx(-2.0)
     assert on.hits[0].fusion > 0.0
 
-    w_off, w_on = _both(
-        tmp_path / "weak", "alpha", **{"search.abstain.threshold": 10.0}
-    )
+    w_off, w_on = _both(tmp_path / "weak", "alpha", **{"search.abstain.threshold": 10.0})
     for res in (w_off, w_on):
         assert res.abstained and res.hits == []
         assert res.abstention is not None and res.abstention.reason == "below_threshold"
 
-    d_off, d_on = _both(
-        tmp_path / "dis", "alpha", **{"search.abstain.enabled": False}
-    )
+    d_off, d_on = _both(tmp_path / "dis", "alpha", **{"search.abstain.enabled": False})
     for res in (d_off, d_on):
         assert res.abstention is not None and res.abstention.reason == "disabled"
         assert res.abstention.top_score is not None and res.hits

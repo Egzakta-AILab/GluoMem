@@ -17,7 +17,10 @@ from gluomem.bench.registry import REGISTRY
 from gluomem.bench.replay import REPLAY_FIXTURES, ReplayFixtureError, load_registered_fixture
 
 
-@pytest.mark.parametrize("entry_id", ["mab_fixture", "sr_en_kvark_v1", "minja_adversarial_v1"])
+@pytest.mark.parametrize(
+    "entry_id",
+    ["mab_fixture", "sr_en_kvark_v1", "sr_en_translation_v1", "minja_adversarial_v1"],
+)
 @pytest.mark.parametrize("unpinned", [False, True])
 def test_generated_fixtures_require_matching_pins(
     entry_id: str, unpinned: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -22,7 +22,7 @@ from gluomem.write.cognify import (
     retire_conflicting_relations,
 )
 from gluomem.write.dedup import SemanticDeduper
-from gluomem.write.gate import InjectionScanner, admit
+from gluomem.write.gate import Scanner, admit, make_scanner
 from gluomem.write.lanes import Observation, extract_observations, lane_importance
 
 if TYPE_CHECKING:
@@ -98,9 +98,7 @@ def load_locomo(path: str | Path) -> list[Conversation]:
             raw_turns = conv[f"session_{n}"]
             raw_dt = conv.get(f"session_{n}_date_time")
             if raw_dt is None:
-                raise ValueError(
-                    f"{path}: sample '{conv_id}' session_{n} has no date_time"
-                )
+                raise ValueError(f"{path}: sample '{conv_id}' session_{n} has no date_time")
             turns: list[Turn] = []
             for t in raw_turns:
                 text = t.get("text", "")
@@ -114,9 +112,7 @@ def load_locomo(path: str | Path) -> list[Conversation]:
                         dia_id=t.get("dia_id"),
                     )
                 )
-            sessions.append(
-                Session(index=n, date_time=_parse_locomo_datetime(raw_dt), turns=turns)
-            )
+            sessions.append(Session(index=n, date_time=_parse_locomo_datetime(raw_dt), turns=turns))
             n += 1
         if not sessions:
             raise ValueError(f"{path}: sample '{conv_id}' has no sessions")
@@ -176,9 +172,7 @@ def find_subject_frames(
             overlap[fid] = overlap.get(fid, 0) + 1
 
     candidate_ids = [
-        fid
-        for fid, count in overlap.items()
-        if count >= cfg.write.subject.min_entity_overlap
+        fid for fid, count in overlap.items() if count >= cfg.write.subject.min_entity_overlap
     ]
     if not candidate_ids:
         return []
@@ -206,9 +200,7 @@ def find_base_frame(
     scope: MemoryScope | None = None,
 ) -> Frame | None:
     """Return the highest-overlap same-subject base I-frame in ``gop``."""
-    frames = find_subject_frames(
-        entity_ids, gop, kg=kg, store=store, cfg=cfg, scope=scope
-    )
+    frames = find_subject_frames(entity_ids, gop, kg=kg, store=store, cfg=cfg, scope=scope)
     return frames[0] if frames else None
 
 
@@ -227,9 +219,7 @@ def find_edge_conflict_frames(
     seen: set[int] = set()
     for rel in relations:
         for rtype in predicate_family(rel.relation_type, cfg.kg):
-            for existing in kg.find_valid_relations(
-                rel.source_id, rtype, scope=s
-            ):
+            for existing in kg.find_valid_relations(rel.source_id, rtype, scope=s):
                 if existing.id == rel.id or existing.target_id == rel.target_id:
                     continue
                 source_fids = set(kg.frame_ids_for_entity(rel.source_id, scope=s))
@@ -286,7 +276,7 @@ def _admit_observation(
     session_iso: str,
     graph: ResolvedGraph,
     facade: Extractors,
-    scanner: InjectionScanner,
+    scanner: Scanner,
     store: FrameStore,
     kg: KnowledgeGraph,
     cfg: AppConfig,
@@ -302,9 +292,7 @@ def _admit_observation(
     report.entities += len(graph.entity_ids)
     report.relations += len(graph.relation_ids)
 
-    obs_deduper = (
-        deduper if (deduper is not None and obs.lane in cfg.write.dedup.lanes) else None
-    )
+    obs_deduper = deduper if (deduper is not None and obs.lane in cfg.write.dedup.lanes) else None
 
     subject_frames = find_subject_frames(
         graph.entity_ids, gop, kg=kg, store=store, cfg=cfg, scope=s
@@ -401,9 +389,7 @@ def _admit_observation(
 
     if cfg.write.cognify.enabled and cfg.write.cognify.retire_conflicting_edges:
         report.retired_edges += len(
-            retire_conflicting_relations(
-                graph.relations, kg=kg, kg_cfg=cfg.kg, scope=s
-            )
+            retire_conflicting_relations(graph.relations, kg=kg, kg_cfg=cfg.kg, scope=s)
         )
 
 
@@ -411,7 +397,7 @@ def ingest_conversation(
     conv: Conversation,
     *,
     facade: Extractors,
-    scanner: InjectionScanner,
+    scanner: Scanner,
     store: FrameStore,
     kg: KnowledgeGraph,
     cfg: AppConfig,
@@ -422,9 +408,7 @@ def ingest_conversation(
     report = IngestReport(conversations=1, sessions=len(conv.sessions))
 
     deduper = (
-        SemanticDeduper(
-            store.embedder, threshold=cfg.write.dedup.similarity_threshold
-        )
+        SemanticDeduper(store.embedder, threshold=cfg.write.dedup.similarity_threshold)
         if cfg.write.dedup.mode == "semantic"
         else None
     )
@@ -449,9 +433,7 @@ def ingest_conversation(
                     importance=raw_importance,
                     source="import",
                     event_time=session_iso,
-                    created_at=(
-                        session_iso if cfg.write.backdate_created_at else None
-                    ),
+                    created_at=(session_iso if cfg.write.backdate_created_at else None),
                     scope=s,
                 )
                 _count_frame(result, report)
@@ -479,14 +461,11 @@ def ingest_conversation(
                 cfg=cfg,
             )
         except ExtractionError as exc:
-            report.extraction_errors.append(
-                f"{conv.conv_id}:session:{session.index}: {exc}"
-            )
+            report.extraction_errors.append(f"{conv.conv_id}:session:{session.index}: {exc}")
             continue
 
         flagged = [
-            scanner.scan(obs.text, context="agent_inferred").score
-            >= cfg.safety.block_threshold
+            scanner.scan(obs.text, context="agent_inferred").score >= cfg.safety.block_threshold
             for obs in observations
         ]
         clean_idx = [i for i, f in enumerate(flagged) if not f]
@@ -495,15 +474,11 @@ def ingest_conversation(
             facade=facade,
             kg=kg,
             cfg=cfg,
-            valid_from_list=[
-                _event_time_for(observations[i], session_iso) for i in clean_idx
-            ],
+            valid_from_list=[_event_time_for(observations[i], session_iso) for i in clean_idx],
             max_workers=cfg.write.parallelism,
             scope=s,
         )
-        graphs: list[ResolvedGraph | Exception] = [
-            ResolvedGraph() for _ in observations
-        ]
+        graphs: list[ResolvedGraph | Exception] = [ResolvedGraph() for _ in observations]
         for i, g in zip(clean_idx, clean_graphs, strict=True):
             graphs[i] = g
 
@@ -530,9 +505,7 @@ def ingest_conversation(
                     scope=s,
                 )
             except ExtractionError as exc:
-                report.extraction_errors.append(
-                    f"{conv.conv_id}:{obs.lane}: {exc}"
-                )
+                report.extraction_errors.append(f"{conv.conv_id}:{obs.lane}: {exc}")
                 continue
             touched.add(_lane_gop(conv.conv_id, obs))
 
@@ -561,7 +534,7 @@ def ingest_path(
         db, embedder=embedder, chunking=cfg.chunking, scope=s, lifecycle=cfg.lifecycle
     )
     kg = KnowledgeGraph(db, scope=s)
-    scanner = InjectionScanner(cfg.safety)
+    scanner = make_scanner(cfg)
 
     total = IngestReport()
     for conv in conversations:

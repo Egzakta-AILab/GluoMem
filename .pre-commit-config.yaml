@@ -23,6 +23,12 @@ repos:
         language: system
         types: [python]
         require_serial: true
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude --check
+        language: system
+        types: [python]
+        require_serial: true
       - id: pyrefly
         name: pyrefly check
         entry: uv run pyrefly check

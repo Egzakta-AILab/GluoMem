@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from gluomem.frames.eligibility import is_recall_eligible
 from gluomem.frames.store import (
@@ -34,6 +34,13 @@ class ScanVerdict:
     matched: list[str] = field(default_factory=list)
 
 
+@runtime_checkable
+class Scanner(Protocol):
+    """Protocol for write-gate prompt-injection / safety scanners."""
+
+    def scan(self, content: str, *, context: str = "") -> ScanVerdict: ...
+
+
 class InjectionScanner:
     """Regex injection scanner over ``safety.scanner.patterns``."""
 
@@ -48,13 +55,17 @@ class InjectionScanner:
         folded = fold_to_ascii(content)
         needs_folded_pass = folded != content.lower()
         for pattern, weight in self._patterns:
-            if (
-                pattern.search(content) is not None
-                or (needs_folded_pass and pattern.search(folded) is not None)
+            if pattern.search(content) is not None or (
+                needs_folded_pass and pattern.search(folded) is not None
             ):
                 matched.append(pattern.pattern)
                 score = max(score, weight)
         return ScanVerdict(score=score, matched=matched)
+
+
+def make_scanner(cfg: AppConfig) -> Scanner:
+    """Build the configured write-gate scanner from ``cfg``."""
+    return InjectionScanner(cfg.safety)
 
 
 _STOPWORDS = frozenset(
@@ -64,14 +75,20 @@ _STOPWORDS = frozenset(
     ).split()
 )
 
+_SEQUENCE_LABELS = frozenset({"note", "evidencij", "evidencija", "entry", "item"})
+
 
 def _fact_terms(text: str) -> frozenset[str]:
-    """Content words of ``text``; digits always count, other one-letter words do not."""
-    return frozenset(
-        t
-        for t in canonical_terms(text)
-        if t not in _STOPWORDS and (len(t) > 1 or t.isdigit())
-    )
+    """Content words of ``text``; digits always count except serial counters after log labels."""
+    terms = canonical_terms(text)
+    filtered: set[str] = set()
+    for idx, term in enumerate(terms):
+        if term in _STOPWORDS or (len(term) <= 1 and not term.isdigit()):
+            continue
+        if term.isdigit() and idx > 0 and terms[idx - 1] in _SEQUENCE_LABELS:
+            continue
+        filtered.add(term)
+    return frozenset(filtered)
 
 
 def _restates_with_new_value(
@@ -134,7 +151,7 @@ def admit(
     content: str,
     *,
     gop: str,
-    scanner: InjectionScanner,
+    scanner: Scanner,
     store: FrameStore,
     kg: KnowledgeGraph | None,
     cfg: AppConfig,
@@ -158,10 +175,11 @@ def admit(
     verified_by_user: bool = False,
     scope_wide: bool = False,
     prepared: _PreparedIndex | None = None,
+    verdict: ScanVerdict | None = None,
 ) -> AdmitResult:
     """Admit one write: scan, dedup, create frame, and link KG entities."""
     s = resolve_scope(scope, default=store.scope)
-    verdict = scanner.scan(content, context=source)
+    verdict = verdict if verdict is not None else scanner.scan(content, context=source)
     if verdict.score >= cfg.safety.block_threshold:
         if cfg.safety.fail_mode == "reject":
             return AdmitResult(admitted=False, frame=None, verdict=verdict, trust=trust)

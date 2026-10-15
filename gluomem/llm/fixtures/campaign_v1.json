@@ -6,7 +6,7 @@
   "daily_cap_usd": 10,
   "evaluator": {
     "module": "gluomem.llm.extraction_eval",
-    "fingerprint": "85bb7e3b1ad782ef28c2c5da2b1ed20d6bc8b6dbc8ac39c63ada4565a7e0623d"
+    "fingerprint": "8faaf4e191805b2524312a2b41f12bd644fcad50682a4f25a269f73ccbfb8ec3"
   },
   "model_roles": {
     "extraction": {"models": ["deepseek-flash"], "fixed": true, "optimized": "prompt", "note": "candidate prompts change; the model does not"},

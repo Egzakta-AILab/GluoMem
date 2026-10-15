@@ -12,8 +12,7 @@ if TYPE_CHECKING:
 class Reranker(Protocol):
     """Re-score ``(query, docs)`` pairs into a logit per document."""
 
-    def score(self, query: str, docs: list[str]) -> list[float]:
-        ...
+    def score(self, query: str, docs: list[str]) -> list[float]: ...
 
 
 class StubReranker:

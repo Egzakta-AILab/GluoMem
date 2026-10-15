@@ -109,6 +109,21 @@ def test_sdk_full_lifecycle(
     assert done is not None and done.status == "succeeded"
     assert sdk.get_job(job.id).status == "succeeded"
     assert len(sdk.export_memories()["active_memories"]) == 3
+    ep = sdk.ingest_event(
+        event_id="ep-1",
+        source_ref="chat-3",
+        content="Yesterday a transient outage occurred.",
+        created_at="2026-01-01T00:00:00",
+    ).frames[0]
+    assert ep.kind == "episode"
+    swept = sdk.sweep_expired(now_iso="2027-01-01T00:00:00")
+    assert swept.swept_frame_ids == [ep.id]
+    sweep_job = sdk.enqueue_sweep_expired(
+        now_iso="2027-01-02T00:00:00", dedup_key="sweep-2027-01-02"
+    )
+    assert sweep_job.job_type == "sweep_expired"
+    done_sweep = worker.run_once()
+    assert done_sweep is not None and done_sweep.id == sweep_job.id
     assert sdk.retract_source("doc").forgotten_frame_ids == [candidate.id]
     assert sdk.forget_memory(replacement.id).frame_id == replacement.id
     assert len(sdk.list_memories().active_frames) == 1

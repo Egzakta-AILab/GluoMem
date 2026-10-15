@@ -12,6 +12,7 @@ from gluomem.frames.lifecycle import (
     current_scope_generation,
     export_memories,
     forget_memory,
+    forget_scope,
     retract_source,
     version_lineage,
 )
@@ -76,20 +77,31 @@ def test_claims_embed_before_transaction_and_crash_retries(frame_store, mind_db,
 
     original = gate.admit
     prepare = frame_store._prepare_index
+    scanner = gate.make_scanner(cfg)
+    raw_scan = scanner.scan
+    scan_calls = 0
     calls = 0
 
     def outside_transaction(text):
         assert not mind_db.in_transaction
         return prepare(text)
 
+    def scan_outside_transaction(content: str, *, context: str = ""):
+        nonlocal scan_calls
+        assert not mind_db.in_transaction
+        scan_calls += 1
+        return raw_scan(content, context=context)
+
     def crash_on_second(*args, **kwargs):
         nonlocal calls
         calls += 1
+        assert kwargs.get("verdict") is not None
         if calls == 2:
             raise RuntimeError("crash")
         return original(*args, **kwargs)
 
     monkeypatch.setattr(frame_store, "_prepare_index", outside_transaction)
+    monkeypatch.setattr(scanner, "scan", scan_outside_transaction)
     monkeypatch.setattr(gate, "admit", crash_on_second)
     event = SourceEvent(
         event_id="evt",
@@ -99,7 +111,8 @@ def test_claims_embed_before_transaction_and_crash_retries(frame_store, mind_db,
         ],
     )
     with pytest.raises(RuntimeError, match="crash"):
-        ingest_source_event(event, store=frame_store, cfg=cfg)
+        ingest_source_event(event, store=frame_store, cfg=cfg, scanner=scanner)
+    assert scan_calls == 2
     assert frame_store.count_frames() == 0
     assert mind_db.scalar("SELECT COUNT(*) FROM source_events") == 0
     assert mind_db.scalar("SELECT COUNT(*) FROM memory_provenance") == 0
@@ -111,9 +124,11 @@ def test_claims_embed_before_transaction_and_crash_retries(frame_store, mind_db,
         raise RuntimeError("fenced")
 
     with pytest.raises(RuntimeError, match="fenced"):
-        ingest_source_event(event, store=frame_store, cfg=cfg, write_guard=guard)
+        ingest_source_event(event, store=frame_store, cfg=cfg, scanner=scanner, write_guard=guard)
+    assert scan_calls == 4
     assert mind_db.scalar("SELECT COUNT(*) FROM source_events") == 0
-    retry = ingest_source_event(event, store=frame_store, cfg=cfg)
+    retry = ingest_source_event(event, store=frame_store, cfg=cfg, scanner=scanner)
+    assert scan_calls == 6
     assert not retry.deduplicated and len(retry.frames) == 2
 
 
@@ -387,3 +402,111 @@ def test_lineage_and_hash_are_scoped(frame_store, mind_db, mock_embedder):
         other.lineage(replacement.id)
     with pytest.raises(KeyError):
         other._content_hash_of(frame.id)
+
+
+def test_forget_scope_erases_all_scope_data_and_preserves_siblings(
+    frame_store, mind_db, mock_embedder, kg, cfg, assert_no_recall
+):
+    from gluomem.kg.graph import KnowledgeGraph
+    from gluomem.service.jobs import JobQueue
+
+    sibling_scope = MemoryScope("other", "user", "personal")
+    sibling_store = FrameStore(mind_db, mock_embedder, scope=sibling_scope)
+    sibling_kg = KnowledgeGraph(mind_db, scope=sibling_scope)
+    sibling_frame = ingest_source_event(
+        _evt("Sibling secret BETA.", "sib-1", scope=sibling_scope),
+        store=sibling_store,
+        cfg=cfg,
+    ).frames[0]
+    sibling_ent = sibling_kg.create_entity("secret", "BETA", scope=sibling_scope)
+    sibling_kg.link_entity_frame(sibling_ent.id, sibling_frame.id, scope=sibling_scope)
+
+    text = "Primary scope secret GAMMA."
+    evt = _evt(text, "pri-1")
+    frame = ingest_source_event(evt, store=frame_store, cfg=cfg).frames[0]
+    JobQueue(mind_db.backend).enqueue(dedup_key="pri-1:1", payload=evt.model_dump(mode="json"))
+    ent = kg.create_entity("secret", "GAMMA")
+    unlinked = kg.create_entity("project", "OrphanProject")
+    kg.link_entity_frame(ent.id, frame.id)
+    rel = kg.create_relation(unlinked.id, ent.id, "has_secret")
+
+    res = forget_scope(frame_store)
+    assert res.forgotten_frame_ids == [frame.id]
+    assert set(res.retired_entity_ids) == {ent.id, unlinked.id}
+    assert res.retired_relation_ids == [rel.id]
+    assert res.scope_generation == 1
+    assert_no_recall("GAMMA", db=mind_db, store=frame_store, kg=kg)
+    assert_no_recall("OrphanProject", db=mind_db, store=frame_store, kg=kg)
+    assert sibling_store.get_frame(sibling_frame.id).content == "Sibling secret BETA."
+    assert sibling_kg.get_entity(sibling_ent.id, scope=sibling_scope).name == "BETA"
+
+
+def test_sweep_expired_episodes_reclaims_indexes_and_retires_orphaned_kg(
+    frame_store, mind_db, mock_embedder, kg, cfg
+):
+    from gluomem.frames.expiry import sweep_expired_episodes
+
+    cfg = cfg.with_overrides({"lifecycle.episode_ttl_days": 7})
+    store = FrameStore(mind_db, mock_embedder, lifecycle=cfg.lifecycle)
+    expired = ingest_source_event(
+        _evt(
+            "Yesterday the staging Redis cluster restarted.",
+            "ep-exp",
+            created_at="2099-01-01T12:00:00",
+        ),
+        store=store,
+        cfg=cfg,
+    ).frames[0]
+    pinned = ingest_source_event(
+        _evt(
+            "Yesterday the production failover drill completed.",
+            "ep-pin",
+            created_at="2099-01-01T12:00:00",
+            pinned=True,
+        ),
+        store=store,
+        cfg=cfg,
+    ).frames[0]
+    active_ep = ingest_source_event(
+        _evt(
+            "Today the canary deployment started.",
+            "ep-act",
+            created_at="2099-01-06T12:00:00",
+        ),
+        store=store,
+        cfg=cfg,
+    ).frames[0]
+
+    orphan_ent = kg.create_entity("service", "StagingRedis")
+    shared_ent = kg.create_entity("service", "CanaryDeploy")
+    kg.link_entity_frame(orphan_ent.id, expired.id)
+    kg.link_entity_frame(shared_ent.id, expired.id)
+    kg.link_entity_frame(shared_ent.id, active_ep.id)
+
+    assert store.index_state(expired.id).ready
+    gen_before = current_scope_generation(mind_db.backend)
+
+    res = sweep_expired_episodes(store, now_iso="2099-01-10T00:00:00")
+    assert res.swept_frame_ids == [expired.id]
+    assert res.retired_entity_ids == [orphan_ent.id]
+    assert res.scope_generation == gen_before + 1
+
+    swept_frame = store.get_frame(expired.id)
+    assert swept_frame.status == "expired"
+    idx_state = store.index_state(expired.id)
+    assert not idx_state.fts_current
+    assert idx_state.frame_vec == 0
+    assert idx_state.chunks == 0
+    assert idx_state.chunk_vecs == 0
+    assert store.repair_indexes() == []
+
+    assert store.get_frame(pinned.id).status == "active"
+    assert store.index_state(pinned.id).ready
+    assert store.get_frame(active_ep.id).status == "active"
+    assert store.index_state(active_ep.id).ready
+    assert kg.find_valid_entities("StagingRedis", cfg.kg) == []
+    assert len(kg.find_valid_entities("CanaryDeploy", cfg.kg)) == 1
+
+    noop = sweep_expired_episodes(store, now_iso="2099-01-10T00:00:00")
+    assert noop.swept_frame_ids == []
+    assert noop.scope_generation == res.scope_generation
