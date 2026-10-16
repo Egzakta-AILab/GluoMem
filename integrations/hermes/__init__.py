@@ -55,9 +55,10 @@ class HermesMemoryAdapter:
         scope_override: MemoryScope | None = None,
     ) -> dict[str, Any]:
         """Execute a GluoMem tool call from Hermes Agent."""
+        # Compatibility argument retained, but never authorizes scope escalation.
+        # Pin at the boundary even with older MemoryToolPack implementations.
         args = dict(arguments or {})
-        if scope_override is not None:
-            args["scope"] = scope_override.as_dict()
+        args["scope"] = self._scope.as_dict()
         return self._pack.dispatch(tool_name, args)
 
 

@@ -61,15 +61,26 @@ def test_memory_toolpack_schemas_and_lifecycle(tmp_path: Path) -> None:
         assert remembered["frames"][0]["kind"] == "procedure"
 
         recalled = pack.dispatch("memory_recall", {"query": "pytest before PR", "k": 5})
+        assert not any(h["frame"]["id"] == frame_id for h in recalled["hits"])
+        assert remembered["frames"][0]["status"] == "candidate"
+        assert remembered["frames"][0]["verified_by_user"] is False
+        client.review_memory(frame_id, "accept", scope=scope)
+        recalled = pack.dispatch("memory_recall", {"query": "pytest before PR", "k": 5})
         assert any(h["frame"]["id"] == frame_id for h in recalled["hits"])
 
-        corrected = pack.dispatch(
+        proposed = pack.dispatch(
             "memory_correct",
             {
                 "frame_id": frame_id,
                 "new_content": "Always run uv run pytest -q before opening a PR.",
             },
         )
+        assert proposed["requires_review"] is True
+        assert proposed["frames"][0]["status"] == "candidate"
+        # Authenticated host confirmation, not an autonomous tool invocation.
+        corrected = client.correct_memory(
+            frame_id, "Always run uv run pytest -q before opening a PR.", scope=scope
+        ).model_dump(mode="json")
         new_id = corrected["replacement_frame"]["id"]
         assert new_id != frame_id
 
@@ -130,7 +141,8 @@ def test_mcp_stdio_and_http_jsonrpc(tmp_path: Path) -> None:
     assert [r["id"] for r in replies] == [1, 2, 3, 4]
     assert len(replies[1]["result"]["tools"]) == 6
     assert replies[2]["result"]["isError"] is False
-    assert len(replies[3]["result"]["structuredContent"]["hits"]) >= 1
+    assert replies[2]["result"]["structuredContent"]["frames"][0]["status"] == "candidate"
+    assert replies[3]["result"]["structuredContent"]["hits"] == []
 
     # Also verify HTTP /mcp mount on FastAPI service
     app = create_app(db, store, cfg=cfg, service_key="test-secret-key")

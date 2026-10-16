@@ -7,7 +7,11 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from gluomem.config.app_config import LifecycleConfig
-from gluomem.frames.generation import bump_scope_generation, get_scope_generation
+from gluomem.frames.generation import (
+    bump_scope_generation,
+    get_scope_generation,
+    lock_scope_generation,
+)
 from gluomem.storage.scope import MemoryScope, resolve_scope, scope_sql
 from gluomem.timeutil import now_utc_iso, parse_utc, to_storage, utc_key
 
@@ -46,6 +50,7 @@ def sweep_expired_episodes(
     now_s = utc_key(now_iso or now_utc_iso())
     backend = store._backend
     with backend.transaction():
+        lock_scope_generation(backend, eff_scope)
         rows = backend.fetchall(
             f"SELECT id FROM memory_frames WHERE {scope_sql()} "
             "AND status IN ('active', 'candidate') AND pinned = 0 "

@@ -85,6 +85,13 @@ project-excludes = [
     "**/.venv/**",
     "**/__pycache__/**",
     "**/.pytest_cache/**",
+    # This independent package is checked against the actual Hermes host source.
+    "integrations/hermes/gluomem_hermes/**",
+    # Host contract tests are checked separately with the plugin and Hermes import roots.
+    "tests/test_hermes_native_cli.py",
+    "tests/test_hermes_native_provider.py",
+    "tests/test_hermes_outbox_backpressure.py",
+    "tests/test_hermes_host_compat.py",
 ]
 replace-imports-with-any = [
     "alembic",

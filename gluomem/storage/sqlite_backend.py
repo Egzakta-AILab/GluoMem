@@ -24,7 +24,7 @@ from gluomem.storage.scope import (
 )
 from gluomem.timeutil import now_iso as format_now_iso
 
-SQLITE_SCHEMA_VERSION = 1
+SQLITE_SCHEMA_VERSION = 2
 
 _SCHEMA_PATH: Path = Path(__file__).with_name("schema.sql")
 
@@ -77,13 +77,29 @@ class SqliteBackend:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        if version == SQLITE_SCHEMA_VERSION:
+        if version in (1, SQLITE_SCHEMA_VERSION):
             for table in ("sessions", "memory_frames", "knowledge_entities", "knowledge_relations"):
                 columns = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
                 if not {"tenant_id", "principal_id", "namespace"} <= columns:
                     raise IncompatibleSchemaError(
                         "Missing SQLite scope columns; recreate the database"
                     )
+            if version == 1:
+                self.conn.executescript(
+                    "BEGIN IMMEDIATE;\n"
+                    "CREATE TABLE IF NOT EXISTS source_retractions ("
+                    "tenant_id TEXT NOT NULL, principal_id TEXT NOT NULL, "
+                    "namespace TEXT NOT NULL, source_ref TEXT NOT NULL, "
+                    "retracted_at TEXT NOT NULL, "
+                    "PRIMARY KEY (tenant_id, principal_id, namespace, source_ref));"
+                    "INSERT INTO source_retractions "
+                    "(tenant_id, principal_id, namespace, source_ref, retracted_at) "
+                    "SELECT tenant_id, principal_id, namespace, source_ref, MIN(created_at) "
+                    "FROM memory_tombstones WHERE reason = 'retracted' AND source_ref IS NOT NULL "
+                    "GROUP BY tenant_id, principal_id, namespace, source_ref "
+                    "ON CONFLICT (tenant_id, principal_id, namespace, source_ref) DO NOTHING;"
+                    f"PRAGMA user_version={SQLITE_SCHEMA_VERSION}; COMMIT;"
+                )
             return
         if version != 0 or tables:
             raise IncompatibleSchemaError(

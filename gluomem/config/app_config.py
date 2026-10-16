@@ -526,7 +526,7 @@ class WriteConfig(BaseModel):
 
 
 class DspyCacheConfig(BaseModel):
-    disk: bool = True
+    disk: bool = False
     dir: str = "~/.gluomem/dspy_cache"
 
 

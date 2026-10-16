@@ -1,0 +1,6 @@
+name: gluomem
+version: 0.1.0
+description: "Private GluoMem HTTP memory provider with opt-in capture and durable profile-local outbox."
+author: Egzakta
+hooks: []
+python_dependencies: []

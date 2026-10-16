@@ -15,6 +15,7 @@ from gluomem.frames.expiry import (
 from gluomem.frames.generation import (
     bump_scope_generation,
     get_scope_generation,
+    lock_scope_generation,
 )
 from gluomem.frames.generation import current_scope_generation as current_scope_generation
 from gluomem.frames.provenance import (
@@ -23,6 +24,7 @@ from gluomem.frames.provenance import (
     get_frames_provenance,
 )
 from gluomem.frames.review import list_review_queue
+from gluomem.frames.source_fences import lock_source
 from gluomem.storage.scope import (
     MEMORY_KINDS,
     MemoryKind,
@@ -172,6 +174,14 @@ def _redact_payloads(store: FrameStore, frames: list[Frame], *, scope: MemorySco
     backend = store._backend
     ids = [f.id for f in frames]
     ph = ",".join("?" for _ in ids)
+    # Summaries have no claim-level provenance: discard the affected sessions'
+    # entire derived summary, not substring matches that miss paraphrases.
+    gops = sorted({f.gop_id for f in frames})
+    gph = ",".join("?" for _ in gops)
+    backend.execute(
+        f"UPDATE sessions SET summary = NULL WHERE {scope_sql()} AND gop_id IN ({gph})",
+        (*scope.as_tuple(), *gops),
+    )
     events = backend.fetchall(
         f"SELECT DISTINCT se.id, se.event_id, se.revision FROM source_events se "
         f"JOIN memory_provenance p ON p.source_event_id = se.id WHERE {scope_sql('se')} "
@@ -293,6 +303,7 @@ def correct_memory(
         raise ValueError("Correction must change the normalized content")
     prepared = store._prepare_index(text)
     with store._backend.transaction():
+        lock_scope_generation(store._backend, scope)
         old = store.get_frame(frame_id, scope=scope)
         if old.status not in ("active", "candidate"):
             raise ValueError("Only active or candidate memories can be corrected")
@@ -341,6 +352,7 @@ def forget_memory(
     scope = resolve_scope(scope, default=store.scope)
     frame = store.get_frame(frame_id, scope=scope)
     with store._backend.transaction():
+        lock_scope_generation(store._backend, scope)
         frames = _forget_chain(store, frame_id, scope)
         eids, rids = _scrub_frames(
             store, frames, scope=scope, status="forgotten", reason=reason, source_ref=source_ref
@@ -361,6 +373,7 @@ def forget_scope(
     eff_scope = resolve_scope(scope, default=store.scope)
     backend = store._backend
     with backend.transaction():
+        lock_scope_generation(backend, eff_scope)
         rows = backend.fetchall(
             f"SELECT id FROM memory_frames WHERE {scope_sql()} AND status != 'forgotten' "
             "ORDER BY id",
@@ -374,6 +387,10 @@ def forget_scope(
         )
         backend.execute(
             f"UPDATE source_events SET payload_json = '{{}}' WHERE {scope_sql()}",
+            eff_scope.as_tuple(),
+        )
+        backend.execute(
+            f"UPDATE sessions SET summary = NULL WHERE {scope_sql()}",
             eff_scope.as_tuple(),
         )
         backend.execute(
@@ -412,15 +429,42 @@ def retract_source(
     store: FrameStore, source_ref: str, *, scope: MemoryScope | None = None
 ) -> RetractSourceResult:
     """Retract one source and scrub its exclusively supported frames in one transaction."""
+    import json
+
+    from gluomem.write.events import _gop_for_source_ref
+
     scope = resolve_scope(scope, default=store.scope)
     backend = store._backend
     with backend.transaction():
+        lock_source(backend, scope, source_ref)
+        backend.execute(
+            "INSERT INTO source_retractions "
+            "(tenant_id, principal_id, namespace, source_ref, retracted_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (tenant_id, principal_id, namespace, source_ref) DO NOTHING",
+            (*scope.as_tuple(), source_ref, now_utc_iso()),
+        )
         rows = backend.fetchall(
             f"SELECT DISTINCT frame_id FROM memory_provenance WHERE {scope_sql()} AND "
             f"source_ref = ? ORDER BY frame_id",
             (*scope.as_tuple(), source_ref),
         )
         ids = [int(r["frame_id"]) for r in rows]
+        # Even corroborated frames can have a summary derived from the removed
+        # source. Erase those summaries without erasing shared frame evidence.
+        backend.execute(
+            f"UPDATE sessions SET summary = NULL WHERE {scope_sql()} AND (gop_id = ? "
+            f"OR gop_id IN (SELECT m.gop_id FROM memory_frames m JOIN memory_provenance p "
+            f"ON p.frame_id = m.id WHERE {scope_sql('m')} AND {scope_sql('p')} "
+            "AND p.source_ref = ?))",
+            (
+                *scope.as_tuple(),
+                _gop_for_source_ref(source_ref),
+                *scope.as_tuple(),
+                *scope.as_tuple(),
+                source_ref,
+            ),
+        )
         backend.execute(
             f"UPDATE source_events SET payload_json = '{{}}' WHERE {scope_sql()} AND "
             f"source_ref = ?",
@@ -430,13 +474,24 @@ def retract_source(
             f"SELECT event_id, revision FROM source_events WHERE {scope_sql()} AND source_ref = ?",
             (*scope.as_tuple(), source_ref),
         )
-        keys = [f"{r['event_id']}:{r['revision']}" for r in events]
-        if keys:
-            ph = ",".join("?" for _ in keys)
+        keys = {f"{r['event_id']}:{r['revision']}" for r in events}
+        # Jobs can precede their source_events receipt. Match the scoped envelope
+        # as well as receipts, using Python JSON for dialect-independent SQL.
+        job_ids = [
+            int(row["id"])
+            for row in backend.fetchall(
+                f"SELECT id, dedup_key, payload FROM memory_jobs WHERE {scope_sql()}",
+                scope.as_tuple(),
+            )
+            if str(row["dedup_key"]) in keys
+            or json.loads(str(row["payload"])).get("source_ref") == source_ref
+        ]
+        if job_ids:
+            ph = ",".join("?" for _ in job_ids)
             backend.execute(
                 f"UPDATE memory_jobs SET payload = '{{}}', last_error = NULL WHERE "
-                f"{scope_sql()} AND dedup_key IN ({ph})",
-                (*scope.as_tuple(), *keys),
+                f"{scope_sql()} AND id IN ({ph})",
+                (*scope.as_tuple(), *job_ids),
             )
         backend.execute(
             f"DELETE FROM memory_provenance WHERE {scope_sql()} AND source_ref = ?",

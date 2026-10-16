@@ -38,6 +38,7 @@ from gluomem.frames.review import (
 from gluomem.frames.review import (
     review_memory as review_memory,
 )
+from gluomem.frames.source_fences import assert_source_not_retracted
 from gluomem.frames.store import FrameSource
 from gluomem.llm.fake import NullExtractors
 from gluomem.llm.outputs import (
@@ -391,6 +392,7 @@ def prepare_source_event(
     backend = store._backend
     scope = resolve_scope(event.scope, default=store.scope)
     scoped_event = event.model_copy(update={"scope": scope})
+    assert_source_not_retracted(backend, scope, scoped_event.source_ref)
     payload_json, payload_hash = _canonical_event_payload(scoped_event)
     eff_cfg = cfg or _default_config()
     eff_scanner = scanner or (_default_scanner() if cfg is None else make_scanner(eff_cfg))
@@ -495,9 +497,6 @@ def commit_source_event(
     from gluomem.write.cognify import link_and_retire_resolved, resolve_cognify_result
     from gluomem.write.gate import admit
 
-    if prepared_event.early_duplicate is not None:
-        return prepared_event.early_duplicate
-
     backend = store._backend
     event = prepared_event.event
     scope = prepared_event.scope
@@ -520,6 +519,11 @@ def commit_source_event(
     now_s = to_storage(event.created_at) or now_utc_iso()
     untrusted_sources = set(eff_cfg.safety.untrusted_sources)
     with backend.transaction():
+        assert_source_not_retracted(backend, scope, event.source_ref, lock=True)
+        if prepared_event.early_duplicate is not None:
+            if write_guard is not None:
+                write_guard()
+            return prepared_event.early_duplicate
         row = backend.fetchone(
             "INSERT INTO source_events (tenant_id, principal_id, namespace, event_id, "
             "revision, source_type, "

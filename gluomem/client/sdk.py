@@ -982,7 +982,7 @@ class EmbeddedMemoryClient:
                             "source_content_hash": entry.source_content_hash,
                             "operation": entry.operation,
                         }
-                        for entry in self.store.lineage(frame.id)
+                        for entry in self.store.lineage(frame.id, scope=eff_scope)
                     ],
                 }
                 for frame in frames

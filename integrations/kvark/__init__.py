@@ -198,7 +198,15 @@ class KvarkMemoryAdapter:
         event_id: str | None = None,
         pinned: bool = False,
     ) -> IngestEventResponse:
-        """Synchronously persist an explicit user-verified memory."""
+        """Persist a memory only after authentic confirmation by the identified user.
+
+        Privileged host-only API: the caller must derive organization/user/workspace
+        from authenticated host context and obtain a real user confirmation of this
+        exact content. Never register this method as an autonomous agent tool or infer
+        confirmation from assistant text, a role label, or a model-provided boolean.
+        Ordinary agent proposals belong in MemoryToolPack.memory_remember instead.
+        This method does not manufacture or authenticate a confirmation receipt.
+        """
         scope = kvark_scope(organization_id, user_id, workspace_id)
         resolved_event_id = (
             event_id or "kvark:explicit:" + hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]

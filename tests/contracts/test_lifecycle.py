@@ -243,8 +243,8 @@ def test_shared_frame_retracts_source_without_resurrection(
     assert result.retained_frame_ids == [shared.id]
     assert result.scope_generation == 1
     assert_no_recall("Aurora", db=mind_db, store=frame_store, kg=kg)
-    replay = ingest_source_event(sole_event, store=frame_store, cfg=cfg)
-    assert replay.deduplicated and replay.frames == []
+    with pytest.raises(ValueError, match="retracted"):
+        ingest_source_event(sole_event, store=frame_store, cfg=cfg)
     assert [p.source_ref for p in get_frame_provenance(mind_db.backend, shared.id)] == ["doc_A"]
 
 

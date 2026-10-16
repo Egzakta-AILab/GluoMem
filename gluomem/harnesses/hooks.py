@@ -25,21 +25,8 @@ def resolve_hook_scope(
     *,
     default_scope: MemoryScope = DEFAULT_SCOPE,
 ) -> MemoryScope:
-    """Resolve ``MemoryScope`` from a hook payload or fall back to ``default_scope``."""
-    raw_scope = payload.get("scope")
-    if isinstance(raw_scope, dict):
-        return MemoryScope(
-            tenant_id=str(raw_scope.get("tenant_id") or default_scope.tenant_id),
-            principal_id=str(raw_scope.get("principal_id") or default_scope.principal_id),
-            namespace=str(raw_scope.get("namespace") or default_scope.namespace),
-        )
-    return MemoryScope(
-        tenant_id=str(payload.get("tenant_id") or default_scope.tenant_id),
-        principal_id=str(
-            payload.get("principal_id") or payload.get("user_id") or default_scope.principal_id
-        ),
-        namespace=str(payload.get("namespace") or default_scope.namespace),
-    )
+    """Return the host-selected identity; hook payloads are not identity authorities."""
+    return default_scope
 
 
 def format_memory_context(hits: list[dict[str, Any]]) -> str:
@@ -161,7 +148,9 @@ def handle_capture_hook(
         or ("hook-" + hashlib.sha256(canonical_seed.encode("utf-8")).hexdigest()[:20])
     )
     revision = int(payload.get("revision", 1))
-    source_type = str(payload.get("source_type", "chat_turn"))
+    # Capture is observational; only a separate authenticated host confirmation may
+    # submit explicit_memory through the privileged SDK ingestion API.
+    source_type = "chat_turn"
 
     kwargs: dict[str, Any] = {
         "event_id": event_id,

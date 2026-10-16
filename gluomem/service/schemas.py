@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from gluomem.client.models import MemoryKind, SourceType
 from gluomem.storage.scope import MemoryScope
@@ -19,7 +19,15 @@ class _Req(BaseModel):
 class IngestEventRequest(_Req):
     event_id: str = Field(min_length=1, max_length=256)
     revision: int = Field(default=1, ge=1)
-    source_type: SourceType = "chat_turn"
+    source_type: Annotated[
+        SourceType,
+        Field(
+            description=(
+                "Host-authenticated provenance. explicit_memory is reserved for authentic user "
+                "confirmation of the exact content; never pass an agent-selected source type."
+            ),
+        ),
+    ] = "chat_turn"
     source_ref: str = Field(min_length=1, max_length=1024)
     messages: list[SourceEventMessage] = Field(default_factory=list, max_length=100)
     content: str | None = Field(default=None, max_length=100_000)
@@ -52,6 +60,19 @@ class IngestEventRequest(_Req):
                     raise ValueError("message timestamp exceeds limit")
                 parse_utc(message.timestamp)
         return values
+
+    @model_validator(mode="after")
+    def bounded_aggregate_content(self) -> IngestEventRequest:
+        """Limit combined content plus all message bodies to 100,000 UTF-8 bytes.
+
+        This bounds the extraction input, not the raw HTTP body; deployments must
+        separately limit request bytes at their trusted reverse proxy.
+        """
+        total = len((self.content or "").encode("utf-8"))
+        total += sum(len(message.content.encode("utf-8")) for message in self.messages)
+        if total > 100_000:
+            raise ValueError("aggregate content exceeds 100000 UTF-8 bytes")
+        return self
 
     def to_source_event(self, scope: MemoryScope) -> SourceEvent:
         return SourceEvent.model_validate(
