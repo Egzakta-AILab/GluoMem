@@ -4,6 +4,15 @@
 -- created by SqliteBackend after loading this file because their float[<dim>]
 -- column dimension is parameterized at runtime from config.
 
+CREATE TABLE IF NOT EXISTS source_retractions (
+    tenant_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    retracted_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, principal_id, namespace, source_ref)
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL

@@ -2,9 +2,10 @@
 
 **The binding layer.** In particle physics, gluons bind quarks into stable matter. GluoMem binds an agent's scattered observations into queryable memory. It is a configurable agentic-memory core paired with a benchmark harness for measuring which memory mechanisms improve retrieval and answer quality.
 
-GluoMem is a research-stage Python library (version 0.0.1). Embedded use runs against a single SQLite file per memory store. An optional HTTP service and worker run against SQLite or PostgreSQL 18 with pgvector. Every stored row belongs to a `MemoryScope` (`tenant_id`, `principal_id`, `namespace`); the service authenticates callers with one shared bearer key and takes the scope from request headers. It has no per-user identity or RBAC, so the host application is responsible for deciding which scope a caller may use. The `source` values `personal`, `workspace` and `team_sync` are provenance labels on a frame, not authorization boundaries.
+GluoMem is an in-development Python memory framework (package version 0.1.0), not a certified production service. Embedded use runs against a single SQLite file per memory store. An optional HTTP service and worker run against SQLite or PostgreSQL 18 with pgvector. Every stored row belongs to a `MemoryScope` (`tenant_id`, `principal_id`, `namespace`); the service authenticates trusted hosts with one shared bearer key and takes the scope from request headers. It has no public per-user identity or RBAC, so the host application must decide which scope a caller may use. Provenance labels are not authorization boundaries.
 
 ## What is implemented
+
 
 - **I/P/B memory frames** (a video-codec model of memory): I-frames hold self-contained facts and are content-hash deduplicated per GOP (group of pictures, a topic or session scope); P-frames hold refinements on a base I-frame; B-frames hold corrections written by the contradiction detector. Compaction merges a GOP's P-frames into its I-frame and records each merged frame's identity as lineage. A frame row and its FTS/vector index commit together; `FrameStore.repair_indexes()` rebuilds missing or stale indexes in files written by 0.0.1.
 - **Temporal knowledge graph** with `valid_from`/`valid_to` on relations and relation retirement. A relation that is retired and later re-asserted keeps its earlier interval in `knowledge_relation_history`, so `as_of()` answers false inside the gap. Conflicting facts are ordered by valid time, not by when they were recorded.
@@ -17,9 +18,15 @@ GluoMem is a research-stage Python library (version 0.0.1). Embedded use runs ag
 - **Service and worker** (`gluomem[service]`): `gluomem serve` exposes `/v1/events`, `/v1/memories:recall`, `/v1/memories:sweep-expired`, memory listing, lineage, review, correct, forget, source retraction, export, job status and `/v1/status`; `/healthz` and `/readyz` are unauthenticated and minimal. `gluomem worker` processes durable jobs with leases, retries, dead-lettering and an optional `should_pause` backpressure hook. A job leased before a forget or correction is re-run at the new scope generation instead of writing stale data. `gluomem[client]` provides `GluoMemClient` and `AsyncGluoMemClient`.
 - **Configuration**: one typed config tree (`pydantic-settings`, `GLUOMEM_` prefix). Precedence is `Pydantic defaults < env < with_overrides()`.
 
+## Native Hermes integration
+
+The independently packaged [native Hermes provider](./integrations/hermes/gluomem_hermes/README.md) talks to a private GluoMem service; it does not load DSPy, embedding models, or the memory database into Hermes. Its explicit-profile installer does not activate the provider or migrate existing Hermes memory. Automatic human-turn capture defaults off, observations require review, and user confirmation is reserved for trusted operator controls. Model-facing tools cannot select arbitrary scopes or mark their own proposals user-verified.
+
+The provider source and wheel are separate from the core wheel. Follow its README for installation, service setup, profile-scoped status/pause/resume/review/provenance/correct/forget/export commands, and current host-certification limits. Never expose the internal service bearer key to browser clients or use it as public SaaS tenant authentication.
+
 ## Evaluation & Benchmarks (`gluomem-bench`)
 
-The benchmark harness, LoCoMo / LongMemEval / MemoryAgentBench replay / MINJA adversarial / SR-EN evaluation suites, Optuna retrieval tuning (`tune`, `ablate`), `mem0` comparison adapter, and DSPy prompt optimization live in the companion `gluomem-bench` repository (`https://github.com/UkisAI-Egzakta/gluomem-bench`).
+The benchmark harness, LoCoMo / LongMemEval / BEAM 128K adapted-rubric / MemoryAgentBench replay / MINJA adversarial / SR-EN evaluation suites, Optuna retrieval tuning (`tune`, `ablate`), `mem0` comparison adapter, and DSPy prompt optimization live in the companion `gluomem-bench` repository (`https://github.com/UkisAI-Egzakta/gluomem-bench`). Adapter availability and integration smokes are not full-campaign quality results; see that repository's evidence reports before making comparisons.
 
 ## Installation
 
@@ -28,18 +35,19 @@ The core package is small. Model-backed components are optional extras. When a c
 | Install | Adds | Readiness |
 |---|---|---|
 | `gluomem` (core) | Config, SQLite storage, I/P/B frames, hybrid search, KG, fake extractors, mock embedder | Works offline; real embedding, reranking and DSPy extraction raise `MissingExtraError` |
-| `gluomem[llm]` | DSPy >= 3.4.1: extraction | Needs `OPENROUTER_API_KEY` at call time; calls are paid |
+| `gluomem[llm]` | DSPy >= 3.4.1: extraction | Needs the configured model endpoint and its credentials where required; defaults use OpenRouter, but an explicit registry entry can select a local OpenAI-compatible server |
 | `gluomem[embeddings]` | sentence-transformers MiniLM embedder and cross-encoder reranker | Downloads models from Hugging Face on first use |
 | `gluomem[postgres]` | `psycopg`, `pgvector`, Alembic and SQLAlchemy for the PostgreSQL backend | Connects via `storage.backend: postgres` and `storage.dsn`; run `gluomem migrate upgrade` first |
 | `gluomem[service]` | FastAPI, uvicorn and httpx for `gluomem serve` and `gluomem worker` | Needs a service key in `GLUOMEM_SERVICE_KEY` or `--service-key-file` |
 | `gluomem[client]` | httpx for the `gluomem.client` SDK | Talks to a running service |
-| `gluomem[all]` | `postgres`, `llm`, `embeddings` and `service` | All of the above |
+| `gluomem[classifier]` | Optional GLiNER2 local classifier dependencies | Model provisioning and readiness remain explicit |
+| `gluomem[all]` | `postgres`, `llm`, `embeddings`, `classifier` and `service` | All of the above |
 
 `gluomem.extras.status()` reports which extras are installed without importing or downloading anything.
 
 ## Quickstart
 
-Requires Python 3.11 or newer and [uv](https://docs.astral.sh/uv/). Every command below runs offline and makes no paid model calls.
+Requires Python 3.11 or newer and [uv](https://docs.astral.sh/uv/). The checks below make no paid model calls; dependency installation may require network access.
 
 ```bash
 make install             # uv sync --locked --extra all (full development environment)
@@ -61,15 +69,25 @@ Tests that download real models are marked `slow` and excluded by default (`addo
 
 Optional: `make hooks` installs the pre-commit (lint and type check) and pre-push (tests) gates.
 
+## Safety boundaries
+
+Source retractions permanently suppress the exact scoped reference, including sources
+retracted before ingestion. Logical erasure does not guarantee removal from offline
+hosts, WAL, backups or storage media. Restored stores must remain quarantined until
+revocations are reconciled; an old backup alone is not a safe privacy rollback.
+API/database readiness does not certify worker or model readiness. Native delivery
+limits and acknowledgement semantics are documented in the Hermes provider README.
+
 ## Repository boundary
 
-This repository holds the memory library, its CLI (`components`, `index`, `migrate`, `serve`, `worker`), the HTTP service and worker, and the Python client SDK. Benchmarks, offline Optuna tuning, and prompt optimization live in `gluomem-bench`. It does not contain assistant adapters or KVARK integration code.
+This repository holds the memory library, CLI, HTTP service/worker, Python SDK, and runtime adapters under `integrations/`. The native Hermes provider is independently packaged and is not installed by the core wheel. Application-specific authorization and deployment wiring belong in the consuming application. Benchmarks and offline tuning live in `gluomem-bench`.
 
 ## Documents
 
 1. **[SPEC.md](./SPEC.md)** — original research specification: purpose, scope, requirements, acceptance criteria.
 2. **[DESIGN.md](./DESIGN.md)** — architecture, schema, layers, config system, DSPy layer.
 3. **[CONTEXT.md](./CONTEXT.md)** — domain terms, code mapping and architectural decisions.
+
 
 ## License
 

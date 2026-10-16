@@ -78,10 +78,14 @@ class McpServer:
                         req_id, -32602, "Invalid params: 'arguments' must be an object"
                     )
                 call_args = dict(raw_args)
-                if scope_override is not None and "scope" not in call_args:
-                    call_args["scope"] = scope_override
+                # Transport-authenticated identity is authoritative, never an agent argument.
+                pack = (
+                    MemoryToolPack(self.toolpack._client, default_scope=scope_override)
+                    if scope_override is not None
+                    else self.toolpack
+                )
                 try:
-                    output = self.toolpack.dispatch(tool_name, call_args)
+                    output = pack.dispatch(tool_name, call_args)
                 except KeyError as exc:
                     return _error_response(req_id, -32602, f"Unknown tool: {exc}")
                 except Exception as exc:  # noqa: BLE001

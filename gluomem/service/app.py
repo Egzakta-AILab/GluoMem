@@ -4,7 +4,7 @@ import logging
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator, Sequence
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from importlib.metadata import version
 from typing import Annotated, Any
@@ -54,6 +54,7 @@ from gluomem.service.auth import (
     verify_bearer_header,
 )
 from gluomem.service.jobs import BackpressureError, EventConflictError, JobQueue
+from gluomem.service.readiness import worker_is_live
 from gluomem.service.schemas import (
     CorrectRequest,
     IngestEventRequest,
@@ -183,6 +184,8 @@ def create_app(
             with lock:
                 live[id(handle)] = handle
             try:
+                if handle.meta_get("operations.restore_state") not in (None, "reconciled"):
+                    raise HTTPException(status_code=503, detail="Restore reconciliation required")
                 local_store = FrameStore(
                     handle,
                     embedder=store.embedder,
@@ -283,10 +286,53 @@ def create_app(
         return {"status": "ok"}
 
     @app.get("/readyz")
-    def readyz(rt: Annotated[_Runtime, Depends(runtime)]) -> dict[str, str]:
-        if rt.db.scalar("SELECT 1") != 1:
-            raise HTTPException(status_code=503, detail="Database probe failed")
-        return {"status": "ok"}
+    def readyz() -> JSONResponse:
+        try:
+            with contextmanager(runtime)() as rt:
+                ready = rt.db.scalar("SELECT 1") == 1
+        except Exception:
+            ready = False
+        return JSONResponse(
+            status_code=200 if ready else 503,
+            content={"status": "ok" if ready else "unavailable"},
+        )
+
+    @app.get("/readyz/worker")
+    def worker_readyz() -> JSONResponse:
+        checks = {"database": False, "worker": False}
+        try:
+            with contextmanager(runtime)() as rt:
+                checks["database"] = rt.db.scalar("SELECT 1") == 1
+                checks["worker"] = worker_is_live(rt.db.backend)
+        except Exception:
+            checks["database"] = False  # Do not leak connection strings or driver errors.
+        ready = all(checks.values())
+        return JSONResponse(
+            status_code=200 if ready else 503,
+            content={"status": "ok" if ready else "unavailable", "checks": checks},
+        )
+
+    @app.get("/readyz/ingestion")
+    def ingestion_readyz() -> JSONResponse:
+        from gluomem.components import component_report
+
+        checks = dict.fromkeys(("database", "worker", "components_config", "backlog"), False)
+        try:
+            with contextmanager(runtime)() as rt:
+                checks["database"] = rt.db.scalar("SELECT 1") == 1
+                checks["worker"] = worker_is_live(rt.db.backend)
+                checks["components_config"] = component_report(cfg)["ready"]
+                stats = rt.queue.queue_stats()
+                checks["backlog"] = (
+                    stats["oldest_pending_age_seconds"] < 300 and stats["dead_letter"] == 0
+                )
+        except Exception:
+            checks["database"] = False
+        ready = all(checks.values())
+        return JSONResponse(
+            status_code=200 if ready else 503,
+            content={"status": "ok" if ready else "unavailable", "checks": checks},
+        )
 
     @app.get("/v1/status")
     def status(
@@ -518,7 +564,7 @@ def create_app(
                         "source_content_hash": entry.source_content_hash,
                         "operation": entry.operation,
                     }
-                    for entry in rt.store.lineage(frame.id)
+                    for entry in rt.store.lineage(frame.id, scope=scope)
                 ],
             }
             for frame in frames

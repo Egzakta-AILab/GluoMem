@@ -50,17 +50,6 @@ class MemoryClientProtocol(Protocol):
     def export_memories(self, *, scope: Any = None) -> dict[str, Any]: ...
 
 
-_SCOPE_PROPERTIES: dict[str, Any] = {
-    "type": "object",
-    "description": "Optional isolation scope override (tenant_id, principal_id, namespace).",
-    "properties": {
-        "tenant_id": {"type": "string"},
-        "principal_id": {"type": "string"},
-        "namespace": {"type": "string"},
-    },
-    "additionalProperties": False,
-}
-
 TOOL_SPECS: tuple[dict[str, Any], ...] = (
     {
         "name": "memory_recall",
@@ -90,7 +79,6 @@ TOOL_SPECS: tuple[dict[str, Any], ...] = (
                     "type": "string",
                     "description": "Optional ISO-8601 upper bound on event_time.",
                 },
-                "scope": _SCOPE_PROPERTIES,
             },
             "required": ["query"],
             "additionalProperties": False,
@@ -99,7 +87,7 @@ TOOL_SPECS: tuple[dict[str, Any], ...] = (
     {
         "name": "memory_remember",
         "description": (
-            "Store a durable memory statement or event in the active scope with full provenance."
+            "Propose a memory for review in the active scope; not user-verified or recallable yet."
         ),
         "inputSchema": {
             "type": "object",
@@ -122,17 +110,6 @@ TOOL_SPECS: tuple[dict[str, Any], ...] = (
                     "type": "string",
                     "description": "Optional idempotency key for this write.",
                 },
-                "pinned": {
-                    "type": "boolean",
-                    "description": "Pin the memory so it does not expire.",
-                    "default": False,
-                },
-                "require_review": {
-                    "type": "boolean",
-                    "description": "Hold the memory as a candidate in the review queue.",
-                    "default": False,
-                },
-                "scope": _SCOPE_PROPERTIES,
             },
             "required": ["content"],
             "additionalProperties": False,
@@ -141,7 +118,7 @@ TOOL_SPECS: tuple[dict[str, Any], ...] = (
     {
         "name": "memory_correct",
         "description": (
-            "Supersede an existing memory frame with corrected content and scrub the old plaintext."
+            "Propose a correction for review; the original remains intact until user confirmation."
         ),
         "inputSchema": {
             "type": "object",
@@ -154,7 +131,6 @@ TOOL_SPECS: tuple[dict[str, Any], ...] = (
                     "type": "string",
                     "description": "Replacement statement.",
                 },
-                "scope": _SCOPE_PROPERTIES,
             },
             "required": ["frame_id", "new_content"],
             "additionalProperties": False,
@@ -173,7 +149,6 @@ TOOL_SPECS: tuple[dict[str, Any], ...] = (
                     "type": "integer",
                     "description": "ID of the memory frame to forget.",
                 },
-                "scope": _SCOPE_PROPERTIES,
             },
             "required": ["frame_id"],
             "additionalProperties": False,
@@ -191,7 +166,6 @@ TOOL_SPECS: tuple[dict[str, Any], ...] = (
                     "type": "integer",
                     "description": "ID of the memory frame to inspect.",
                 },
-                "scope": _SCOPE_PROPERTIES,
             },
             "required": ["frame_id"],
             "additionalProperties": False,
@@ -205,9 +179,7 @@ TOOL_SPECS: tuple[dict[str, Any], ...] = (
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "scope": _SCOPE_PROPERTIES,
-            },
+            "properties": {},
             "additionalProperties": False,
         },
     },
@@ -226,8 +198,8 @@ class MemoryToolPack:
         self._client = client
         self._default_scope = default_scope
 
-    def _eff_scope(self, scope: Any = None) -> Any:
-        return scope if scope is not None else self._default_scope
+    def _eff_scope(self) -> Any:
+        return self._default_scope
 
     def memory_recall(
         self,
@@ -237,7 +209,6 @@ class MemoryToolPack:
         profile: str = "balanced",
         since: str | None = None,
         until: str | None = None,
-        scope: Any = None,
     ) -> dict[str, Any]:
         """Search scoped memory for relevant frames."""
         resp = self._client.recall(
@@ -246,7 +217,7 @@ class MemoryToolPack:
             profile=profile,
             since=since,
             until=until,
-            scope=self._eff_scope(scope),
+            scope=self._eff_scope(),
         )
         return resp.model_dump(mode="json")
 
@@ -259,7 +230,6 @@ class MemoryToolPack:
         event_id: str | None = None,
         pinned: bool = False,
         require_review: bool = False,
-        scope: Any = None,
     ) -> dict[str, Any]:
         """Store an explicit or extracted memory statement with provenance."""
         eff_event_id = event_id or (
@@ -268,13 +238,13 @@ class MemoryToolPack:
         )
         resp = self._client.ingest_event(
             event_id=eff_event_id,
-            source_type="explicit_memory",
+            source_type="tool_output",
             source_ref=source_ref,
             content=content,
             kind=kind or "fact",
-            pinned=pinned,
-            require_review=require_review,
-            scope=self._eff_scope(scope),
+            pinned=False,
+            require_review=True,
+            scope=self._eff_scope(),
         )
         return resp.model_dump(mode="json")
 
@@ -282,38 +252,38 @@ class MemoryToolPack:
         self,
         frame_id: int,
         new_content: str,
-        *,
-        scope: Any = None,
     ) -> dict[str, Any]:
-        """Supersede an existing memory frame with corrected content."""
-        resp = self._client.correct_memory(
-            frame_id,
+        """Propose a correction for review without minting a user-confirmed receipt.
+
+        The original remains intact. A host must explicitly apply the correction after
+        authentic user confirmation via the privileged client's ``correct_memory`` API.
+        """
+        chain = self._client.get_lineage(frame_id, scope=self._eff_scope())
+        original = next(frame for frame in chain if frame.id == frame_id)
+        proposal = self.memory_remember(
             new_content,
-            scope=self._eff_scope(scope),
+            kind=original.kind,
+            source_ref=f"agent:correction:{frame_id}",
         )
-        return resp.model_dump(mode="json")
+        return {"frame_id": frame_id, "requires_review": True, **proposal}
 
     def memory_forget(
         self,
         frame_id: int,
-        *,
-        scope: Any = None,
     ) -> dict[str, Any]:
         """Hard-delete a memory frame and record a replay-suppression tombstone."""
         resp = self._client.forget_memory(
             frame_id,
-            scope=self._eff_scope(scope),
+            scope=self._eff_scope(),
         )
         return resp.model_dump(mode="json")
 
     def memory_inspect_provenance(
         self,
         frame_id: int,
-        *,
-        scope: Any = None,
     ) -> dict[str, Any]:
         """Return the version lineage and provenance records for a memory frame."""
-        chain = self._client.get_lineage(frame_id, scope=self._eff_scope(scope))
+        chain = self._client.get_lineage(frame_id, scope=self._eff_scope())
         target = next((f for f in chain if f.id == frame_id), chain[-1] if chain else None)
         return {
             "frame_id": frame_id,
@@ -324,9 +294,9 @@ class MemoryToolPack:
             "lineage": [f.model_dump(mode="json") for f in chain],
         }
 
-    def memory_export(self, *, scope: Any = None) -> dict[str, Any]:
+    def memory_export(self) -> dict[str, Any]:
         """Export all active memories, provenance, and review queue for a scope."""
-        return self._client.export_memories(scope=self._eff_scope(scope))
+        return self._client.export_memories(scope=self._eff_scope())
 
     def mcp_tools(self) -> list[dict[str, Any]]:
         """Return MCP-formatted tool definitions."""
@@ -375,6 +345,8 @@ class MemoryToolPack:
         else:
             parsed = dict(arguments or {})
 
+        # Identity is host-owned, not an argument in the agent dispatch protocol.
+        parsed.pop("scope", None)
         match name:
             case "memory_recall":
                 return self.memory_recall(
@@ -383,7 +355,6 @@ class MemoryToolPack:
                     profile=str(parsed.get("profile", "balanced")),
                     since=parsed.get("since"),
                     until=parsed.get("until"),
-                    scope=parsed.get("scope"),
                 )
             case "memory_remember":
                 return self.memory_remember(
@@ -393,25 +364,21 @@ class MemoryToolPack:
                     event_id=parsed.get("event_id"),
                     pinned=bool(parsed.get("pinned", False)),
                     require_review=bool(parsed.get("require_review", False)),
-                    scope=parsed.get("scope"),
                 )
             case "memory_correct":
                 return self.memory_correct(
                     frame_id=int(parsed["frame_id"]),
                     new_content=str(parsed["new_content"]),
-                    scope=parsed.get("scope"),
                 )
             case "memory_forget":
                 return self.memory_forget(
                     frame_id=int(parsed["frame_id"]),
-                    scope=parsed.get("scope"),
                 )
             case "memory_inspect_provenance":
                 return self.memory_inspect_provenance(
                     frame_id=int(parsed["frame_id"]),
-                    scope=parsed.get("scope"),
                 )
             case "memory_export":
-                return self.memory_export(scope=parsed.get("scope"))
+                return self.memory_export()
             case _:
                 raise KeyError(f"Unknown memory tool: {name!r}")

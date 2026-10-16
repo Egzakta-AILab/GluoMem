@@ -6,7 +6,7 @@ from typing import Literal
 
 from gluomem.frames.content_hash import content_hash, suppression_key
 from gluomem.frames.expiry import episode_expiry
-from gluomem.frames.generation import bump_scope_generation
+from gluomem.frames.generation import bump_scope_generation, lock_scope_generation
 from gluomem.frames.provenance import is_suppressed_by_tombstone
 from gluomem.frames.store import Frame, FrameStore
 from gluomem.search.multilingual import fold_multilingual_text
@@ -68,6 +68,7 @@ def review_memory(
         raise ValueError("Edited content is suppressed by a tombstone")
     prepared = store._prepare_index(text) if action != "dismiss" else None
     with store._backend.transaction():
+        lock_scope_generation(store._backend, scope)
         frame = store.get_frame(frame_id, scope=scope)
         if frame.status != "candidate":
             raise ValueError("Only candidate memories can be reviewed")
@@ -123,6 +124,7 @@ def pin_memory(
         )
     )
     with store._backend.transaction():
+        lock_scope_generation(store._backend, scope)
         store._update(frame.id, scope, pinned=int(pinned), expires_at=expiry)
         bump_scope_generation(store._backend, scope)
     return store.get_frame(frame.id, scope=scope)
@@ -141,6 +143,7 @@ def promote_episode_to_fact(
     if frame.status not in ("active", "candidate") or frame.kind != "episode":
         raise ValueError("Only active or candidate episodes can be promoted")
     with store._backend.transaction():
+        lock_scope_generation(store._backend, scope)
         store._update(frame.id, scope, kind=new_kind, expires_at=None)
         bump_scope_generation(store._backend, scope)
     return store.get_frame(frame.id, scope=scope)

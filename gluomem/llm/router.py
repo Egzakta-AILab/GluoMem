@@ -30,6 +30,7 @@ def _ensure_cache(cfg: AppConfig) -> None:
         cache_dir = str(Path(cfg.dspy.cache.dir).expanduser())
         dspy.configure_cache(
             enable_disk_cache=cfg.dspy.cache.disk,
+            enable_memory_cache=False,
             disk_cache_dir=cache_dir,
         )
         _cache_configured = True

@@ -225,6 +225,8 @@ class FrameStore:
 
         prepared: list[tuple[int, _PreparedIndex]] = []
         for frame in frames:
+            if frame.status not in ("active", "candidate"):
+                continue
             text = frame.indexable_text
             fvec = embedder.embed(text)
             assert_dim(fvec, embedder.dim)
@@ -246,6 +248,23 @@ class FrameStore:
 
         fp = fingerprint_of(embedder)
         with db.transaction():
+            from gluomem.frames.generation import lock_scope_generation
+
+            for scope_tuple in sorted({frame.scope.as_tuple() for frame in frames}):
+                lock_scope_generation(db.backend, MemoryScope(*scope_tuple))
+            for frame in frames:
+                row = db.backend.fetchone(
+                    f"SELECT {_COLUMNS} FROM memory_frames WHERE id = ? AND {scope_sql()}",
+                    (frame.id, *frame.scope.as_tuple()),
+                )
+                current = cls._row_to_frame(row) if row is not None else None
+                if (
+                    current is None
+                    or current.status != frame.status
+                    or current.content_hash != frame.content_hash
+                    or current.indexable_text != frame.indexable_text
+                ):
+                    raise ValueError("Memory changed during index rebuild; retry rebuild")
             for fid, _ in prepared:
                 chunk_rows = db.backend.fetchall(
                     "SELECT id FROM memory_frame_chunks WHERE frame_id = ?",
@@ -878,15 +897,21 @@ class FrameStore:
         )
 
     def ensure_indexed(self, frame: Frame, *, prepared: _PreparedIndex | None = None) -> bool:
-        """Rebuild ``frame``'s projections if missing or stale."""
-        frame = self.get_frame(frame.id, scope=frame.scope)
-        if frame.status not in ("active", "candidate"):
-            return False
-        state = self.index_state(frame.id, scope=frame.scope)
-        if state.ready:
-            return False
-        self._index(frame, prepared=prepared)
-        return True
+        """Repair authoritative projections under the scope's generation lock."""
+        from gluomem.frames.generation import lock_scope_generation
+
+        with self._db.transaction():
+            lock_scope_generation(self._backend, frame.scope)
+            frame = self.get_frame(frame.id, scope=frame.scope)
+            if frame.status not in ("active", "candidate"):
+                return False
+            state = self.index_state(frame.id, scope=frame.scope)
+            if state.ready:
+                return False
+        # Preparation may run outside this repair transaction. _index reacquires
+        # generation and revalidates before publishing; an admission caller's
+        # outer transaction still protects its complete repair/graph operation.
+        return self._index(frame, prepared=prepared)
 
     def repair_indexes(self) -> list[int]:
         """Repair active/candidate projections in this store's scope."""
@@ -896,11 +921,23 @@ class FrameStore:
                 repaired.append(frame.id)
         return repaired
 
-    def _index(self, frame: Frame, *, prepared: _PreparedIndex | None = None) -> None:
-        """Synchronously index ``frame`` into FTS, whole-frame vec, and chunk vecs."""
-        prepared = prepared or self._prepare_index(frame.indexable_text)
+    def _index(self, frame: Frame, *, prepared: _PreparedIndex | None = None) -> bool:
+        """Publish only a still-current active/candidate snapshot's projections."""
+        from gluomem.frames.generation import lock_scope_generation
+
+        if prepared is None or prepared.text != frame.indexable_text:
+            prepared = self._prepare_index(frame.indexable_text)
         with self._db.transaction():
-            self._write_index(frame.id, prepared)
+            lock_scope_generation(self._backend, frame.scope)
+            current = self.get_frame(frame.id, scope=frame.scope)
+            if (
+                current.status not in ("active", "candidate")
+                or current.content_hash != frame.content_hash
+                or current.indexable_text != prepared.text
+            ):
+                return False
+            self._write_index(current.id, prepared)
+            return True
 
     def _prepare_index(self, text: str) -> _PreparedIndex:
         """Compute embeddings outside any DB transaction."""

@@ -10,9 +10,10 @@ from datetime import timedelta
 from typing import Any, Literal
 
 from gluomem.frames.lifecycle import get_scope_generation
+from gluomem.frames.source_fences import assert_source_not_retracted
 from gluomem.storage.backend import DatabaseBackend
 from gluomem.storage.scope import DEFAULT_SCOPE, MemoryScope, scope_sql
-from gluomem.timeutil import now_utc, parse_utc, utc_key
+from gluomem.timeutil import now_utc, parse_utc
 from gluomem.write.events import EventConflictError
 
 JobStatus = Literal["queued", "leased", "succeeded", "dead_letter"]
@@ -76,11 +77,11 @@ def _row_to_job(row: Mapping[str, Any]) -> MemoryJob:
 
 
 def _resolve_now(now_iso: str | None) -> str:
-    return utc_key(now_iso if now_iso is not None else now_utc())
+    return parse_utc(now_iso if now_iso is not None else now_utc()).strftime("%Y-%m-%dT%H:%M:%S.%f")
 
 
 def _add_seconds(base_iso: str, seconds: float) -> str:
-    return utc_key(parse_utc(base_iso) + timedelta(seconds=seconds))
+    return (parse_utc(base_iso) + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%S.%f")
 
 
 @contextmanager
@@ -147,6 +148,8 @@ class JobQueue:
         now = _resolve_now(now_iso)
         body = payload if payload is not None else {}
         with write_transaction(self._backend):
+            if job_type == "ingest_event" and isinstance(body.get("source_ref"), str):
+                assert_source_not_retracted(self._backend, scope, body["source_ref"], lock=True)
             if self._backend.dialect == "postgres":
                 self._backend.execute(
                     "SELECT pg_advisory_xact_lock(hashtext(?))", (json.dumps(scope.as_tuple()),)

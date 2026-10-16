@@ -285,23 +285,72 @@ def admit(
     if not is_recall_eligible(trust, status=status, expires_at=expires_at):
         deduper = None
 
-    def link_graph(frame: Frame) -> None:
-        if kg is not None and is_recall_eligible(frame):
-            for eid in entity_ids:
-                kg.link_entity_frame(eid, frame.id, scope=s)
-            for rid in relation_ids:
-                kg.link_relation_frame(rid, frame.id, scope=s)
+    def link_graph(frame: Frame) -> Frame | None:
+        from gluomem.frames.generation import lock_scope_generation
+
+        with store.db.transaction():
+            lock_scope_generation(store._backend, s)
+            current = store.get_frame(frame.id, scope=s)
+            if current.status != frame.status or current.content_hash != frame.content_hash:
+                return None
+            if kg is not None and is_recall_eligible(current):
+                try:
+                    for eid in entity_ids:
+                        kg.link_entity_frame(eid, current.id, scope=s)
+                    for rid in relation_ids:
+                        kg.link_relation_frame(rid, current.id, scope=s)
+                except KeyError:
+                    # Reentrant erasure may also delete the graph target. Do not
+                    # unwind its savepoint; unrelated missing IDs still raise.
+                    current = store.get_frame(frame.id, scope=s)
+                    if current.status != frame.status or current.content_hash != frame.content_hash:
+                        return None
+                    raise
+            current = store.get_frame(frame.id, scope=s)
+            if current.status != frame.status or current.content_hash != frame.content_hash:
+                return None
+            return current
+
+    def reuse_frame(
+        frame: Frame, *, semantic: bool = False, prepared: _PreparedIndex | None = None
+    ) -> AdmitResult:
+        # The caller holds generation protection through repair and graph publication.
+        store.ensure_indexed(frame, prepared=prepared)
+        current = store.get_frame(frame.id, scope=s)
+        if current.status in ("active", "candidate") and current.content_hash == frame.content_hash:
+            current = link_graph(current)
+            if current is not None:
+                return AdmitResult(
+                    admitted=True,
+                    frame=current,
+                    verdict=verdict,
+                    trust=current.trust,
+                    deduped=not semantic,
+                    semantic_deduped=semantic,
+                )
+        # Reject without unwinding a successful reentrant erasure's savepoint.
+        return AdmitResult(admitted=False, frame=None, verdict=verdict, trust=trust)
 
     existing = store.find_frame_by_hash(None if scope_wide else gop, content, scope=s)
     if existing is not None:
-        if (
-            trust != "quarantined"
-            and existing.trust != "quarantined"
-            and (verified_by_user or pinned)
-        ):
-            from gluomem.frames.generation import bump_scope_generation
+        from gluomem.frames.generation import bump_scope_generation, lock_scope_generation
 
-            with store.db.transaction():
+        # Standalone admission owns this transaction too: flags, repair and graph
+        # projections must not be separated by a retraction's generation lock.
+        with store.db.transaction():
+            lock_scope_generation(store._backend, s)
+            current = store.get_frame(existing.id, scope=s)
+            if (
+                current.status not in ("active", "candidate")
+                or current.content_hash != existing.content_hash
+            ):
+                raise ValueError("Memory changed before admission; retry ingestion")
+            existing = current
+            if (
+                trust != "quarantined"
+                and existing.trust != "quarantined"
+                and (verified_by_user or pinned)
+            ):
                 store._update(
                     existing.id,
                     s,
@@ -311,16 +360,7 @@ def admit(
                     expires_at=None if pinned else existing.expires_at,
                 )
                 bump_scope_generation(store._backend, s)
-            existing = store.get_frame(existing.id, scope=s)
-        store.ensure_indexed(existing, prepared=prepared)
-        link_graph(existing)
-        return AdmitResult(
-            admitted=True,
-            frame=existing,
-            verdict=verdict,
-            trust=existing.trust,
-            deduped=True,
-        )
+            return reuse_frame(existing, prepared=prepared)
 
     probe = deduper.probe(gop, content, scope=s) if deduper is not None else None
     superseded_id: int | None = None
@@ -335,15 +375,17 @@ def admit(
                 deduper.forget(gop, matched.id, scope=s)
                 superseded_id = matched.id
             else:
-                store.ensure_indexed(matched)
-                link_graph(matched)
-                return AdmitResult(
-                    admitted=True,
-                    frame=matched,
-                    verdict=verdict,
-                    trust=matched.trust,
-                    semantic_deduped=True,
-                )
+                from gluomem.frames.generation import lock_scope_generation
+
+                with store.db.transaction():
+                    lock_scope_generation(store._backend, s)
+                    current = store.get_frame(matched.id, scope=s)
+                    if (
+                        current.status not in ("active", "candidate")
+                        or current.content_hash != matched.content_hash
+                    ):
+                        raise ValueError("Memory changed before admission; retry ingestion")
+                    return reuse_frame(current, semantic=True)
 
     clf_cfg = cfg.safety.scanner.classifier
     if (
@@ -422,11 +464,13 @@ def admit(
     if deduper is not None and probe is not None:
         deduper.record(gop, frame.id, probe.vector, scope=s)
 
-    link_graph(frame)
+    current = link_graph(frame)
+    if current is None:
+        return AdmitResult(admitted=False, frame=None, verdict=verdict, trust=trust)
 
     return AdmitResult(
         admitted=True,
-        frame=frame,
+        frame=current,
         verdict=verdict,
         trust=trust,
         superseded_id=superseded_id,

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gluomem-hermes"
+version = "0.1.0"
+description = "Thin native Hermes memory provider for a private GluoMem HTTP service"
+readme = "gluomem_hermes/README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.entry-points."hermes_agent.memory_providers"]
+gluomem = "gluomem_hermes:register"
+
+[tool.setuptools]
+packages = ["gluomem_hermes"]
+
+[tool.setuptools.package-data]
+gluomem_hermes = ["plugin.yaml", "README.md"]

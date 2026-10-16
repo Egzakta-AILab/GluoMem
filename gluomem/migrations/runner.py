@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +49,7 @@ def make_alembic_config(
     if int(vector_dim) <= 0:
         raise ValueError(f"vector_dim must be positive, got {vector_dim}")
 
-    cfg = Config(output_buffer=output_buffer)
+    cfg = Config(output_buffer=output_buffer, stdout=sys.stdout)
     cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
     cfg.set_main_option("sqlalchemy.url", normalize_sqlalchemy_url(dsn))
     cfg.attributes["schema"] = schema

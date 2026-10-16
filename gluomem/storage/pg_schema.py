@@ -47,6 +47,11 @@ def build_metadata(dim: int = 384) -> sa.MetaData:
 
     table("meta", sa.Column("key", sa.Text, primary_key=True), text("value", nullable=False))
     table(
+        "source_retractions",
+        *(sa.Column(name, sa.Text, primary_key=True) for name in (*_SCOPE, "source_ref")),
+        text("retracted_at", nullable=False),
+    )
+    table(
         "sessions",
         ident(),
         *scope(),

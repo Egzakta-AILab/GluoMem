@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import signal
 import socket
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from gluomem.config.app_config import AppConfig
@@ -26,6 +28,7 @@ from gluomem.service.jobs import (
     StaleScopeGenerationError,
     write_transaction,
 )
+from gluomem.service.readiness import record_worker_poll
 from gluomem.service.schemas import IngestEventRequest
 from gluomem.storage.db import MindDB
 from gluomem.storage.scope import scope_sql
@@ -70,6 +73,8 @@ class MemoryWorker:
         self._extractors = extractors
         self._worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
         self._lease_seconds = float(lease_seconds)
+        if not math.isfinite(self._lease_seconds) or self._lease_seconds <= 0:
+            raise ValueError("lease_seconds must be finite and positive")
         self._retry_backoff_seconds = float(retry_backoff_seconds)
         self._should_pause = should_pause
         self._handlers: dict[str, JobHandler] = {
@@ -120,6 +125,54 @@ class MemoryWorker:
             lease_seconds=self._lease_seconds,
             now_iso=now_iso,
         )
+
+    @contextmanager
+    def _lease_heartbeat(self, job: MemoryJob, *, now_iso: str | None = None) -> Iterator[None]:
+        """Renew through a dedicated connection while external computation is blocked."""
+        if now_iso is not None or str(self._db.path) == ":memory:":
+            yield
+            return
+        stopped = threading.Event()
+        failures: list[Exception] = []
+
+        def renew() -> None:
+            from gluomem.storage.postgres_backend import PostgresBackend
+
+            backend = self._db.backend
+            try:
+                handle = (
+                    MindDB(
+                        dim=self._db.dim,
+                        backend_type="postgres",
+                        dsn=backend.dsn,
+                        postgres_schema=backend.postgres_schema,
+                    )
+                    if isinstance(backend, PostgresBackend)
+                    else MindDB(self._db.path, dim=self._db.dim)
+                )
+                with handle:
+                    queue = JobQueue(handle.backend)
+                    while not stopped.wait(min(10.0, self._lease_seconds / 3)):
+                        queue.renew_lease(
+                            job.id,
+                            self._worker_id,
+                            attempt_count=job.attempt_count,
+                            lease_seconds=self._lease_seconds,
+                        )
+                        record_worker_poll(handle.backend)
+            except Exception as exc:
+                failures.append(exc)
+                stopped.set()
+
+        thread = threading.Thread(target=renew, name=f"gluomem-lease-{job.id}", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stopped.set()
+            thread.join()
+        if failures:
+            raise failures[0]
 
     def _prepare_ingest_event(
         self, job: MemoryJob, *, now_iso: str | None = None
@@ -234,6 +287,8 @@ class MemoryWorker:
 
     def run_once(self, *, now_iso: str | None = None) -> MemoryJob | None:
         """Execute one leased job; Phase 1 runs outside DB lock, Phase 2 commits atomically."""
+        if self._db.meta_get("operations.restore_state") not in (None, "reconciled"):
+            raise RuntimeError("restore reconciliation required before processing")
         if self._should_pause is not None and self._should_pause():
             return None
         try:
@@ -246,6 +301,7 @@ class MemoryWorker:
                 extra={"event": "job_invalid_payload", "worker_id": self._worker_id},
             )
             return None
+        record_worker_poll(self._db.backend, now_iso=now_iso)
         if job is None:
             return None
 
@@ -270,10 +326,14 @@ class MemoryWorker:
                 prepared_cognify: tuple[int, CognifyResult] | None = None
                 has_work = bool(job.payload) or job.job_type not in _PAYLOAD_JOB_TYPES
                 if has_work:
-                    if job.job_type == "ingest_event" and handler == self._handle_ingest_event:
-                        prepared_ingest = self._prepare_ingest_event(job, now_iso=now_iso)
-                    elif job.job_type == "cognify_frame" and handler == self._handle_cognify_frame:
-                        prepared_cognify = self._prepare_cognify_frame(job, now_iso=now_iso)
+                    with self._lease_heartbeat(job, now_iso=now_iso):
+                        if job.job_type == "ingest_event" and handler == self._handle_ingest_event:
+                            prepared_ingest = self._prepare_ingest_event(job, now_iso=now_iso)
+                        elif (
+                            job.job_type == "cognify_frame"
+                            and handler == self._handle_cognify_frame
+                        ):
+                            prepared_cognify = self._prepare_cognify_frame(job, now_iso=now_iso)
 
                 # Phase 2: Short atomic DB write transaction holding the scope generation lock.
                 self._before_write(job)
