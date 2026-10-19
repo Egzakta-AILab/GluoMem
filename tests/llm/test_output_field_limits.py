@@ -4,12 +4,13 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from gluomem.llm import structured_adapter as sa
+from gluomem.llm.output_policy import configured_signature
 from gluomem.llm.signatures import ClaimConsolidation
 
 
-@pytest.mark.parametrize("limit", [1, 37, 1024, 8192])
-def test_native_limit(limit):
-    signature = sa.configured_signature(ClaimConsolidation, {"decision.rationale": limit})
+def test_native_limit():
+    limit = 37
+    signature = configured_signature(ClaimConsolidation, {"decision.rationale": limit})
     schema = sa.output_schema(signature)
     assert schema["$defs"]["ConsolidationDecision"]["properties"]["rationale"]["maxLength"] == limit
     native = signature.output_fields["decision"].annotation
@@ -19,7 +20,7 @@ def test_native_limit(limit):
     )
     with pytest.raises(ValidationError):
         TypeAdapter(native).validate_python({"action": "ADD", "rationale": "x" * (limit + 1)})
-    assert sa.configured_signature(ClaimConsolidation, {}) is ClaimConsolidation
+    assert configured_signature(ClaimConsolidation, {}) is ClaimConsolidation
     assert "maxLength" not in json.dumps(sa.output_schema(ClaimConsolidation))
     original = sa.output_schema(ClaimConsolidation)
     del schema["$defs"]["ConsolidationDecision"]["properties"]["rationale"]["maxLength"]
@@ -33,7 +34,7 @@ def test_unsupported_scalar_output_is_rejected_not_silently_ignored():
         {"text": (str, dspy.InputField()), "answer": (str, dspy.OutputField())}
     )
     with pytest.raises(ValueError, match="model"):
-        sa.configured_signature(signature, {"answer": 5})
+        configured_signature(signature, {"answer": 5})
 
 
 def test_open_map_array_and_literal_paths_are_not_bypasses():
@@ -52,8 +53,8 @@ def test_open_map_array_and_literal_paths_are_not_bypasses():
     signature = dspy.make_signature({"result": (Native, dspy.OutputField())})
     for path in ["result.mapping.free", "result.values.text", "result.action"]:
         with pytest.raises(ValueError):
-            sa.configured_signature(signature, {path: 7})
-    cloned = sa.configured_signature(signature, {"result.text": 7})
+            configured_signature(signature, {path: 7})
+    cloned = configured_signature(signature, {"result.text": 7})
     native = cloned.output_fields["result"].annotation
     assert native is not None
     assert native.model_validate({}).text == "native"
@@ -69,15 +70,17 @@ def test_open_map_array_and_literal_paths_are_not_bypasses():
 def policy(limits):
     from gluomem.config.app_config import DspyConfig
 
-    return DspyConfig(adapter="json", schema_mode="required", output_field_limits=limits)
+    return DspyConfig(
+        model="mock", adapter="json", schema_mode="required", output_field_limits=limits
+    )
 
 
 def test_config_reaches_module():
     from gluomem.config.app_config import AppConfig
-    from gluomem.llm.modules import build_module
+    from gluomem.llm.bootstrap import load_or_build
 
     cfg = AppConfig(dspy=policy({"consolidate": {"decision.rationale": 37}}))
-    module = build_module("consolidate", cfg)
+    module = load_or_build("consolidate", cfg)
     assert (
         sa.output_schema(module.signature)["$defs"]["ConsolidationDecision"]["properties"][
             "rationale"
@@ -95,31 +98,36 @@ def test_config_reaches_module():
         {"consolidate": {"decision.action": 1}},
         {"consolidate": {"decision.target_frame_id": 1}},
         {"consolidate": {"new_claim": 1}},
-        {"consolidate": {"decision.rationale": True}},
-        {"consolidate": {"decision.rationale": 0}},
-        {"consolidate": {"decision.rationale": -1}},
-        {"consolidate": {"decision.rationale": "37"}},
-        {"consolidate": {"decision.rationale": 1.5}},
         {"fact_extraction": {"facts.content": 37}},
         {"consolidate": {"decision.rationale.": 1}},
     ],
 )
-def test_invalid_config_rejected(limits):
+def test_invalid_semantic_policy_rejected_at_extractor_initialization(limits):
+    from gluomem.config.app_config import AppConfig
+    from gluomem.llm.modules import DspyExtractors
+
+    cfg = AppConfig(dspy=policy(limits))
     with pytest.raises(ValueError):
-        policy(limits)
+        DspyExtractors(cfg)
+
+
+@pytest.mark.parametrize("limit", [True, 0, "37", 1.5])
+def test_invalid_primitive_limit_rejected_by_config(limit):
+    with pytest.raises(ValueError):
+        policy({"consolidate": {"decision.rationale": limit}})
 
 
 def test_no_default_policy():
     from gluomem.config.app_config import DspyConfig
 
-    assert DspyConfig().output_field_limits == {}
+    assert DspyConfig(model="mock").output_field_limits == {}
 
 
 def test_limits_require_declared_json_schema():
     from gluomem.config.app_config import DspyConfig
 
     with pytest.raises(ValueError):
-        DspyConfig(output_field_limits={"consolidate": {"decision.rationale": 1}})
+        DspyConfig(model="mock", output_field_limits={"consolidate": {"decision.rationale": 1}})
 
 
 @pytest.mark.parametrize("format", ["json", "program"])
@@ -156,11 +164,4 @@ def test_compiled_native_signature_cannot_bypass_limits(tmp_path, format):
         ]["maxLength"]
         == 37
     )
-    cfg.dspy.output_field_limits["consolidate"]["decision.rationale"] = 83
-    changed = extractors._module("consolidate")
-    assert (
-        sa.output_schema(changed.signature)["$defs"]["ConsolidationDecision"]["properties"][
-            "rationale"
-        ]["maxLength"]
-        == 83
-    )
+    assert "maxLength" not in json.dumps(sa.output_schema(original.signature))

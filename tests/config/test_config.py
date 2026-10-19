@@ -17,6 +17,22 @@ from gluomem.config import (
 )
 
 
+def test_dspy_model_is_explicit_and_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    from gluomem.config.app_config import DspyConfig
+
+    with pytest.raises(ValidationError, match="model"):
+        DspyConfig.model_validate({})
+    for value in ("", " "):
+        with pytest.raises(ValidationError):
+            DspyConfig(model=value)
+    config = DspyConfig(model="mock")
+    assert config.model == "mock"
+    assert "default_model" not in config.model_dump()
+    monkeypatch.delenv("GLUOMEM_DSPY__MODEL", raising=False)
+    with pytest.raises(ValidationError):
+        AppConfig()
+
+
 def test_default_config_loads_all_sections_and_constants() -> None:
     cfg = load_config()
     assert cfg.components.allow_fake is False
@@ -77,7 +93,8 @@ def test_default_config_loads_all_sections_and_constants() -> None:
     assert cfg.kg.tech_allowlist == []
     assert cfg.kg.alias_groups == []
     assert len(cfg.safety.scanner.patterns) >= 5
-    assert cfg.dspy.default_model == "deepseek-flash"
+    assert cfg.dspy.model == "deepseek-flash"
+    assert all(task.model is None for task in cfg.dspy.tasks.values())
     assert set(cfg.dspy.tasks) >= {
         "fact_extraction",
         "event_extraction",
@@ -135,7 +152,7 @@ def test_cross_validation_errors() -> None:
         base.with_overrides({"search.rerank.model": "no-such-reranker"})
 
     with pytest.raises(ValidationError, match="Unknown model reference"):
-        base.with_overrides({"dspy.default_model": "unknown-llm"})
+        base.with_overrides({"dspy.model": "unknown-llm"})
 
     with pytest.raises(ValidationError, match="Unknown model reference"):
         base.with_overrides({"dspy.tasks.cognify.model": "unknown-llm"})

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Any, cast
 
@@ -7,31 +8,13 @@ from dspy.utils.exceptions import AdapterParseError
 from gluomem.llm.router import _make_adapter
 from gluomem.llm.signatures import TASK_SIGNATURES
 
+from ._helpers import Scripted
+
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_validation_feedback_one_same_lm_attempt_at_zero(asynchronous):
-    import asyncio
-
-    from dspy.utils.dummies import DummyLM
-
-    class Scripted(DummyLM):
-        def __init__(self):
-            super().__init__([])
-            self.calls = []
-
-        def __call__(self, **kwargs):
-            self.calls.append(kwargs)
-            return (
-                ['{"claims":[{"text":"x","kind":"request"}]}']
-                if len(self.calls) == 1
-                else ['{"claims":[]}']
-            )
-
-        async def acall(self, prompt=None, *, messages=None, **kwargs):
-            return self(prompt=prompt, messages=messages, **kwargs)
-
     adapter = _make_adapter("json", canonicalize=True, validation_retries=1)
-    lm = Scripted()
+    lm = Scripted(['{"claims":[{"text":"x","kind":"request"}]}', '{"claims":[]}'])
     args = (
         lm,
         {"temperature": 0.3, "max_tokens": 123},
@@ -50,48 +33,22 @@ def test_validation_feedback_one_same_lm_attempt_at_zero(asynchronous):
     assert "request" not in feedback and "private-marker" not in feedback
 
 
-@pytest.mark.parametrize("name", ["json", "baml"])
-def test_required_schema_is_explicit_lossless_and_capability_gated(name):
-    from types import SimpleNamespace
-
-    adapter = _make_adapter(name, schema_mode="required")
-    kwargs = {}
-    lm = SimpleNamespace(supported_params={"response_format"}, supports_response_schema=True)
-    cast(Any, adapter)._prepare_response_format(lm, kwargs, TASK_SIGNATURES["event_claims"])
-    wire = kwargs["response_format"]
-    assert wire["type"] == "json_schema"
-    schema = wire["json_schema"]["schema"]
-    definitions = schema["$defs"]
-    assert definitions["ExtractedClaimSpec"]["properties"]["kind"]["enum"] == [
-        "fact",
-        "profile",
-        "preference",
-        "decision",
-        "procedure",
-        "episode",
-        "correction",
-        "summary",
-    ]
-    assert definitions["KGEntity"]["properties"]["properties"]["additionalProperties"] == {
-        "type": "string"
-    }
-    lm.supports_response_schema = False
-    with pytest.raises(ValueError, match="capability"):
-        cast(Any, adapter)._prepare_response_format(lm, {}, TASK_SIGNATURES["event_claims"])
-
-
 def test_config_exposes_opt_in_adapter_policy():
     from gluomem.config.app_config import DspyConfig
     from gluomem.llm.router import LMRouter
 
     config = DspyConfig(
-        adapter="baml", canonicalize=True, schema_mode="required", validation_retries=1
+        model="mock",
+        adapter="baml",
+        canonicalize=True,
+        schema_mode="required",
+        validation_retries=1,
     )
     assert (
         config.canonicalize and config.schema_mode == "required" and config.validation_retries == 1
     )
     with pytest.raises(ValueError):
-        DspyConfig.model_validate({"validation_retries": 2})
+        DspyConfig.model_validate({"model": "mock", "validation_retries": 2})
     from gluomem.config.app_config import AppConfig
 
     router = LMRouter(AppConfig(dspy=config))
@@ -134,3 +91,79 @@ def test_explicit_case_normalization_preserves_text():
     assert result["claims"][0].text == "  Source QUOTE unchanged  "
     assert result["claims"][0].kind == "preference"
     assert result["claims"][0].relations[0].relation_type == "WORKS_AT"
+
+
+@pytest.mark.parametrize("wrapper", ["```json\n{}\n```", "<decision>\n{}\n</decision>"])
+def test_exact_structural_delimiters_only(wrapper):
+    adapter = _make_adapter("json", canonicalize=True)
+    body = json.dumps({"action": "ADD", "target_frame_id": None, "rationale": "Exact quote"})
+    assert (
+        adapter.parse(TASK_SIGNATURES["consolidate"], wrapper.format(body))["decision"].rationale
+        == "Exact quote"
+    )
+    for extra in [
+        "private outside " + wrapper.format(body),
+        wrapper.format(body) + " trailing",
+        "<unknown>" + body + "</unknown>",
+    ]:
+        with pytest.raises(AdapterParseError):
+            adapter.parse(TASK_SIGNATURES["consolidate"], extra)
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("safe"),
+        RuntimeError("length/context/privacy/resource"),
+        asyncio.CancelledError(),
+    ],
+)
+def test_nonvalidation_failure_never_retried(asynchronous, error):
+    lm = Scripted([error, '{"claims":[]}'])
+    adapter = _make_adapter("json", canonicalize=True, validation_retries=1)
+    args = (
+        lm,
+        {},
+        TASK_SIGNATURES["event_claims"],
+        [],
+        {"source_text": "safe", "reference_date": ""},
+    )
+    with pytest.raises(type(error)) as caught:
+        asyncio.run(adapter.acall(*args)) if asynchronous else adapter(*args)
+    assert caught.value is error and len(lm.calls) == 1
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_second_validation_failure_preserves_original_cause_no_third_call(asynchronous):
+    lm = Scripted(['{"claims":"not-list"}', '{"claims":"not-list"}', '{"claims":[]}'])
+    adapter = _make_adapter("json", canonicalize=True, validation_retries=1)
+    args = (
+        lm,
+        {},
+        TASK_SIGNATURES["event_claims"],
+        [],
+        {"source_text": "safe", "reference_date": ""},
+    )
+    with pytest.raises(AdapterParseError) as caught:
+        asyncio.run(adapter.acall(*args)) if asynchronous else adapter(*args)
+    assert len(lm.calls) == 2
+    assert isinstance(caught.value.__cause__, AdapterParseError)
+    assert caught.value.__cause__.__cause__ is not None
+
+
+def test_default_parser_and_no_retry_are_legacy_compatible():
+    import dspy
+
+    assert type(_make_adapter("json")) is dspy.JSONAdapter
+    assert type(_make_adapter("chat")) is dspy.ChatAdapter
+    lm = Scripted(['{"claims":"not-list"}', '{"claims":[]}'])
+    with pytest.raises(AdapterParseError):
+        _make_adapter("json", canonicalize=True)(
+            lm,
+            {},
+            TASK_SIGNATURES["event_claims"],
+            [],
+            {"source_text": "safe", "reference_date": ""},
+        )
+    assert len(lm.calls) == 1

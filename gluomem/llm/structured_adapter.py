@@ -11,6 +11,8 @@ import dspy
 from dspy.utils.exceptions import AdapterParseError
 from pydantic import BaseModel, ConfigDict, TypeAdapter, create_model
 
+from gluomem.llm.output_policy import configured_signature as configured_signature
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any, Protocol
@@ -43,56 +45,6 @@ if TYPE_CHECKING:
         def parse(self, signature: type[dspy.Signature], completion: str) -> dict[str, Any]: ...
 
 
-def configured_signature(signature, limits):
-    """Clone native output fields with opt-in dot-path string character bounds.
-
-    Only declared model fields are traversed; arrays, unions, and open mappings
-    are deliberately unsupported. Empty policy returns the original signature.
-    """
-    from copy import deepcopy
-
-    from pydantic import Field
-
-    if not isinstance(limits, dict):
-        raise ValueError("output_field_limits must be a mapping")
-    if not limits:
-        return signature
-
-    def constrain(annotation, parts, limit):
-        if not parts:
-            if annotation is not str:
-                raise ValueError("output limit requires a native string field")
-            return Annotated[str, Field(max_length=limit)]
-        if not isinstance(annotation, type) or not issubclass(annotation, BaseModel):
-            raise ValueError("output limit path must traverse declared model fields")
-        name, *rest = parts
-        if name not in annotation.model_fields:
-            raise ValueError("unknown output limit path")
-        field = deepcopy(annotation.model_fields[name])
-        child = constrain(field.annotation, rest, limit)
-        return cast("Callable[..., type[BaseModel]]", create_model)(
-            annotation.__name__,
-            __base__=annotation,
-            __doc__=annotation.__doc__,
-            **{name: (child, field)},
-        )
-
-    fields = {name: (field.annotation, deepcopy(field)) for name, field in signature.fields.items()}
-    for path, limit in sorted(limits.items()):
-        if not isinstance(path, str) or not path or type(limit) is not int or limit <= 0:
-            raise ValueError(
-                "output limits require dot paths and positive integer character counts"
-            )
-        name, *parts = path.split(".")
-        if name not in signature.output_fields:
-            raise ValueError("unknown output limit path")
-        if not parts:
-            raise ValueError("output limits require a string inside a native model field")
-        annotation, field = fields[name]
-        fields[name] = (constrain(annotation, parts, limit), field)
-    return dspy.make_signature(fields, signature.instructions, signature_name=signature.__name__)
-
-
 def _object(pairs):
     result = {}
     for key, value in pairs:
@@ -102,16 +54,20 @@ def _object(pairs):
     return result
 
 
-def _fields(value, fields, *, complete=False):
+def _fields(value, fields, *, canonicalize, complete=False):
     if not isinstance(value, dict):
         raise ValueError("object required")
     result = {}
     for key, item in value.items():
-        matches = [name for name in fields if name.casefold() == key.casefold()]
+        matches = [key] if key in fields else []
+        if canonicalize:
+            matches = [name for name in fields if name.casefold() == key.casefold()]
         if len(matches) != 1 or matches[0] in result:
             raise ValueError("unknown or ambiguous field")
         name = matches[0]
-        result[name] = _normalize(item, fields[name].annotation, complete=complete)
+        result[name] = _normalize(
+            item, fields[name].annotation, canonicalize=canonicalize, complete=complete
+        )
     if any(
         get_origin(field.annotation) is Literal and name not in result
         for name, field in fields.items()
@@ -122,11 +78,11 @@ def _fields(value, fields, *, complete=False):
     return result
 
 
-def _normalize(value, annotation, *, complete=False):
+def _normalize(value, annotation, *, canonicalize, complete=False):
     origin, args = get_origin(annotation), get_args(annotation)
     if origin is Annotated:
-        return _normalize(value, args[0], complete=complete)
-    if origin is Literal and isinstance(value, str):
+        return _normalize(value, args[0], canonicalize=canonicalize, complete=complete)
+    if canonicalize and origin is Literal and isinstance(value, str):
         matches = [
             x for x in args if isinstance(x, str) and x.casefold() == value.strip().casefold()
         ]
@@ -137,7 +93,7 @@ def _normalize(value, annotation, *, complete=False):
         candidates = []
         for branch in args:
             try:
-                candidate = _normalize(value, branch, complete=complete)
+                candidate = _normalize(value, branch, canonicalize=canonicalize, complete=complete)
                 TypeAdapter(branch).validate_python(candidate)
             except ValueError:
                 continue
@@ -147,11 +103,14 @@ def _normalize(value, annotation, *, complete=False):
             raise ValueError("unknown or ambiguous union")
         return candidates[0]
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-        return _fields(value, annotation.model_fields, complete=complete)
+        return _fields(value, annotation.model_fields, canonicalize=canonicalize, complete=complete)
     if origin is list and isinstance(value, list):
-        return [_normalize(x, args[0], complete=complete) for x in value]
+        return [_normalize(x, args[0], canonicalize=canonicalize, complete=complete) for x in value]
     if origin is dict and isinstance(value, dict):
-        return {k: _normalize(v, args[1], complete=complete) for k, v in value.items()}
+        return {
+            k: _normalize(v, args[1], canonicalize=canonicalize, complete=complete)
+            for k, v in value.items()
+        }
     return value
 
 
@@ -254,7 +213,7 @@ class _CanonicalParser:
         }
 
     def parse(self, signature, completion):
-        if not self.canonicalize:
+        if not self.canonicalize and self.schema_mode == "auto":
             return cast("_AdapterHooks", super()).parse(signature, completion)
         try:
             outputs = signature.output_fields
@@ -270,15 +229,20 @@ class _CanonicalParser:
             fields = json.loads(text, object_pairs_hook=_object)
             # Never obtain a bare decision's semantics from model defaults.
             if (
-                isinstance(fields, dict)
+                self.canonicalize
+                and isinstance(fields, dict)
                 and len(outputs) == 1
                 and not any(k.casefold() in {n.casefold() for n in outputs} for k in fields)
             ):
                 name, field = next(iter(outputs.items()))
                 annotation = field.annotation
                 if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-                    fields = {name: _fields(fields, annotation.model_fields, complete=True)}
-            fields = _fields(fields, outputs)
+                    fields = {
+                        name: _fields(
+                            fields, annotation.model_fields, canonicalize=True, complete=True
+                        )
+                    }
+            fields = _fields(fields, outputs, canonicalize=self.canonicalize)
             if fields.keys() != outputs.keys():
                 raise ValueError("output fields required")
             return {

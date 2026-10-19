@@ -213,15 +213,25 @@ def load_or_build(task: str, cfg: AppConfig) -> dspy.Module:
     # Local import: bootstrap must not import modules at module level
     # (modules.py imports load_or_build from here).
     from gluomem.llm.modules import build_module
+    from gluomem.llm.output_policy import apply_output_limits
 
     resolved_root = _resolve_root(cfg.dspy.artifacts.dir)
     target = artifact_dir(resolved_root, task)
     json_path = artifact_json_path(resolved_root, task)
     if (target / _PROGRAM_NAME).exists() or json_path.exists():
-        return load_artifact(resolved_root, task, pins=cfg.dspy.artifacts.pins, cfg=cfg)
-    if cfg.dspy.artifacts.require:
+        module = load_artifact(resolved_root, task, pins=cfg.dspy.artifacts.pins, cfg=cfg)
+    elif cfg.dspy.artifacts.require:
         raise ArtifactError(
             f"dspy.artifacts.require=true but no compiled artifact exists for "
             f"task '{task}' under {target}; run `make optimize-prompts` first"
         )
-    return build_module(task, cfg)
+    else:
+        module = build_module(task, cfg)
+    if cfg.dspy.retry.max_attempts > 1 and any(
+        module.named_sub_modules(type_=dspy.Refine, skip_compiled=False)
+    ):
+        raise ValueError("transient retry attempts cannot be combined with compiled Refine")
+    for predictor in module.predictors():
+        if isinstance(predictor.lm, dspy.LM):
+            predictor.lm.num_retries = 0
+    return apply_output_limits(module, cfg.dspy.output_field_limits.get(task, {}))

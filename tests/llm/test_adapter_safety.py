@@ -17,11 +17,35 @@ from gluomem.llm.signatures import TASK_SIGNATURES
         {"decision": {"target_frame_id": None, "rationale": "no action"}},
     ],
 )
-def test_semantic_literal_never_created_from_defaults(payload):
+@pytest.mark.parametrize("canonicalize", [False, True])
+def test_semantic_literal_never_created_from_defaults(payload, canonicalize):
     with pytest.raises(AdapterParseError):
-        _make_adapter("json", canonicalize=True).parse(
+        _make_adapter("json", schema_mode="required", canonicalize=canonicalize).parse(
             TASK_SIGNATURES["consolidate"], json.dumps(payload)
         )
+
+
+def test_extractor_policy_changes_require_explicit_reconstruction(tmp_path):
+    from gluomem.config.app_config import AppConfig
+    from gluomem.llm.modules import DspyExtractors
+    from gluomem.llm.structured_adapter import output_schema
+
+    cfg = AppConfig(
+        dspy={
+            "adapter": "json",
+            "schema_mode": "required",
+            "artifacts": {"dir": str(tmp_path)},
+            "output_field_limits": {"consolidate": {"decision.rationale": 37}},
+        }
+    )
+    extractor = DspyExtractors(cfg)
+    cfg.dspy.output_field_limits["consolidate"]["decision.rationale"] = 83
+    for instance, expected in [(extractor, 37), (DspyExtractors(cfg), 83)]:
+        signature = instance._module("consolidate").signature
+        field = output_schema(signature)["$defs"]["ConsolidationDecision"]["properties"][
+            "rationale"
+        ]
+        assert field["maxLength"] == expected
 
 
 def test_run_wrapper_categorical_preserves_cause():
@@ -54,6 +78,7 @@ def test_validation_retry_and_refine_are_mutually_exclusive():
 
     with pytest.raises(ValueError):
         DspyConfig(
+            model="mock",
             adapter="json",
             validation_retries=1,
             tasks={
@@ -62,6 +87,16 @@ def test_validation_retry_and_refine_are_mutually_exclusive():
                 )
             },
         )
+
+
+@pytest.mark.parametrize(
+    "policy", [{"canonicalize": True}, {"schema_mode": "required"}, {"validation_retries": 1}]
+)
+def test_structured_options_reject_chat_during_config_validation(policy):
+    from gluomem.config.app_config import DspyConfig
+
+    with pytest.raises(ValueError, match="json or baml"):
+        DspyConfig(model="mock", **policy)
 
 
 @pytest.mark.parametrize(

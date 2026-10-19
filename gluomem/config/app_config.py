@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import dotenv
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -436,7 +437,6 @@ class CompactionConfig(BaseModel):
 
 class ContradictionConfig(BaseModel):
     enabled: bool = True
-    model: str = "deepseek-flash"
     top_k: int = Field(default=1, ge=1)
 
 
@@ -531,7 +531,7 @@ class DspyCacheConfig(BaseModel):
 
 
 class DspyTaskConfig(BaseModel):
-    model: str
+    model: Annotated[str, Field(min_length=1, pattern=r"\S")] | None = None
     module: str
     temperature: float | None = None
     max_tokens: int | None = None
@@ -541,27 +541,23 @@ class DspyTaskConfig(BaseModel):
 def _default_dspy_tasks() -> dict[str, DspyTaskConfig]:
     return {
         "fact_extraction": DspyTaskConfig(
-            model="deepseek-flash",
             module="predict",
             temperature=0.0,
             max_tokens=4096,
         ),
         "event_extraction": DspyTaskConfig(
-            model="deepseek-flash",
             module="predict",
             temperature=0.0,
             refine={"enabled": False, "N": 2},
         ),
-        "cognify": DspyTaskConfig(model="deepseek-flash", module="predict"),
-        "contradiction": DspyTaskConfig(model="deepseek-flash", module="predict", temperature=0.0),
+        "cognify": DspyTaskConfig(module="predict"),
+        "contradiction": DspyTaskConfig(module="predict", temperature=0.0),
         "event_claims": DspyTaskConfig(
-            model="deepseek-flash",
             module="predict",
             temperature=0.0,
             max_tokens=4096,
         ),
         "consolidate": DspyTaskConfig(
-            model="deepseek-flash",
             module="predict",
             temperature=0.0,
         ),
@@ -578,13 +574,40 @@ class DspyArtifactsConfig(BaseModel):
     pins: dict[str, str] = Field(default_factory=dict)
 
 
+class DspyRetryConfig(BaseModel):
+    """Bounded transient extraction attempts; one means no automatic retry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_attempts: int = Field(default=1, strict=True, ge=1)
+    initial_delay_seconds: float = Field(default=1.0, strict=True, ge=0, allow_inf_nan=False)
+    max_delay_seconds: float = Field(default=30.0, strict=True, ge=0, allow_inf_nan=False)
+
+    @field_validator("max_attempts", "initial_delay_seconds", "max_delay_seconds", mode="before")
+    @classmethod
+    def _decode_environment_number(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                pass
+        return value
+
+    @model_validator(mode="after")
+    def _validate_delays(self) -> DspyRetryConfig:
+        if self.initial_delay_seconds > self.max_delay_seconds:
+            raise ValueError("initial retry delay must not exceed max_delay_seconds")
+        return self
+
+
 class DspyConfig(BaseModel):
-    default_model: str = "deepseek-flash"
-    adapter: str = "chat"
+    model: str = Field(min_length=1, pattern=r"\S")
+    adapter: Literal["chat", "json", "baml"] = "chat"
     canonicalize: bool = False
     schema_mode: Literal["auto", "required"] = "auto"
     schema_strict: bool = False
     validation_retries: Literal[0, 1] = 0
+    retry: DspyRetryConfig = Field(default_factory=DspyRetryConfig)
     output_field_limits: dict[str, dict[str, Annotated[int, Field(strict=True, gt=0)]]] = Field(
         default_factory=dict,
         description="Opt-in task/model-field dot paths to maximum Unicode character counts.",
@@ -598,16 +621,19 @@ class DspyConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_structured_policy(self) -> DspyConfig:
-        if self.output_field_limits:
-            if self.schema_mode != "required" or self.adapter not in ("json", "baml"):
-                raise ValueError("output_field_limits requires declared json/baml schema transport")
-            from gluomem.llm.signatures import TASK_SIGNATURES
-            from gluomem.llm.structured_adapter import configured_signature
-
-            for task, limits in self.output_field_limits.items():
-                if task not in TASK_SIGNATURES or task not in self.tasks:
-                    raise ValueError("unknown output_field_limits task")
-                configured_signature(TASK_SIGNATURES[task], limits)
+        if self.retry.max_attempts > 1 and (
+            self.validation_retries
+            or any((t.refine or {}).get("enabled") for t in self.tasks.values())
+        ):
+            raise ValueError(
+                "transient retry attempts cannot be combined with validation retries or Refine"
+            )
+        if self.adapter == "chat" and (
+            self.canonicalize or self.schema_mode != "auto" or self.validation_retries
+        ):
+            raise ValueError("structured policy requires json or baml")
+        if self.output_field_limits and self.schema_mode != "required":
+            raise ValueError("output_field_limits requires declared json/baml schema transport")
         if self.schema_strict and self.schema_mode != "required":
             raise ValueError("schema_strict requires schema_mode=required")
         if self.validation_retries and any(
@@ -642,7 +668,8 @@ _PYDANTIC_DEFAULTS: dict[str, Any] = {
     "kg": KgConfig().model_dump(),
     "safety": SafetyConfig().model_dump(),
     "write": WriteConfig().model_dump(),
-    "dspy": DspyConfig().model_dump(),
+    # Materialize optional defaults for deep overrides, without supplying model.
+    "dspy": DspyConfig.model_construct().model_dump(),
 }
 
 
@@ -672,7 +699,7 @@ class AppConfig(BaseSettings):
     kg: KgConfig = Field(default_factory=KgConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     write: WriteConfig = Field(default_factory=WriteConfig)
-    dspy: DspyConfig = Field(default_factory=DspyConfig)
+    dspy: DspyConfig
 
     _load_overrides: dict[str, Any] = PrivateAttr(default_factory=dict)
 
@@ -699,11 +726,11 @@ class AppConfig(BaseSettings):
             self.embedding.model,
             self.search.rerank.model,
             self.safety.scanner.classifier.model,
-            self.write.contradiction.model,
-            self.dspy.default_model,
+            self.dspy.model,
         ]
         for task in self.dspy.tasks.values():
-            refs.append(task.model)
+            if task.model is not None:
+                refs.append(task.model)
         for ref in refs:
             if ref not in self.models:
                 known = ", ".join(sorted(self.models)) or "(none)"

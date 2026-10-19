@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import dspy
 
 from gluomem.config.registry import ModelRegistry
+from gluomem.llm.structured_adapter import make_adapter as _make_adapter
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -34,25 +35,6 @@ def _ensure_cache(cfg: AppConfig) -> None:
             disk_cache_dir=cache_dir,
         )
         _cache_configured = True
-
-
-def _make_adapter(
-    name: str,
-    *,
-    canonicalize: bool = False,
-    schema_mode: str = "auto",
-    schema_strict: bool = False,
-    validation_retries: int = 0,
-) -> dspy.Adapter:
-    from gluomem.llm.structured_adapter import make_adapter
-
-    return make_adapter(
-        name,
-        canonicalize=canonicalize,
-        schema_mode=schema_mode,
-        schema_strict=schema_strict,
-        validation_retries=validation_retries,
-    )
 
 
 class LMRouter:
@@ -85,6 +67,8 @@ class LMRouter:
         max_tokens: int | None,
     ) -> dspy.LM:
         kwargs: dict[str, Any] = dict(entry.extra)
+        # The extraction policy owns retries, including when a model has legacy overrides.
+        kwargs["num_retries"] = 0
         kwargs["extra_body"] = self._reasoning_extra_body(entry)
         if not kwargs["extra_body"]:
             del kwargs["extra_body"]
@@ -131,7 +115,7 @@ class LMRouter:
     def lm_for(self, task: str) -> dspy.LM:
         """Return the ``dspy.LM`` for a configured task."""
         tc = self._task_cfg(task)
-        entry = self._registry.resolve(tc.model)
+        entry = self._registry.resolve(tc.model or self._cfg.dspy.model)
         return self._build_lm(entry, temperature=tc.temperature, max_tokens=tc.max_tokens)
 
     def lm_for_model(
@@ -159,7 +143,7 @@ class LMRouter:
     @contextmanager
     def bind(self, task: str) -> Iterator[None]:
         """Bind the task's LM, adapter, and usage tracking for the duration."""
-        self.assert_api_key(self._task_cfg(task).model)
+        self.assert_api_key(self._task_cfg(task).model or self._cfg.dspy.model)
         with dspy.context(
             lm=self.lm_for(task),
             adapter=self._adapter,

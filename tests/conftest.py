@@ -20,6 +20,12 @@ _dspy_cache = tempfile.mkdtemp(prefix="gluomem-dspy-cache-")
 os.environ.setdefault("DSPY_CACHEDIR", _dspy_cache)
 
 
+@pytest.fixture(autouse=True)
+def explicit_test_dspy_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Select a test model explicitly; production configuration has no fallback."""
+    monkeypatch.setenv("GLUOMEM_DSPY__MODEL", "deepseek-flash")
+
+
 @pytest.fixture
 def cfg() -> AppConfig:
     return load_config()

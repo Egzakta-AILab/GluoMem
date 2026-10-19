@@ -30,7 +30,7 @@ def main() -> int:
 
     import gluomem
     from gluomem import extras
-    from gluomem.config.app_config import load_config
+    from gluomem.config.app_config import DspyConfig, load_config
     from gluomem.embedding.providers import MiniLMEmbedder, MockEmbedder
     from gluomem.frames.store import FrameStore
     from gluomem.search.hybrid import HybridSearch
@@ -59,7 +59,17 @@ def main() -> int:
             print(f"FAIL: core subpackage import loaded {sorted(loaded)}", file=sys.stderr)
             return 1
 
-    cfg = load_config()
+    cfg = load_config(overrides={"dspy.model": "mock"})
+    if args.expect_core_only:
+        DspyConfig(
+            model="mock",
+            adapter="json",
+            schema_mode="required",
+            output_field_limits={"consolidate": {"decision.rationale": 37}},
+        )
+        if "dspy" in sys.modules:
+            print("FAIL: bounded configuration imported optional DSPy", file=sys.stderr)
+            return 1
     dim = int(cfg.storage.vector_dim)
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "smoke.mind"

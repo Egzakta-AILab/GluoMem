@@ -16,7 +16,7 @@ GluoMem is an in-development Python memory framework (package version 0.1.0), no
 - **Scoped storage**: scope and recall eligibility are pushed into every vector, full-text and LIKE query before `LIMIT`, so one scope's rows never fill another scope's top-k. PostgreSQL uses HNSW with iterative scans so filtered searches still return k rows. The Postgres schema is SQLAlchemy metadata in [pg_schema.py](./gluomem/storage/pg_schema.py) with Alembic revisions generated from it (`gluomem migrate upgrade|downgrade|current|heads|revision --autogenerate`); a backend refuses to open a database that is not at the head revision.
 - **Memory lifecycle**: frames carry a kind (`fact`, `profile`, `preference`, `decision`, `procedure`, `episode`, `correction`, `summary`) and a status (`candidate`, `active`, `superseded`, `expired`, `forgotten`, `tombstoned`). Source events are idempotent per `(event_id, revision)`, and a reused key with a different payload is a conflict. Low-confidence writes become review candidates (`lifecycle.review_threshold`), and episodes expire after `lifecycle.episode_ttl_days` (`sweep_expired_episodes` marks due episodes `expired` and removes their FTS, vector and chunk projections). Correct, forget, scope erasure (`forget_scope`) and retract-source scrub the old plaintext from frames, indexes, stored event payloads, queued jobs and orphaned graph rows, then record a suppression key so a replay of the same content stays forgotten. Each of these bumps the scope generation.
 - **Service and worker** (`gluomem[service]`): `gluomem serve` exposes `/v1/events`, `/v1/memories:recall`, `/v1/memories:sweep-expired`, memory listing, lineage, review, correct, forget, source retraction, export, job status and `/v1/status`; `/healthz` and `/readyz` are unauthenticated and minimal. `gluomem worker` processes durable jobs with leases, retries, dead-lettering and an optional `should_pause` backpressure hook. A job leased before a forget or correction is re-run at the new scope generation instead of writing stale data. `gluomem[client]` provides `GluoMemClient` and `AsyncGluoMemClient`.
-- **Configuration**: one typed config tree (`pydantic-settings`, `GLUOMEM_` prefix). Precedence is `Pydantic defaults < env < with_overrides()`.
+- **Configuration**: one typed config tree (`pydantic-settings`, `GLUOMEM_` prefix). Precedence is `Pydantic defaults < env < with_overrides()`. `dspy.model` is required; GluoMem does not select a generation model for you. Optional per-task model overrides use the same registry.
 
 ## Native Hermes integration
 
@@ -35,7 +35,7 @@ The core package is small. Model-backed components are optional extras. When a c
 | Install | Adds | Readiness |
 |---|---|---|
 | `gluomem` (core) | Config, SQLite storage, I/P/B frames, hybrid search, KG, fake extractors, mock embedder | Works offline; real embedding, reranking and DSPy extraction raise `MissingExtraError` |
-| `gluomem[llm]` | DSPy >= 3.4.1: extraction | Needs the configured model endpoint and its credentials where required; defaults use OpenRouter, but an explicit registry entry can select a local OpenAI-compatible server |
+| `gluomem[llm]` | DSPy >= 3.4.1: extraction | Requires an explicitly selected registered model, its endpoint and credentials where needed; local OpenAI-compatible servers are supported |
 | `gluomem[embeddings]` | sentence-transformers MiniLM embedder and cross-encoder reranker | Downloads models from Hugging Face on first use |
 | `gluomem[postgres]` | `psycopg`, `pgvector`, Alembic and SQLAlchemy for the PostgreSQL backend | Connects via `storage.backend: postgres` and `storage.dsn`; run `gluomem migrate upgrade` first |
 | `gluomem[service]` | FastAPI, uvicorn and httpx for `gluomem serve` and `gluomem worker` | Needs a service key in `GLUOMEM_SERVICE_KEY` or `--service-key-file` |
@@ -60,6 +60,12 @@ uv run gluomem --help    # CLI: components, index, migrate, serve, worker
 CI (`.github/workflows/ci.yml`) runs `make check` and `make wheel-check` on Python 3.11, 3.12 and 3.13 on every pull request, plus the live PostgreSQL tests (`pytest -m postgres`) against a pgvector PG18 service container. Locally those tests skip unless `GLUOMEM_TEST_PG_DSN` points at a database where they may create and drop schemas. Slow tests that download models run only when the workflow is dispatched manually with `run_model_tests`.
 
 Inspect component readiness:
+
+Select your registered generation model explicitly, either with
+`GLUOMEM_DSPY__MODEL` or `load_config(overrides={"dspy.model": "your-model"})`.
+Register custom deployments in `models`; no model or paid provider is selected
+implicitly. This replaces the old `dspy.default_model` setting. The test suite
+selects its own fixture model and does not make model calls by default.
 
 ```bash
 uv run gluomem components
