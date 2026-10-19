@@ -87,6 +87,7 @@ This repository holds the memory library, CLI, HTTP service/worker, Python SDK, 
 1. **[SPEC.md](./SPEC.md)** — original research specification: purpose, scope, requirements, acceptance criteria.
 2. **[DESIGN.md](./DESIGN.md)** — architecture, schema, layers, config system, DSPy layer.
 3. **[CONTEXT.md](./CONTEXT.md)** — domain terms, code mapping and architectural decisions.
+4. **[Structured extraction policy](./docs/structured-extraction.md)** — opt-in schema transport, validation, and native output-field limits.
 
 
 ## License

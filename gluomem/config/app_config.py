@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import dotenv
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
@@ -581,12 +581,40 @@ class DspyArtifactsConfig(BaseModel):
 class DspyConfig(BaseModel):
     default_model: str = "deepseek-flash"
     adapter: str = "chat"
+    canonicalize: bool = False
+    schema_mode: Literal["auto", "required"] = "auto"
+    schema_strict: bool = False
+    validation_retries: Literal[0, 1] = 0
+    output_field_limits: dict[str, dict[str, Annotated[int, Field(strict=True, gt=0)]]] = Field(
+        default_factory=dict,
+        description="Opt-in task/model-field dot paths to maximum Unicode character counts.",
+    )
     reasoning_enabled: bool | None = False
     track_usage: bool = True
     cache: DspyCacheConfig = Field(default_factory=DspyCacheConfig)
     tasks: dict[str, DspyTaskConfig] = Field(default_factory=_default_dspy_tasks)
     optimizer: DspyOptimizerConfig = Field(default_factory=DspyOptimizerConfig)
     artifacts: DspyArtifactsConfig = Field(default_factory=DspyArtifactsConfig)
+
+    @model_validator(mode="after")
+    def _validate_structured_policy(self) -> DspyConfig:
+        if self.output_field_limits:
+            if self.schema_mode != "required" or self.adapter not in ("json", "baml"):
+                raise ValueError("output_field_limits requires declared json/baml schema transport")
+            from gluomem.llm.signatures import TASK_SIGNATURES
+            from gluomem.llm.structured_adapter import configured_signature
+
+            for task, limits in self.output_field_limits.items():
+                if task not in TASK_SIGNATURES or task not in self.tasks:
+                    raise ValueError("unknown output_field_limits task")
+                configured_signature(TASK_SIGNATURES[task], limits)
+        if self.schema_strict and self.schema_mode != "required":
+            raise ValueError("schema_strict requires schema_mode=required")
+        if self.validation_retries and any(
+            (t.refine or {}).get("enabled") for t in self.tasks.values()
+        ):
+            raise ValueError("adapter validation retries cannot be combined with Refine")
+        return self
 
 
 class _PydanticDefaultsSource(PydanticBaseSettingsSource):

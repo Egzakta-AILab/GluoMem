@@ -36,12 +36,23 @@ def _ensure_cache(cfg: AppConfig) -> None:
         _cache_configured = True
 
 
-def _make_adapter(name: str) -> dspy.Adapter:
-    if name == "chat":
-        return dspy.ChatAdapter()
-    if name == "json":
-        return dspy.JSONAdapter()
-    raise ValueError(f"unknown dspy.adapter {name!r}; expected 'chat' or 'json'")
+def _make_adapter(
+    name: str,
+    *,
+    canonicalize: bool = False,
+    schema_mode: str = "auto",
+    schema_strict: bool = False,
+    validation_retries: int = 0,
+) -> dspy.Adapter:
+    from gluomem.llm.structured_adapter import make_adapter
+
+    return make_adapter(
+        name,
+        canonicalize=canonicalize,
+        schema_mode=schema_mode,
+        schema_strict=schema_strict,
+        validation_retries=validation_retries,
+    )
 
 
 class LMRouter:
@@ -50,7 +61,13 @@ class LMRouter:
     def __init__(self, cfg: AppConfig, registry: ModelRegistry | None = None) -> None:
         self._cfg = cfg
         self._registry = registry if registry is not None else ModelRegistry(cfg)
-        self._adapter = _make_adapter(cfg.dspy.adapter)
+        self._adapter = _make_adapter(
+            cfg.dspy.adapter,
+            canonicalize=cfg.dspy.canonicalize,
+            schema_mode=cfg.dspy.schema_mode,
+            schema_strict=cfg.dspy.schema_strict,
+            validation_retries=cfg.dspy.validation_retries,
+        )
         _ensure_cache(cfg)
 
     def _task_cfg(self, task: str) -> DspyTaskConfig:
