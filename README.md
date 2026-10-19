@@ -26,7 +26,7 @@ The provider source and wheel are separate from the core wheel. Follow its READM
 
 ## Evaluation & Benchmarks (`gluomem-bench`)
 
-The benchmark harness, LoCoMo / LongMemEval / BEAM 128K adapted-rubric / MemoryAgentBench replay / MINJA adversarial / SR-EN evaluation suites, Optuna retrieval tuning (`tune`, `ablate`), `mem0` comparison adapter, and DSPy prompt optimization live in the companion `gluomem-bench` repository (`https://github.com/UkisAI-Egzakta/gluomem-bench`). Adapter availability and integration smokes are not full-campaign quality results; see that repository's evidence reports before making comparisons.
+The benchmark harness, LoCoMo / LongMemEval / BEAM 128K adapted-rubric / MemoryAgentBench replay / MINJA adversarial / SR-EN evaluation suites, Optuna retrieval tuning (`tune`, `ablate`), `mem0` comparison adapter, and DSPy prompt optimization live in the companion `gluomem-bench` repository (`https://github.com/Egzakta-AILab/gluomem-bench`). Adapter availability and integration smokes are not full-campaign quality results; see that repository's evidence reports before making comparisons.
 
 ## Installation
 
