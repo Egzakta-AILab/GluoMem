@@ -49,6 +49,25 @@ def test_lm_for_and_model_swap(monkeypatch: pytest.MonkeyPatch) -> None:
         router.lm_for("nope")
 
 
+def test_all_default_tasks_inherit_explicit_model() -> None:
+    cfg = load_config(overrides={"dspy.model": "sonnet5"})
+    router = LMRouter(cfg)
+    assert cfg.dspy.tasks
+    for task, task_cfg in cfg.dspy.tasks.items():
+        assert task_cfg.model is None
+        assert router.lm_for(task).model == "openrouter/anthropic/claude-sonnet-5"
+
+
+def test_task_override_does_not_change_other_tasks() -> None:
+    cfg = load_config(overrides={"dspy.model": "sonnet5"})
+    cfg.dspy.tasks["fact_extraction"].model = "gpt5-mini"
+    router = LMRouter(cfg)
+    assert router.lm_for("fact_extraction").model == "openrouter/openai/gpt-5.4-mini"
+    assert router.lm_for("contradiction").model == "openrouter/anthropic/claude-sonnet-5"
+    cfg.dspy.tasks["fact_extraction"].model = None
+    assert LMRouter(cfg).lm_for("fact_extraction").model == "openrouter/anthropic/claude-sonnet-5"
+
+
 def test_reasoning_policy_and_extra_passthrough() -> None:
     router = _router()
     for name in ("deepseek-flash", "sonnet5", "gpt5-mini", "qwen3", "glm5", "haiku"):

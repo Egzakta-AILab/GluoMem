@@ -41,6 +41,7 @@ from gluomem.llm.outputs import (
     ExtractionError,
     StoredCandidate,
 )
+from gluomem.llm.retry import run_with_retry
 from gluomem.llm.router import LMRouter
 from gluomem.llm.signatures import TASK_SIGNATURES
 
@@ -102,9 +103,13 @@ class DspyExtractors:
         from gluomem.llm.concurrency import ConcurrencyGate
         from gluomem.llm.usage import UsageAccumulator
 
-        self._cfg = cfg
-        self._router = router if router is not None else LMRouter(cfg)
+        self._cfg = cfg.model_copy(deep=True)
+        self._router = router if router is not None else LMRouter(self._cfg)
         self._modules: dict[str, dspy.Module] = {}
+        for task in self._cfg.dspy.output_field_limits:
+            if task not in TASK_SIGNATURES or task not in self._cfg.dspy.tasks:
+                raise ValueError("unknown output_field_limits task")
+            self._modules[task] = load_or_build(task, self._cfg)
         # Token accounting across every extraction call (thread-safe; the
         # write path fans out). Consumers read .usage.snapshot().
         self.usage = UsageAccumulator()
@@ -118,14 +123,21 @@ class DspyExtractors:
         return _refine_wrap(self._modules[task], self._cfg.dspy.tasks[task])
 
     def _run(self, task: str, **inputs: Any) -> dspy.Prediction:
+        if self._cfg.dspy.retry.max_attempts > 1 and dspy.settings.send_stream is not None:
+            raise ExtractionError("transient retries require non-streaming extraction")
         module = self._module(task)
-        try:
+
+        def execute() -> dspy.Prediction:
             with self._llm_gate, self._router.bind(task):
                 pred = module(**inputs)
+            if pred is None:
+                raise ExtractionError("extraction produced no valid output")
+            return pred
+
+        try:
+            pred = run_with_retry(execute, task=task, policy=self._cfg.dspy.retry)
         except Exception as exc:
-            raise ExtractionError(f"dspy task '{task}' failed: {exc}") from exc
-        if pred is None:
-            raise ExtractionError(f"dspy task '{task}' produced no valid output after retries")
+            raise ExtractionError("structured extraction failed") from exc
         if self._cfg.dspy.track_usage:
             self.usage.add(pred.get_lm_usage())
         return pred

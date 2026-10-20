@@ -182,10 +182,10 @@ def test_sql_failure_rollback_and_repair_indexes(
     def boom(*_a, **_k):
         raise RuntimeError("chunk write failed")
 
-    monkeypatch.setattr(store, "_index_chunks", boom)
-    with pytest.raises(RuntimeError, match="chunk write failed"):
-        store.create_i_frame("gop-1", "delta epsilon zeta")
-    monkeypatch.undo()
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_index_chunks", boom)
+        with pytest.raises(RuntimeError, match="chunk write failed"):
+            store.create_i_frame("gop-1", "delta epsilon zeta")
     assert db.conn.execute("SELECT COUNT(*) FROM memory_frames").fetchone()[0] == 0
 
     def _legacy_unindexed(

@@ -264,7 +264,11 @@ def component_statuses(
     for task, task_cfg in sorted(cfg.dspy.tasks.items()):
         statuses.append(
             _llm_status(
-                cfg, f"extraction:{task}", cfg.write.extraction_backend, task_cfg.model, env
+                cfg,
+                f"extraction:{task}",
+                cfg.write.extraction_backend,
+                task_cfg.model or cfg.dspy.model,
+                env,
             )
         )
     return statuses
