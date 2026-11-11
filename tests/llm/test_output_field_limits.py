@@ -156,7 +156,11 @@ def test_compiled_native_signature_cannot_bypass_limits(tmp_path, format):
     cfg.dspy.artifacts.dir = str(tmp_path)
     extractors = DspyExtractors(cfg)
     bounded = extractors._module("consolidate")
-    assert bounded.signature.instructions == "Retained compiled instructions."
+    from gluomem.llm.signatures import CONSOLIDATION_POLICY_INSTRUCTIONS
+
+    assert bounded.signature.instructions == (
+        "Retained compiled instructions.\n\n" + CONSOLIDATION_POLICY_INSTRUCTIONS
+    )
     assert bounded.demos == original.demos
     assert (
         sa.output_schema(bounded.signature)["$defs"]["ConsolidationDecision"]["properties"][

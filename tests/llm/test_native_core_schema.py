@@ -18,6 +18,7 @@ from dspy.lm15 import (
 from gluomem.config.app_config import AppConfig, DspyConfig, DspyRetryConfig, ModelEntry
 from gluomem.llm.modules import DspyExtractors
 from gluomem.llm.outputs import ExtractionError, StoredCandidate
+from tests.llm._helpers import ContextOnlyExtractors
 
 
 @pytest.fixture(params=[False, True], ids=["canonicalize-off", "canonicalize-on"])
@@ -57,11 +58,14 @@ def native_core(tmp_path, monkeypatch, request):
                             "role": "assistant",
                             "content": json.dumps(
                                 {
-                                    "decision": {
-                                        "action": "ADD",
-                                        "target_frame_id": None,
-                                        "rationale": state["rationale"],
-                                    }
+                                    "decision": state.get(
+                                        "decision",
+                                        {
+                                            "action": "ADD",
+                                            "target_frame_id": None,
+                                            "rationale": state["rationale"],
+                                        },
+                                    )
                                 }
                             ),
                         },
@@ -165,3 +169,82 @@ def test_core_retries_native_http_failure_and_logs_safe_json(native_core, caplog
     assert all(
         "PRIVATE_TRANSPORT_MARKER" not in line and "telescope" not in line for line in encoded
     )
+
+
+def test_facade_refuses_unobserved_model_target(native_core):
+    native_core["state"]["decision"] = {
+        "action": "SUPERSEDE",
+        "target_frame_id": 2,
+        "rationale": "Authored wrong-bucket ID.",
+    }
+    with pytest.raises(ExtractionError, match="outside the observed candidate set"):
+        consolidate(native_core)
+    assert len(native_core["requests"]) == 1
+
+
+def test_loaded_native_correction_refuses_null_then_commits_positive(native_core, frame_store, cfg):
+    from pathlib import Path
+
+    import jsonschema
+
+    from gluomem.frames.eligibility import is_recall_eligible
+    from gluomem.llm.signatures import CONSOLIDATION_POLICY_INSTRUCTIONS
+    from gluomem.search.hybrid import HybridSearch
+    from gluomem.write.events import SourceEvent, ingest_source_event
+
+    original = frame_store.create_i_frame("database", "Database port is 5432.")
+    route = native_core["cfg"].model_copy(deep=True)
+    route.dspy.artifacts.dir = str(Path(__file__).resolve().parents[2] / "artifacts" / "dspy")
+    route.dspy.artifacts.require = True
+    extractors = DspyExtractors(route)
+    loaded = extractors._module("consolidate")
+    assert loaded.signature.instructions.endswith(CONSOLIDATION_POLICY_INSTRUCTIONS)
+    event = SourceEvent(
+        event_id="authored-http-correction",
+        source_ref="authored:database",
+        source_type="explicit_memory",
+        kind="fact",
+        content="Database port is 6432.",
+    )
+    native_core["state"]["decision"] = {
+        "action": "SUPERSEDE",
+        "target_frame_id": None,
+        "rationale": "Correct port.",
+    }
+    with pytest.raises(ExtractionError, match="structured extraction failed"):
+        ingest_source_event(
+            event, store=frame_store, cfg=cfg, extractors=ContextOnlyExtractors(extractors)
+        )
+    assert frame_store.all_frames() == [original]
+    assert frame_store._backend.scalar("SELECT COUNT(*) FROM source_events") == 0
+    assert frame_store._backend.scalar("SELECT COUNT(*) FROM memory_provenance") == 0
+    _, invalid_request = native_core["requests"][-1]
+    schema = invalid_request["response_format"]["json_schema"]["schema"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"decision": native_core["state"]["decision"]}, schema)
+    assert CONSOLIDATION_POLICY_INSTRUCTIONS in json.dumps(invalid_request["messages"])
+
+    native_core["state"]["decision"]["target_frame_id"] = original.id
+    result = ingest_source_event(
+        event, store=frame_store, cfg=cfg, extractors=ContextOnlyExtractors(extractors)
+    )
+    replacement = frame_store.get_frame(result.frames[0].id)
+    assert replacement.frame_type == "I" and is_recall_eligible(replacement)
+    assert replacement.verified_by_user and replacement.supersedes == original.id
+    retired = frame_store.get_frame(original.id)
+    assert retired.status == "superseded" and retired.superseded_by == replacement.id
+    assert retired.content == "[forgotten]"
+    assert [(x.source_frame_id, x.operation) for x in frame_store.lineage(replacement.id)] == [
+        (original.id, "supersede")
+    ]
+    assert [(p.source_ref, p.verbatim_span) for p in result.provenance] == [
+        (event.source_ref, event.content)
+    ]
+    current = HybridSearch(frame_store.db, frame_store, cfg, embedder=frame_store.embedder).search(
+        "Database port", scope=original.scope
+    )
+    assert replacement.id in [hit.frame.id for hit in current.hits]
+    assert "5432" not in str(current)
+    assert len(native_core["requests"]) == 2
+    assert all(path == "/v1/chat/completions" for path, _ in native_core["requests"])
+    jsonschema.validate({"decision": native_core["state"]["decision"]}, schema)

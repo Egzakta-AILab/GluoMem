@@ -88,7 +88,13 @@ class RecallRequest(_Req):
     until: str | None = Field(default=None, max_length=64)
     now_iso: str | None = Field(default=None, max_length=64)
 
-    @field_validator("since", "until", "now_iso")
+    candidate_budget: int = Field(default=1024, ge=1, le=4096)
+    evidence_frame_budget: int = Field(default=256, ge=1, le=1024)
+
+    as_of: str | None = Field(default=None, max_length=64)
+    known_at: str | None = Field(default=None, max_length=64)
+
+    @field_validator("since", "until", "now_iso", "as_of", "known_at")
     @classmethod
     def valid_time(cls, value: str | None) -> str | None:
         if value is not None:

@@ -31,6 +31,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import datetime
 
+    from gluomem.llm.outputs import ClaimConsolidationContext
+
 _log = logging.getLogger(__name__)
 
 _FAKE_BANNER = (
@@ -193,6 +195,16 @@ class FakeExtractors:
                     rationale="Exact normalized match with existing frame.",
                 )
         return ConsolidationDecision(action="ADD")
+
+    def consolidate_claim_with_context(
+        self,
+        new_claim: str,
+        candidates: Sequence[StoredCandidate],
+        *,
+        context: ClaimConsolidationContext,  # noqa: ARG002
+    ) -> ConsolidationDecision:
+        """Keep scripted queues and exact matching identical to legacy calls."""
+        return self.consolidate_claim(new_claim, candidates)
 
 
 class NullExtractors:

@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 from gluomem.config.app_config import AppConfig
 from gluomem.frames.content_hash import content_hash, suppression_key
 from gluomem.frames.eligibility import can_merge_into
+from gluomem.frames.generation import lock_scope_generation
+from gluomem.frames.provenance import get_frames_provenance
 from gluomem.storage.scope import scope_sql
 
 if TYPE_CHECKING:
@@ -54,10 +56,23 @@ def compact(
         except KeyError:
             continue
 
+        provenance = get_frames_provenance(backend, [base_id, *p_ids], scope=eff_scope)
+        support: dict[int, set[str]] = {}
+        for record in provenance:
+            support.setdefault(record.frame_id, set()).add(record.source_ref)
+        referenced = {
+            ref
+            for frame in store.all_frames(scope=eff_scope)
+            for ref in frame.correction_reference_ids
+        }
         compatible = [
             p
             for p in (store.get_frame(pid, scope=eff_scope) for pid in p_ids)
-            if can_merge_into(base, p) and not store.frames_based_on(p.id, scope=eff_scope)
+            if can_merge_into(base, p)
+            and p.id not in referenced
+            and not store.frames_based_on(p.id, scope=eff_scope)
+            # Distinct constituent claims are not corroboration of the aggregate.
+            and support.get(p.id, set()) == support.get(base_id, set())
         ]
         if len(compatible) <= trigger:
             continue
@@ -73,6 +88,25 @@ def compact(
         old_hash = base.content_hash
 
         with store.db.transaction():
+            lock_scope_generation(backend, eff_scope)
+            inputs = [base, *older_frames]
+            current = store.get_frames([f.id for f in inputs], scope=eff_scope)
+            # Embedding preparation is outside this lock. Erasure or any other
+            # input change invalidates the complete publication, not just its index.
+            if any(current.get(f.id) != f for f in inputs):
+                continue
+            if get_frames_provenance(backend, [base_id, *p_ids], scope=eff_scope) != provenance:
+                continue
+            referenced_now = {
+                ref
+                for frame in store.all_frames(scope=eff_scope)
+                for ref in frame.correction_reference_ids
+            }
+            if any(
+                p.id in referenced_now or store.frames_based_on(p.id, scope=eff_scope)
+                for p in older_frames
+            ):
+                continue
             store._update(
                 base_id,
                 eff_scope,

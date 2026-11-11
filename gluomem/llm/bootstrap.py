@@ -214,6 +214,7 @@ def load_or_build(task: str, cfg: AppConfig) -> dspy.Module:
     # (modules.py imports load_or_build from here).
     from gluomem.llm.modules import build_module
     from gluomem.llm.output_policy import apply_output_limits
+    from gluomem.llm.signatures import enforce_consolidation_contract, enforce_source_quote_contract
 
     resolved_root = _resolve_root(cfg.dspy.artifacts.dir)
     target = artifact_dir(resolved_root, task)
@@ -227,6 +228,32 @@ def load_or_build(task: str, cfg: AppConfig) -> dspy.Module:
         )
     else:
         module = build_module(task, cfg)
+    if task == "event_claims":
+        module = enforce_source_quote_contract(
+            module,
+            getattr(getattr(cfg, "write", None), "source_capture_policy", None),
+            writer_contract=getattr(getattr(cfg, "write", None), "writer_contract", None),
+        )
+    if task == "event_claims" and getattr(
+        getattr(cfg, "write", None), "semantic_producer_contract", None
+    ) in (
+        "observed-assertion-date-v1",
+        "observed-assertion-date-v2",
+        "observed-property-identity-v3",
+        "observed-assertion-scope-v4",
+    ):
+        from gluomem.llm.signatures import enforce_observed_date_contract
+
+        module = enforce_observed_date_contract(module)
+    if (
+        task == "event_claims"
+        and cfg.write.semantic_producer_contract == "observed-assertion-scope-v4"
+    ):
+        from gluomem.llm.signatures import enforce_assertion_scope_contract
+
+        module = enforce_assertion_scope_contract(module)
+    if task == "consolidate":
+        module = enforce_consolidation_contract(module)
     if cfg.dspy.retry.max_attempts > 1 and any(
         module.named_sub_modules(type_=dspy.Refine, skip_compiled=False)
     ):

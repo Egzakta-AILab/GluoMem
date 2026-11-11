@@ -10,7 +10,7 @@ from gluomem.migrations import get_heads, get_revisions, normalize_sqlalchemy_ur
 
 @pytest.mark.parametrize("command", ["heads", "upgrade", "downgrade"])
 def test_migration_cli(command: str, capsys: pytest.CaptureFixture[str]) -> None:
-    assert get_heads() == ["7e2b094eb309"]
+    assert get_heads() == ["0006_semantic_bindings"]
     assert get_revisions()[0]["down_revision"] is None
     args = ["migrate", command]
     if command != "heads":
@@ -25,7 +25,7 @@ def test_migration_cli(command: str, capsys: pytest.CaptureFixture[str]) -> None
     assert main(args) == 0
     output = capsys.readouterr().out
     if command == "heads":
-        assert output.strip() == "7e2b094eb309"
+        assert output.strip() == "0006_semantic_bindings"
     else:
         assert output.index("CREATE SCHEMA IF NOT EXISTS tenant_schema") < output.index(
             "tenant_schema.alembic_version"

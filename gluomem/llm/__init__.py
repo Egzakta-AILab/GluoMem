@@ -71,7 +71,20 @@ def make_extractors(cfg: AppConfig) -> Extractors:
     if cache.mode != "off":
         from gluomem.llm.cache import CachedExtractors
 
-        return CachedExtractors(inner, path=cache.path, mode=cache.mode)
+        return CachedExtractors(
+            inner,
+            path=cache.path,
+            mode=cache.mode,
+            writer_contract=cfg.write.writer_contract,
+            semantic_producer_contract=cfg.write.semantic_producer_contract,
+            identity_rationale_length=cfg.dspy.output_field_limits.get(
+                "identity_alignment", {}
+            ).get("proposal.rationale", 512),
+            max_rationale_length=cfg.dspy.output_field_limits.get("consolidate", {}).get(
+                "decision.rationale",
+                512,
+            ),
+        )
     return inner
 
 

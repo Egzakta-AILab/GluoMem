@@ -96,6 +96,19 @@ class Frame:
                 pass
         return self.content
 
+    @property
+    def correction_reference_ids(self) -> set[int]:
+        """Explicit correction dependencies, including retained historical B payloads."""
+        if self.frame_type != "B":
+            return set()
+        try:
+            payload = json.loads(self.content)
+            if isinstance(payload, dict) and isinstance(payload.get("references"), list):
+                return {int(r) for r in payload["references"]}
+        except (ValueError, TypeError):
+            pass  # Erased B payloads are deliberately no longer valid JSON.
+        return set()
+
 
 @dataclass(frozen=True)
 class BCorrection:
@@ -365,12 +378,14 @@ class FrameStore:
         expires_at: str | None = None,
         pinned: bool = False,
         verified_by_user: bool = False,
+        prepared: _PreparedIndex | None = None,
     ) -> Frame:
         """Create a P-frame (delta attached to ``base_id`` in the same scope)."""
         eff_scope = self._eff_scope(scope)
         self.get_frame(base_id, scope=eff_scope)
         return self._insert_indexed(
             index_text=content,
+            prepared=prepared,
             scope=eff_scope,
             gop=gop,
             frame_type="P",
@@ -1116,9 +1131,21 @@ class FrameStore:
         self, *, index_text: str, prepared: _PreparedIndex | None = None, **row: Any
     ) -> Frame:
         """Embed ``index_text``, then insert the row and its index in one transaction."""
+        from gluomem.frames.generation import lock_scope_generation
+
         prepared = prepared or self._prepare_index(index_text)
         eff_scope: MemoryScope = row["scope"]
+        dependencies = {row["base_frame_id"]} - {None}
+        if row["frame_type"] == "B":
+            dependencies.update(int(r) for r in json.loads(row["content"])["references"])
         with self._db.transaction():
+            lock_scope_generation(self._backend, eff_scope)
+            current = self.get_frames(dependencies, scope=eff_scope)
+            if len(current) != len(dependencies) or any(
+                f.status in ("forgotten", "tombstoned", "expired") or f.content == "[forgotten]"
+                for f in current.values()
+            ):
+                raise ValueError("Frame dependencies are erased or unavailable")
             get_or_create_session(self._backend, row["gop"], scope=eff_scope, commit=False)
             frame_id = self._insert(**row)
             self._write_index(frame_id, prepared)
