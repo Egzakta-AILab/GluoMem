@@ -9,6 +9,7 @@ from gluomem.frames.content_hash import content_hash, suppression_key
 from gluomem.frames.eligibility import can_merge_into
 from gluomem.frames.generation import lock_scope_generation
 from gluomem.frames.provenance import get_frames_provenance
+from gluomem.frames.temporal import TemporalStore
 from gluomem.storage.scope import scope_sql
 
 if TYPE_CHECKING:
@@ -56,6 +57,12 @@ def compact(
         except KeyError:
             continue
 
+        # In-place folding cannot retain constituent knowledge/effective boundaries.
+        # Keep dated roots and their refinements separate rather than backdating
+        # new payload or moving the original root's observation forward.
+        temporal = TemporalStore(store)
+        if temporal.metadata(base_id, scope=eff_scope) is not None:
+            continue
         provenance = get_frames_provenance(backend, [base_id, *p_ids], scope=eff_scope)
         support: dict[int, set[str]] = {}
         for record in provenance:
@@ -89,6 +96,8 @@ def compact(
 
         with store.db.transaction():
             lock_scope_generation(backend, eff_scope)
+            if temporal.metadata(base_id, scope=eff_scope) is not None:
+                continue
             inputs = [base, *older_frames]
             current = store.get_frames([f.id for f in inputs], scope=eff_scope)
             # Embedding preparation is outside this lock. Erasure or any other

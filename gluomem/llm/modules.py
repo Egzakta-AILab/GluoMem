@@ -333,20 +333,16 @@ class DspyExtractors:
         can_add = True
         if self.writer_capability == "semantic-state-writer-v4":
             from gluomem.llm.observed_identity import ObservedSemanticProjection
+            from gluomem.llm.projection_contract import semantic_projection_type
             from gluomem.llm.semantic import SemanticClaimContext, SemanticProjection
 
-            expected = (
-                ObservedSemanticProjection
-                if self._cfg.write.semantic_producer_contract
-                else SemanticProjection
+            expected = semantic_projection_type(
+                self._cfg.write.semantic_producer_contract,
+                self._cfg.write.semantic_reuse_policy,
             )
             if self._cfg.write.semantic_producer_contract == "observed-assertion-scope-v4":
-                from gluomem.llm.assertion_scope import (
-                    AssertionScopedContext,
-                    AssertionScopedProjection,
-                )
+                from gluomem.llm.assertion_scope import AssertionScopedContext
 
-                expected = AssertionScopedProjection
                 if type(context) is not AssertionScopedContext:
                     raise ExtractionError("Assertion scope requires its exact claim context")
             if (

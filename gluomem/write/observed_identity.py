@@ -17,6 +17,7 @@ from gluomem.llm.observed_identity import (
     PropertyIdentityProposal,
 )
 from gluomem.llm.outputs import TARGET_REQUIRED_ACTIONS, StoredCandidate
+from gluomem.llm.projection_contract import semantic_projection_type
 from gluomem.llm.semantic import SemanticClaimContext, SemanticProjection, TargetMeaning
 from gluomem.write.consolidation_projection import ClaimProjectionState
 from gluomem.write.semantic_commit import SemanticCommitGuard
@@ -75,13 +76,15 @@ class ObservedProjectionState(SemanticProjectionState):
         self.target_type = TargetMeaning
         self.identity_target_type = IdentityTarget
         self.identity_context_type = IdentityContext
-        self.projection_type = ObservedSemanticProjection
+        self.projection_type = semantic_projection_type(
+            producer_contract,
+            getattr(cfg.write, "semantic_reuse_policy", None) if cfg is not None else None,
+        )
         if producer_contract == "observed-assertion-scope-v4":
             from gluomem.llm.assertion_scope import (
                 AssertionScopedContext,
                 AssertionScopedIdentityContext,
                 AssertionScopedIdentityTarget,
-                AssertionScopedProjection,
                 AssertionScopedTargetMeaning,
             )
 
@@ -89,11 +92,7 @@ class ObservedProjectionState(SemanticProjectionState):
             self.target_type = AssertionScopedTargetMeaning
             self.identity_target_type = AssertionScopedIdentityTarget
             self.identity_context_type = AssertionScopedIdentityContext
-            self.projection_type = AssertionScopedProjection
-        if cfg is not None and getattr(cfg.write, "semantic_reuse_policy", None) is not None:
-            from gluomem.write.receipt_coherence import ReceiptCoherentProjection
 
-            self.projection_type = ReceiptCoherentProjection
         self.extractor = extractor
         self.producer_contract = producer_contract
         self.event, self.cfg, self.verdicts, self.frame_source = event, cfg, verdicts, frame_source
@@ -320,14 +319,9 @@ class ObservedCommitGuard(SemanticCommitGuard):
     )
 
     def __init__(self, plan, store):
-        if plan.eff_cfg.write.semantic_producer_contract == "observed-assertion-scope-v4":
-            from gluomem.llm.assertion_scope import AssertionScopedProjection
-
-            self.projection_type = AssertionScopedProjection
-        if plan.receipt_policy is not None:
-            from gluomem.write.receipt_coherence import ReceiptCoherentProjection
-
-            self.projection_type = ReceiptCoherentProjection
+        self.projection_type = semantic_projection_type(
+            plan.eff_cfg.write.semantic_producer_contract, plan.receipt_policy
+        )
         super().__init__(plan, store)
 
     def check_inputs(self):

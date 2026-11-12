@@ -231,7 +231,20 @@ def _resolve_seed(
             entry.source_frame_id == old.id and entry.operation in ("supersede", "correct")
             for entry in store.lineage(frame.id, scope=scope)
         )
-        if old.status != "superseded" or old.superseded_by != frame.id or not typed:
+        identity_status = old.status == "superseded"
+        if old.status == "forgotten":
+            # Withdrawal can scrub an ancestor while a separately supported I
+            # survives. The tombstone authorizes identity only, never payload;
+            # explicit hard forgetting must still fail closed.
+            reasons = {
+                row["reason"]
+                for row in store.db.fetchall(
+                    f"SELECT reason FROM memory_tombstones WHERE frame_id = ? AND {scope_sql()}",
+                    (old.id, *scope.as_tuple()),
+                )
+            }
+            identity_status = reasons == {"retracted"}
+        if not identity_status or old.superseded_by != frame.id or not typed:
             raise ValueError("invalid_version_lineage")
         link = EvidenceLinkModel(frame_id=frame.id, related_frame_id=old.id, relation="supersedes")
         if link not in links:
@@ -286,14 +299,32 @@ def _resolve_seed(
                     raise ValueError
             except (ValueError, TypeError, KeyError):
                 raise ValueError("invalid_correction_payload") from None
-            # A replacement for a P still needs that P's original (eligible) context.
-            if old.frame_type == "P":
-                if old.base_frame_id is None:
+            # Walk identity-only B ancestors without reading their scrubbed payload.
+            # Every replacement inherits the original P's eligible context.
+            identity_path = {frame.id}
+            ancestor = old
+            while ancestor.frame_type == "B":
+                if ancestor.id in identity_path:
+                    raise ValueError("dependency_cycle")
+                if len(identity_path) >= budget:
+                    raise ValueError("evidence_budget_exhausted")
+                identity_path.add(ancestor.id)
+                previous = predecessor(ancestor)
+                if ancestor.base_frame_id != previous.id:
+                    raise ValueError("invalid_correction_base")
+                ancestor = previous
+            if ancestor.frame_type == "P":
+                if ancestor.base_frame_id is None:
                     raise ValueError("missing_dependency")
-                visit(store.get_frame(old.base_frame_id, scope=scope))
+                base = store.get_frame(ancestor.base_frame_id, scope=scope)
+                if base.gop_id != ancestor.gop_id:
+                    raise ValueError("invalid_base")
+                visit(base)
                 links.append(
                     EvidenceLinkModel(
-                        frame_id=old.id, related_frame_id=old.base_frame_id, relation="refines"
+                        frame_id=ancestor.id,
+                        related_frame_id=ancestor.base_frame_id,
+                        relation="refines",
                     )
                 )
             for reference in dict.fromkeys(references):

@@ -43,6 +43,12 @@ support. `groups` and escaped single-line JSON evidence preserve the complete
 family for downstream line-based packing; `k` limits matched seeds, not the
 required expanded frame count.
 
+Repeated corrections inherit the original refinement's required base through
+bounded, authenticated identity links. A source-withdrawn predecessor may retain
+identity-only authority for an independently supported replacement when its scoped
+retraction tombstone and reciprocal lineage agree; hard forgetting grants no such
+exception.
+
 Temporal metadata is managed explicitly by `TemporalStore`, including immutable
 `TemporalObservation(observed_at=..., effective_at=...)` and explicit independent
 state transitions. Chronology, not numeric ID order, determines the current state.
@@ -72,6 +78,9 @@ Explicit B payload references and temporal/version dependencies participate in
 erasure closure; unrelated independent roots survive. Compaction does not treat
 different constituent sources as independent support for an entire aggregate or
 promote mixed-policy fragments.
+Temporally managed roots are not compacted in place: concatenation cannot preserve
+their constituents' separate knowledge/effective boundaries. Their refinements
+remain separate, including when temporal metadata appears during index preparation.
 
 These are logical application/SQL guarantees, not secure deletion of WAL, storage
 media, backups, caller archives or provider-retained material.
