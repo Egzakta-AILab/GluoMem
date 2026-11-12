@@ -243,6 +243,29 @@ class AdmitResult:
     semantic_deduped: bool = False
     superseded_id: int | None = None
     conflicts_with: int | None = None
+    # Exact admission-owned updates, computed BEFORE repair/graph callbacks.
+    policy_updates: dict[str, Any] = field(default_factory=dict)
+
+
+def _exact_reuse_policy_updates(
+    *,
+    trust: Trust,
+    existing_trust: Trust,
+    pinned: bool,
+    existing_pinned: bool,
+    verified_by_user: bool,
+    existing_verified_by_user: bool,
+    existing_expires_at: str | None,
+) -> dict[str, Any]:
+    """Only deterministic admission-owned flags, shared with conditional projection."""
+    if trust != "quarantined" and existing_trust != "quarantined" and (verified_by_user or pinned):
+        return {
+            "status": "active",
+            "pinned": existing_pinned or pinned,
+            "verified_by_user": existing_verified_by_user or verified_by_user,
+            "expires_at": None if pinned else existing_expires_at,
+        }
+    return {}
 
 
 def admit(
@@ -274,9 +297,18 @@ def admit(
     scope_wide: bool = False,
     prepared: _PreparedIndex | None = None,
     verdict: ScanVerdict | None = None,
+    semantic_meaning=None,
 ) -> AdmitResult:
     """Admit one write: scan, dedup, create frame, and link KG entities."""
+    from gluomem.frames.semantics import SemanticStore
+
     s = resolve_scope(scope, default=store.scope)
+    semantic_mode = cfg.write.writer_contract == "semantic-state-writer-v4"
+    if semantic_mode:
+        from gluomem.llm.semantic import ClaimMeaning
+
+        if not isinstance(semantic_meaning, ClaimMeaning):
+            raise ValueError("Semantic admission requires an explicit source-derived meaning")
     verdict = verdict if verdict is not None else scanner.scan(content, context=source)
     if verdict.score >= cfg.safety.block_threshold:
         if cfg.safety.fail_mode == "reject":
@@ -311,6 +343,8 @@ def admit(
                 return None
             return current
 
+    policy_updates: dict[str, Any] = {}
+
     def reuse_frame(
         frame: Frame, *, semantic: bool = False, prepared: _PreparedIndex | None = None
     ) -> AdmitResult:
@@ -327,6 +361,7 @@ def admit(
                     trust=current.trust,
                     deduped=not semantic,
                     semantic_deduped=semantic,
+                    policy_updates=dict(policy_updates),
                 )
         # Reject without unwinding a successful reentrant erasure's savepoint.
         return AdmitResult(admitted=False, frame=None, verdict=verdict, trust=trust)
@@ -346,18 +381,27 @@ def admit(
             ):
                 raise ValueError("Memory changed before admission; retry ingestion")
             existing = current
-            if (
-                trust != "quarantined"
-                and existing.trust != "quarantined"
-                and (verified_by_user or pinned)
-            ):
+            if semantic_mode:
+                SemanticStore(store).require_reuse(existing.id, semantic_meaning, scope=s)
+            policy_updates = _exact_reuse_policy_updates(
+                trust=trust,
+                existing_trust=existing.trust,
+                pinned=pinned,
+                existing_pinned=existing.pinned,
+                verified_by_user=verified_by_user,
+                existing_verified_by_user=existing.verified_by_user,
+                existing_expires_at=existing.expires_at,
+            )
+            if policy_updates:
+                # Frame revision bookkeeping stays typed; SQL flag columns are INTEGER.
                 store._update(
                     existing.id,
                     s,
-                    status="active",
-                    pinned=int(existing.pinned or pinned),
-                    verified_by_user=int(existing.verified_by_user or verified_by_user),
-                    expires_at=None if pinned else existing.expires_at,
+                    **{
+                        **policy_updates,
+                        "pinned": int(policy_updates["pinned"]),
+                        "verified_by_user": int(policy_updates["verified_by_user"]),
+                    },
                 )
                 bump_scope_generation(store._backend, s)
             return reuse_frame(existing, prepared=prepared)
@@ -370,6 +414,8 @@ def admit(
         except KeyError:
             deduper.forget(gop, probe.matched_id, scope=s)
         else:
+            if semantic_mode:
+                SemanticStore(store).require_reuse(matched.id, semantic_meaning, scope=s)
             if cfg.write.dedup.on_hit == "keep_longest" and len(content) > len(matched.content):
                 store.set_importance(matched.id, "deprecated", scope=s)
                 deduper.forget(gop, matched.id, scope=s)
@@ -425,6 +471,7 @@ def admit(
             gop,
             content,
             base_id,
+            prepared=prepared,
             importance=importance if importance is not None else "normal",
             source=source,
             event_time=event_time,

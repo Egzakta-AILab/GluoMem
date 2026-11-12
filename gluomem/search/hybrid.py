@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -14,6 +15,7 @@ from gluomem.embedding.compat import bind_embedder
 from gluomem.embedding.reranker import Reranker
 from gluomem.frames.eligibility import is_recall_eligible
 from gluomem.frames.store import Frame, FrameStore
+from gluomem.frames.temporal import TemporalPolicy
 from gluomem.kg.graph import KnowledgeGraph
 from gluomem.search.sanitize import sanitize
 from gluomem.search.scoring import relevance, rrf
@@ -73,6 +75,7 @@ class SearchResult:
     profile: str = "balanced"
     kg_lane_errors: int = 0
     abstention: AbstentionDecision | None = None
+    lanes: dict[str, LaneDiagnostics] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -89,12 +92,24 @@ class SearchCandidate:
 
 
 @dataclass
+class LaneDiagnostics:
+    """Prefix scans are not exhaustion proofs unless fewer raw rows were returned."""
+
+    requested: int
+    scanned: int
+    in_window: int
+    exhausted: bool
+    budget_exhausted: bool
+
+
+@dataclass
 class CandidatePool:
     """Raw candidates and lane diagnostics before fusion or reranking."""
 
     rows: list[SearchCandidate]
     lane_fetch: int
     kg_lane_errors: int
+    lanes: dict[str, LaneDiagnostics] = field(default_factory=dict)
 
 
 class HybridSearch:
@@ -110,10 +125,12 @@ class HybridSearch:
         reranker: Reranker | None = None,
         kg: KnowledgeGraph | None = None,
         clock: Clock | None = None,
+        temporal_policy: TemporalPolicy | None = None,
         scope: MemoryScope | None = None,
     ) -> None:
         self._db: MindDB = db
         self._clock: Clock = clock or utc_now
+        self.temporal_policy = temporal_policy or TemporalPolicy()
         self._store: FrameStore = store
         self._cfg: AppConfig = cfg
         self._scope: MemoryScope = resolve_scope(scope) if scope is not None else store.scope
@@ -148,8 +165,11 @@ class HybridSearch:
         until: str | None = None,
         scope: MemoryScope | None = None,
         now_iso: str | None = None,
+        candidate_budget: int = 1024,
     ) -> SearchResult:
         """Run a hybrid BM25 + vector search and return a :class:`SearchResult`."""
+        if type(candidate_budget) is not int or not 1 <= candidate_budget <= 4096:
+            raise ValueError("candidate_budget must be between 1 and 4096")
         cfg = self._cfg
         s = resolve_scope(scope, default=self._scope)
         prof_name = profile or cfg.search.default_profile
@@ -163,6 +183,7 @@ class HybridSearch:
             limit=limit,
             since=since,
             until=until,
+            candidate_budget=candidate_budget,
         )
         hits: list[SearchHit] = []
         for row in pool.rows:
@@ -202,6 +223,40 @@ class HybridSearch:
             profile=prof_name,
             kg_lane_errors=pool.kg_lane_errors,
             abstention=decision,
+            lanes=pool.lanes,
+        )
+
+    def recall(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        profile: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        scope: MemoryScope | None = None,
+        now_iso: str | None = None,
+        candidate_budget: int = 1024,
+        evidence_frame_budget: int = 256,
+        as_of: str | None = None,
+        known_at: str | None = None,
+    ):
+        """Return current usable evidence, not merely ranked matching payloads."""
+        from gluomem.search.evidence import recall_evidence
+
+        return recall_evidence(
+            self,
+            query,
+            limit=limit,
+            profile=profile,
+            since=since,
+            until=until,
+            scope=scope,
+            now_iso=now_iso,
+            candidate_budget=candidate_budget,
+            evidence_frame_budget=evidence_frame_budget,
+            as_of=as_of,
+            known_at=known_at,
         )
 
     def candidates(
@@ -214,6 +269,7 @@ class HybridSearch:
         limit: int = 10,
         since: str | None = None,
         until: str | None = None,
+        candidate_budget: int = 1024,
     ) -> CandidatePool:
         """Retrieve raw features using runtime scope, eligibility and logical time."""
         cfg = self._cfg
@@ -224,8 +280,27 @@ class HybridSearch:
         )
         fetch = lane_fetch if lane_fetch is not None else max(1, limit) * int(mult)
         now_str = now_iso(now)
-        fts_ids = self._fts_lane(query, fetch, scope=scope, now_iso=now_str)
-        vec_ids = self._vec_lane(query, fetch, scope=scope, now_iso=now_str)
+        fts_ids, fts_diagnostic = self._continue_lane(
+            lambda n: self._fts_prefix(query, n, scope, now_str),
+            fetch,
+            max(1, limit),
+            scope,
+            now,
+            since,
+            until,
+            candidate_budget,
+        )
+        qvec = embed_query_text(self._embedder, query)
+        vec_ids, vec_diagnostic = self._continue_lane(
+            lambda n: self._vector_prefix(qvec, n, scope, now_str),
+            fetch,
+            max(1, limit),
+            scope,
+            now,
+            since,
+            until,
+            candidate_budget,
+        )
         fts_ranks = {fid: rank for rank, fid in enumerate(fts_ids)}
         vec_ranks = {fid: rank for rank, fid in enumerate(vec_ids)}
         ids = list(dict.fromkeys([*fts_ids, *vec_ids]))
@@ -255,7 +330,60 @@ class HybridSearch:
                     frame.importance,
                 )
             )
-        return CandidatePool(rows, fetch, errors)
+        return CandidatePool(rows, fetch, errors, {"fts": fts_diagnostic, "vector": vec_diagnostic})
+
+    def _continue_lane(
+        self,
+        prefix: Callable[[int], tuple[list[int], int]],
+        initial: int,
+        quota: int,
+        scope: MemoryScope,
+        now: datetime,
+        since: str | None,
+        until: str | None,
+        budget: int,
+    ) -> tuple[list[int], LaneDiagnostics]:
+        requested = min(budget, max(1, initial))
+        while True:
+            ids, scanned = prefix(requested)
+            frames = self._store.get_frames(ids, scope=scope)
+            count = sum(
+                is_recall_eligible(frame, now=now)
+                and _event_time_in_range(frame.event_time, since, until)
+                for frame in frames.values()
+            )
+            exhausted = scanned < requested
+            capped = requested == budget and not exhausted and count < quota
+            if count >= quota or exhausted or capped:
+                return ids, LaneDiagnostics(requested, scanned, count, exhausted, capped)
+            requested = min(budget, requested * 2)
+
+    def _fts_prefix(
+        self,
+        query: str,
+        requested: int,
+        scope: MemoryScope,
+        now: str,
+    ) -> tuple[list[int], int]:
+        ids = self._fts_lane(query, requested, scope=scope, now_iso=now)
+        return ids, len(ids)
+
+    def _vector_prefix(
+        self,
+        qvec,
+        requested: int,
+        scope: MemoryScope,
+        now: str,
+    ) -> tuple[list[int], int]:
+        chunks = self._chunks_vec.search(qvec, requested, scope=scope, now_iso=now)
+        if chunks:
+            mapping = self._store.resolve_chunk_frames([int(cid) for cid, _ in chunks], scope=scope)
+            ids = list(dict.fromkeys(mapping[int(cid)] for cid, _ in chunks if int(cid) in mapping))
+            return self._eligible(ids, scope=scope, now_iso=now), len(chunks)
+        frames = self._frames_vec.search(qvec, requested, scope=scope, now_iso=now)
+        return self._eligible([int(fid) for fid, _ in frames], scope=scope, now_iso=now), len(
+            frames
+        )
 
     def _abstention(self, hits: list[SearchHit], profile: str) -> AbstentionDecision:
         cfg = self._cfg

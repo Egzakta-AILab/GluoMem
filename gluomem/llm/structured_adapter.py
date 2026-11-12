@@ -198,6 +198,10 @@ class _CanonicalParser:
                 raise final from original
 
     def _prepare_response_format(self, lm, lm_kwargs, signature):
+        if self.schema_mode == "typed-text":
+            if "response_format" in lm_kwargs or "response_format" in lm.kwargs:
+                raise ValueError("typed-text forbids a provider-native response_format override")
+            return
         if self.schema_mode == "auto":
             return cast("_AdapterHooks", super())._prepare_response_format(lm, lm_kwargs, signature)
         if "response_format" not in lm.supported_params or not lm.supports_response_schema:

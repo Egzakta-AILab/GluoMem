@@ -39,6 +39,11 @@ overrides. The old `dspy.default_model` field has been removed.
   strict flag and requires `schema_mode="required"`; it does not convert every
   nested object into an all-fields-required, closed-object dialect. Provider
   compatibility must be established separately.
+- `schema_mode="typed-text"` explicitly omits provider-native grammar while retaining
+  the same local typed parsing and optional output-field limits. It requires a
+  JSON/BAML adapter, rejects any `response_format` override, and cannot be combined
+  with `schema_strict=True`. Local rejection is not decoder enforcement or proof
+  that generation will terminate. It does not change the default `auto` policy.
 - `validation_retries=1` permits one additional attempt on an adapter parse failure,
   using the same LM, original inputs, categorical validation feedback, and
   temperature zero. The default does not retry. Other transport/runtime failures

@@ -80,6 +80,11 @@ def can_merge_into(base: Frame, delta: Frame) -> bool:
         and base.namespace == delta.namespace
         and base.gop_id == delta.gop_id
         and base.source == delta.source
+        and base.kind == delta.kind
+        and base.expires_at == delta.expires_at
+        and base.pinned == delta.pinned
+        and base.verified_by_user == delta.verified_by_user
+        and delta.confidence >= base.confidence
         and is_recall_eligible(base)
         and is_recall_eligible(delta)
         and TRUST_RANK[delta.trust] >= TRUST_RANK[base.trust]

@@ -119,6 +119,27 @@ CREATE TABLE IF NOT EXISTS memory_frame_lineage (
 CREATE INDEX IF NOT EXISTS idx_lineage_derived ON memory_frame_lineage(derived_frame_id);
 CREATE INDEX IF NOT EXISTS idx_lineage_source  ON memory_frame_lineage(source_frame_id);
 
+-- State chronology is explicit, never inferred from frame IDs or GOP order.
+-- No content, source spans, or free-text labels belong in this table. Retain
+-- edges after logical erasure so a withdrawn successor cannot revive its past.
+CREATE TABLE IF NOT EXISTS memory_frame_temporal (
+    frame_id          INTEGER PRIMARY KEY REFERENCES memory_frames(id),
+    tenant_id         TEXT NOT NULL,
+    principal_id      TEXT NOT NULL,
+    namespace         TEXT NOT NULL,
+    operation         TEXT NOT NULL,
+    previous_frame_id INTEGER UNIQUE REFERENCES memory_frames(id),
+    effective_at      TEXT,
+    observed_at       TEXT NOT NULL,
+    recorded_at       TEXT NOT NULL,
+    CHECK (frame_id != previous_frame_id),
+    CHECK ((operation = 'observation' AND previous_frame_id IS NULL)
+        OR (operation = 'transition' AND previous_frame_id IS NOT NULL AND effective_at IS NOT NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_temporal_scope
+    ON memory_frame_temporal(tenant_id, principal_id, namespace);
+
 CREATE TABLE IF NOT EXISTS knowledge_entities (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id      TEXT NOT NULL DEFAULT 'local',
@@ -219,6 +240,8 @@ CREATE TABLE IF NOT EXISTS memory_provenance (
     source_type     TEXT NOT NULL,
     source_ref      TEXT NOT NULL,
     message_id      TEXT,
+    message_role    TEXT,
+    observed_at     TEXT,
     verbatim_span   TEXT,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
 );
@@ -227,6 +250,20 @@ CREATE INDEX IF NOT EXISTS idx_provenance_frame
     ON memory_provenance(frame_id);
 CREATE INDEX IF NOT EXISTS idx_provenance_scope_ref
     ON memory_provenance(tenant_id, principal_id, namespace, source_ref);
+
+-- Exact revocable source support; no plaintext and no historical backfill.
+CREATE TABLE memory_source_support (
+    provenance_id INTEGER PRIMARY KEY REFERENCES memory_provenance(id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    event_payload_hash TEXT NOT NULL,
+    char_start INTEGER NOT NULL CHECK(char_start >= 0),
+    char_end INTEGER NOT NULL CHECK(char_end > char_start),
+    message_time TEXT,
+    binding_hash TEXT NOT NULL
+);
+CREATE INDEX idx_source_support_scope ON memory_source_support(tenant_id, principal_id, namespace);
 
 CREATE TABLE IF NOT EXISTS memory_tombstones (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -294,3 +331,17 @@ CREATE INDEX IF NOT EXISTS idx_memory_jobs_status_lease
     ON memory_jobs(status, lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_memory_jobs_scope
     ON memory_jobs(tenant_id, principal_id, namespace, status);
+
+-- V4 semantics are source-derived proposals, not historical backfill.
+CREATE TABLE memory_claim_semantics (
+    provenance_id INTEGER PRIMARY KEY REFERENCES memory_provenance(id) ON DELETE CASCADE,
+    frame_id INTEGER NOT NULL REFERENCES memory_frames(id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    contract TEXT NOT NULL CHECK (contract = 'semantic-state-writer-v4'),
+    meaning_json TEXT NOT NULL,
+    binding_token TEXT NOT NULL
+);
+CREATE INDEX idx_claim_semantics_scope_frame ON memory_claim_semantics
+    (tenant_id, principal_id, namespace, frame_id);

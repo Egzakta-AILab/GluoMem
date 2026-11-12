@@ -68,7 +68,13 @@ def assert_no_recall(cfg: AppConfig):
         assert text not in str(frames)
         fts_rows = db.fetchall("SELECT content FROM memory_frames_fts")
         assert text not in str([dict(r) for r in fts_rows])
-        for table in ("source_events", "memory_jobs", "memory_provenance"):
+        for table in (
+            "source_events",
+            "memory_jobs",
+            "memory_provenance",
+            "memory_source_support",
+            "memory_claim_semantics",
+        ):
             rows = db.fetchall(f"SELECT * FROM {table} WHERE {scope_sql()}", scope.as_tuple())
             assert text not in str([dict(row) for row in rows])
         assert text not in str([dict(r) for r in db.fetchall("SELECT * FROM memory_frame_chunks")])

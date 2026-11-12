@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 HEADER_TENANT = "X-GluoMem-Tenant"
 HEADER_PRINCIPAL = "X-GluoMem-Principal"
@@ -42,6 +42,18 @@ class ProvenanceModel(_Resp):
     message_id: str | None
     verbatim_span: str | None
     created_at: str
+    message_role: str | None = None
+    message_time: str | None = None
+    observed_at: str | None = None
+    span_verified: bool = False
+    verification_basis: Literal["raw-source", "retained-fragment"] | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if self.verification_basis is None:
+            data.pop("verification_basis", None)
+        return data
 
 
 class MemoryFrameModel(_Resp):
@@ -88,11 +100,72 @@ class RecallHitModel(_Resp):
     final: float
 
 
+class EvidenceLinkModel(_Resp):
+    frame_id: int
+    related_frame_id: int
+    relation: Literal["supersedes", "refines", "references"]
+
+
+class TemporalEvidenceModel(_Resp):
+    requested_frame_id: int
+    selected_frame_id: int
+    selection_now: str
+    path: list[int]
+    operation: Literal["observation", "transition"]
+    previous_frame_id: int | None
+    effective_at: str | None
+    observed_at: str
+    recorded_at: str
+
+
+class EvidenceGroupModel(_Resp):
+    view: Literal["current", "historical"] = "current"
+    as_of: str | None = None
+    known_at: str | None = None
+    root_frame_id: int
+    seed_ids: list[int]
+    frame_ids: list[int]
+    links: list[EvidenceLinkModel] = Field(default_factory=list)
+    temporal: list[TemporalEvidenceModel] = Field(default_factory=list)
+
+
+class EvidenceRefusalModel(_Resp):
+    seed_id: int
+    reason: str
+
+
+class LaneDiagnosticsModel(_Resp):
+    requested: int
+    scanned: int
+    in_window: int
+    exhausted: bool
+    budget_exhausted: bool
+
+
+class RetrievalDiagnosticsModel(_Resp):
+    candidate_budget: int = 1024
+    evidence_frame_budget: int = 256
+    stop_reason: str = "lane_exhausted"
+    seed_limit: int = 0
+    matched_seeds: int = 0
+    expanded_frames: int = 0
+    quota_satisfied: bool = False
+    lanes: dict[str, LaneDiagnosticsModel] = Field(default_factory=dict)
+
+
 class RecallResponse(_Resp):
     hits: list[RecallHitModel]
     abstained: bool
     abstention: dict[str, Any]
     latency_ms: float
+    view: Literal["current", "historical"] = "current"
+    as_of: str | None = None
+    known_at: str | None = None
+    scope_generation: int = 0
+    groups: list[EvidenceGroupModel] = Field(default_factory=list)
+    refusals: list[EvidenceRefusalModel] = Field(default_factory=list)
+    context: str = ""
+    retrieval: RetrievalDiagnosticsModel = Field(default_factory=RetrievalDiagnosticsModel)
 
 
 class ListMemoriesResponse(_Resp):

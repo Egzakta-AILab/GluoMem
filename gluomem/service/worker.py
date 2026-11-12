@@ -34,9 +34,10 @@ from gluomem.storage.db import MindDB
 from gluomem.storage.scope import scope_sql
 from gluomem.timeutil import now_utc_iso
 from gluomem.write.cognify import link_and_retire_resolved, resolve_cognify_result
+from gluomem.write.event_outcome import EventCommitOutcome
 from gluomem.write.events import (
     PreparedSourceEvent,
-    commit_source_event,
+    attempt_commit_source_event,
     ingest_source_event,
     prepare_source_event,
 )
@@ -315,6 +316,7 @@ class MemoryWorker:
         }
         _LOG.info("Job leased", extra={**log_ctx, "event": "job_leased"})
 
+        ingest_outcome: EventCommitOutcome | None = None
         try:
             try:
                 handler = self._handlers.get(job.job_type)
@@ -337,6 +339,7 @@ class MemoryWorker:
 
                 # Phase 2: Short atomic DB write transaction holding the scope generation lock.
                 self._before_write(job)
+                completed: MemoryJob | None = None
                 with write_transaction(self._db.backend):
                     self._assert_not_fenced(job)
                     self._queue.renew_lease(
@@ -348,7 +351,7 @@ class MemoryWorker:
                     )
                     if has_work:
                         if prepared_ingest is not None:
-                            commit_source_event(
+                            ingest_outcome = attempt_commit_source_event(
                                 prepared_ingest,
                                 store=self._store,
                                 kg=self._kg,
@@ -360,12 +363,19 @@ class MemoryWorker:
                             self._commit_cognify_frame(job, prepared_cognify)
                         else:
                             handler(job)
-                    completed = self._queue.complete(
-                        job.id,
-                        worker_id=self._worker_id,
-                        attempt_count=job.attempt_count,
-                        now_iso=now_iso,
-                    )
+                    if ingest_outcome is None or not ingest_outcome.refused:
+                        completed = self._queue.complete(
+                            job.id,
+                            worker_id=self._worker_id,
+                            attempt_count=job.attempt_count,
+                            now_iso=now_iso,
+                        )
+                # The event savepoint rolled publication back, but a successful
+                # reentrant erasure belongs to this owner. Commit it before
+                # raising the initiating refusal or performing queue failure.
+                if ingest_outcome is not None:
+                    ingest_outcome.raise_if_refused()
+                assert completed is not None
                 duration_ms = round((time.perf_counter() - started) * 1000, 3)
                 _LOG.info(
                     "Job succeeded",
@@ -394,9 +404,17 @@ class MemoryWorker:
             except LeaseLostError:
                 raise
             except Exception as exc:
+                # A refusal may include erased source bytes in its message.
+                # Preserve the original exception in the private outcome, not
+                # in durable queue metadata or structured operational logs.
+                error = (
+                    f"{type(exc).__name__}: event_commit_refused"
+                    if ingest_outcome is not None and ingest_outcome.error is exc
+                    else f"{type(exc).__name__}: {exc}"
+                )
                 failed = self._queue.fail(
                     job.id,
-                    f"{type(exc).__name__}: {exc}",
+                    error,
                     worker_id=self._worker_id,
                     attempt_count=job.attempt_count,
                     retry_backoff_seconds=self._retry_backoff_seconds,

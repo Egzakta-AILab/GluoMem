@@ -165,7 +165,9 @@ def _retire_orphaned_kg_for_frame(
     return orphan_eids, sorted(set(retired_rids))
 
 
-def _redact_payloads(store: FrameStore, frames: list[Frame], *, scope: MemoryScope) -> None:
+def _redact_payloads(
+    store: FrameStore, frames: list[Frame], *, scope: MemoryScope, preserve_siblings: bool = False
+) -> None:
     """Redact affected envelopes while retaining their idempotency hashes."""
     import json
 
@@ -174,6 +176,9 @@ def _redact_payloads(store: FrameStore, frames: list[Frame], *, scope: MemorySco
     backend = store._backend
     ids = [f.id for f in frames]
     ph = ",".join("?" for _ in ids)
+    from gluomem.frames.source_support import redact_frame_support
+
+    redact_frame_support(backend, ids, scope=scope, preserve_siblings=preserve_siblings)
     # Summaries have no claim-level provenance: discard the affected sessions'
     # entire derived summary, not substring matches that miss paraphrases.
     gops = sorted({f.gop_id for f in frames})
@@ -190,6 +195,9 @@ def _redact_payloads(store: FrameStore, frames: list[Frame], *, scope: MemorySco
     )
     if events:
         event_ids = [int(r["id"]) for r in events]
+        from gluomem.frames.semantics import erase_semantic_sources
+
+        erase_semantic_sources(backend, event_ids, scope=scope)
         eph = ",".join("?" for _ in event_ids)
         backend.execute(
             f"UPDATE source_events SET payload_json = '{{}}' WHERE {scope_sql()} AND id IN ({eph})",
@@ -238,11 +246,25 @@ def _scrub_frames(
     reason: TombstoneReason | None = None,
     source_ref: str | None = None,
     source_event_id: str | None = None,
+    deferred_payloads: list[Frame] | None = None,
 ) -> tuple[list[int], list[int]]:
+    if deferred_payloads is not None and (status != "superseded" or reason is not None):
+        raise ValueError("Only ordinary supersession may stage payload redaction")
     if not frames:
         return [], []
     now_s = now_utc_iso()
-    _redact_payloads(store, frames, scope=scope)
+    if deferred_payloads is None:
+        _redact_payloads(
+            store, frames, scope=scope, preserve_siblings=status == "superseded" and reason is None
+        )
+    else:
+        # The transaction owner must authenticate exclusive source ownership and
+        # finalize this entire batch before publication. Frame/index/graph erasure
+        # remains immediate; only envelope/quote/summary/job cleanup is staged.
+        deferred_payloads.extend(frames)
+    from gluomem.frames.semantics import erase_semantic_frames
+
+    erase_semantic_frames(store._backend, [f.id for f in frames], scope=scope)
     for frame in frames:
         store._backend.execute(
             "INSERT INTO memory_frame_keys(frame_id, suppression_key) VALUES (?, ?) "
@@ -265,22 +287,79 @@ def _scrub_frames(
     return _retire_orphaned_kg_for_frame(store._backend, ids, scope=scope, now_s=now_s)
 
 
-def _forget_chain(store: FrameStore, frame_id: int, scope: MemoryScope) -> list[Frame]:
+def _forget_chain(
+    store: FrameStore,
+    frame_id: int,
+    scope: MemoryScope,
+    *,
+    include_temporal: bool = False,
+    protected_independent: frozenset[int] = frozenset(),
+) -> list[Frame]:
+    """Close SQL lineage and explicit B payload references within one scope."""
     store.get_frame(frame_id, scope=scope)
-    rows = store._backend.fetchall(
-        f"WITH RECURSIVE affected(id) AS ("
-        f"SELECT id FROM memory_frames WHERE id = ? AND {scope_sql()} UNION "
-        "SELECT m.id FROM memory_frames m "
-        "LEFT JOIN memory_frame_lineage l ON l.derived_frame_id = m.id "
-        "JOIN affected a ON (m.supersedes = a.id OR m.superseded_by = a.id "
-        f"OR m.base_frame_id = a.id OR l.source_frame_id = a.id) WHERE {scope_sql('m')}) "
-        f"SELECT m.id FROM memory_frames m JOIN affected a ON m.id = a.id WHERE "
-        f"{scope_sql('m')} ORDER BY m.id",
-        (frame_id, *scope.as_tuple(), *scope.as_tuple(), *scope.as_tuple()),
-    )
-    ids = [int(r["id"]) for r in rows]
-    frames = store.get_frames(ids, scope=scope)
-    return [frames[i] for i in ids]
+    frames = {f.id: f for f in store.all_frames(scope=scope)}
+    dependents: dict[int, set[int]] = {}
+    for frame in frames.values():
+        references = {
+            r for r in (frame.base_frame_id, frame.supersedes, frame.superseded_by) if r is not None
+        } | frame.correction_reference_ids
+        for reference in references:
+            dependents.setdefault(reference, set()).add(frame.id)
+    for row in store._backend.fetchall(
+        "SELECT l.derived_frame_id, l.source_frame_id FROM memory_frame_lineage l "
+        "JOIN memory_frames m ON m.id = l.derived_frame_id "
+        f"WHERE {scope_sql('m')}",
+        scope.as_tuple(),
+    ):
+        dependents.setdefault(int(row["source_frame_id"]), set()).add(int(row["derived_frame_id"]))
+    if include_temporal:
+        # Hard forgetting covers all dated versions and their typed dependents.
+        # Correction/source withdrawal must not erase independent historic truth.
+        for row in store._backend.fetchall(
+            "SELECT frame_id, previous_frame_id FROM memory_frame_temporal "
+            f"WHERE {scope_sql()} AND previous_frame_id IS NOT NULL",
+            scope.as_tuple(),
+        ):
+            current_id = int(row["frame_id"])
+            previous_id = int(row["previous_frame_id"])
+            dependents.setdefault(previous_id, set()).add(current_id)
+            dependents.setdefault(current_id, set()).add(previous_id)
+    affected: set[int] = set()
+    pending = [frame_id]
+    while pending:
+        current = pending.pop()
+        if current in protected_independent:
+            continue
+        if current not in affected:
+            affected.add(current)
+            pending.extend(dependents.get(current, set()) - affected)
+    return [frames[i] for i in sorted(affected) if i in frames]
+
+
+def _compaction_has_surviving_support(store: FrameStore, frame_id: int, scope: MemoryScope) -> bool:
+    """Require surviving evidence for every legacy constituent, not any aggregate edge.
+
+    Old compaction lost constituent provenance identity. Hash-matched spans can
+    prove coverage without restoring an archive; otherwise erase conservatively.
+    """
+    lineage = store.lineage(frame_id, scope=scope)
+    merged = [entry for entry in lineage if entry.operation == "compaction_merge"]
+    if not merged:
+        return True
+    bases = [entry for entry in lineage if entry.operation == "compaction_base"]
+    spans = {
+        content_hash(p.verbatim_span)
+        for p in get_frames_provenance(store._backend, [frame_id], scope=scope)
+        if p.verbatim_span
+    }
+    frame = store.get_frame(frame_id, scope=scope)
+    if frame.content_hash in spans:
+        return True  # An independent source supports the complete aggregate.
+    if not bases:
+        return False
+    # Later base snapshots are aggregates of the first base and prior merges.
+    required = {bases[0].source_content_hash, *(entry.source_content_hash for entry in merged)}
+    return None not in required and required <= spans
 
 
 def correct_memory(
@@ -353,7 +432,7 @@ def forget_memory(
     frame = store.get_frame(frame_id, scope=scope)
     with store._backend.transaction():
         lock_scope_generation(store._backend, scope)
-        frames = _forget_chain(store, frame_id, scope)
+        frames = _forget_chain(store, frame_id, scope, include_temporal=reason == "forgotten")
         eids, rids = _scrub_frames(
             store, frames, scope=scope, status="forgotten", reason=reason, source_ref=source_ref
         )
@@ -437,6 +516,9 @@ def retract_source(
     backend = store._backend
     with backend.transaction():
         lock_source(backend, scope, source_ref)
+        from gluomem.llm.cache import clear_semantic_caches
+
+        clear_semantic_caches()
         backend.execute(
             "INSERT INTO source_retractions "
             "(tenant_id, principal_id, namespace, source_ref, retracted_at) "
@@ -504,8 +586,28 @@ def retract_source(
                 scope.as_tuple(),
             )
         }
+        retained.difference_update(
+            i
+            for i in ids
+            if i in retained and not _compaction_has_surviving_support(store, i, scope)
+        )
         forgotten = [i for i in ids if i not in retained]
-        chains = {f.id: f for i in forgotten for f in _forget_chain(store, i, scope)}
+        # Source withdrawal must not turn a version-identity edge into hard
+        # forgetting of a separately supported self-contained I. P/B dependencies
+        # remain in the closure; aggregates need complete constituent support.
+        protected = frozenset(
+            frame.id
+            for frame in store.get_frames(sorted(retained), scope=scope).values()
+            if frame.frame_type == "I"
+            and frame.base_frame_id is None
+            and frame.status in ("active", "candidate")
+            and _compaction_has_surviving_support(store, frame.id, scope)
+        )
+        chains = {
+            frame.id: frame
+            for i in forgotten
+            for frame in _forget_chain(store, i, scope, protected_independent=protected)
+        }
         _scrub_frames(
             store,
             list(chains.values()),
@@ -515,7 +617,9 @@ def retract_source(
             source_ref=source_ref,
         )
         gen = bump_scope_generation(backend, scope)
-    return RetractSourceResult(source_ref, forgotten, [i for i in ids if i in retained], gen)
+    return RetractSourceResult(
+        source_ref, sorted(chains), [i for i in ids if i in retained and i not in chains], gen
+    )
 
 
 def version_lineage(

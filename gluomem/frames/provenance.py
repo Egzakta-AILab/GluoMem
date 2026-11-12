@@ -15,6 +15,14 @@ def redact_event_payload(
     backend: DatabaseBackend, event_row_id: int, *, scope: MemoryScope, event_id: str, revision: int
 ) -> None:
     """Scrub an event and queued delivery payload without changing its receipt hash."""
+    from gluomem.frames.semantics import erase_semantic_sources
+
+    erase_semantic_sources(backend, (event_row_id,), scope=scope)
+    backend.execute(
+        f"DELETE FROM memory_source_support WHERE {scope_sql()} AND provenance_id IN "
+        f"(SELECT id FROM memory_provenance WHERE {scope_sql()} AND source_event_id = ?)",
+        (*scope.as_tuple(), *scope.as_tuple(), event_row_id),
+    )
     backend.execute(
         f"UPDATE source_events SET payload_json = '{{}}' WHERE id = ? AND {scope_sql()}",
         (event_row_id, *scope.as_tuple()),
@@ -39,6 +47,8 @@ class ProvenanceRecord:
     message_id: str | None
     verbatim_span: str | None
     created_at: str
+    message_role: str | None = None
+    observed_at: str | None = None
 
 
 def is_suppressed_by_tombstone(
@@ -91,7 +101,7 @@ def get_frames_provenance(
     placeholders = ",".join("?" for _ in frame_ids)
     rows = backend.fetchall(
         "SELECT id, tenant_id, principal_id, namespace, frame_id, source_event_id, "
-        "source_type, source_ref, message_id, verbatim_span, created_at "
+        "source_type, source_ref, message_id, verbatim_span, created_at, message_role, observed_at "
         "FROM memory_provenance "
         f"WHERE {scope_sql()} AND frame_id IN ({placeholders}) "
         "ORDER BY id ASC",
@@ -113,6 +123,8 @@ def get_frames_provenance(
             message_id=str(r["message_id"]) if r["message_id"] is not None else None,
             verbatim_span=(str(r["verbatim_span"]) if r["verbatim_span"] is not None else None),
             created_at=str(r["created_at"]),
+            message_role=str(r["message_role"]) if r["message_role"] is not None else None,
+            observed_at=str(r["observed_at"]) if r["observed_at"] is not None else None,
         )
         for r in rows
     ]

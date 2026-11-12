@@ -24,7 +24,7 @@ from gluomem.storage.scope import (
 )
 from gluomem.timeutil import now_iso as format_now_iso
 
-SQLITE_SCHEMA_VERSION = 2
+SQLITE_SCHEMA_VERSION = 6
 
 _SCHEMA_PATH: Path = Path(__file__).with_name("schema.sql")
 
@@ -77,16 +77,53 @@ class SqliteBackend:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        if version in (1, SQLITE_SCHEMA_VERSION):
+        if version in (1, 2, 3, 4, 5, SQLITE_SCHEMA_VERSION):
             for table in ("sessions", "memory_frames", "knowledge_entities", "knowledge_relations"):
                 columns = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
                 if not {"tenant_id", "principal_id", "namespace"} <= columns:
                     raise IncompatibleSchemaError(
                         "Missing SQLite scope columns; recreate the database"
                     )
+            if version >= 5:
+                support_columns = {
+                    r[1] for r in self.conn.execute("PRAGMA table_info(memory_source_support)")
+                }
+                if (
+                    not {
+                        "provenance_id",
+                        "tenant_id",
+                        "principal_id",
+                        "namespace",
+                        "event_payload_hash",
+                        "char_start",
+                        "char_end",
+                        "message_time",
+                        "binding_hash",
+                    }
+                    <= support_columns
+                ):
+                    raise IncompatibleSchemaError("Missing SQLite source-support schema")
+            if version == SQLITE_SCHEMA_VERSION:
+                semantic_columns = {
+                    r[1] for r in self.conn.execute("PRAGMA table_info(memory_claim_semantics)")
+                }
+                if (
+                    not {
+                        "provenance_id",
+                        "frame_id",
+                        "tenant_id",
+                        "principal_id",
+                        "namespace",
+                        "contract",
+                        "meaning_json",
+                        "binding_token",
+                    }
+                    <= semantic_columns
+                ):
+                    raise IncompatibleSchemaError("Missing SQLite semantic binding schema")
+            migration_sql = ""
             if version == 1:
-                self.conn.executescript(
-                    "BEGIN IMMEDIATE;\n"
+                migration_sql += (
                     "CREATE TABLE IF NOT EXISTS source_retractions ("
                     "tenant_id TEXT NOT NULL, principal_id TEXT NOT NULL, "
                     "namespace TEXT NOT NULL, source_ref TEXT NOT NULL, "
@@ -98,7 +135,28 @@ class SqliteBackend:
                     "FROM memory_tombstones WHERE reason = 'retracted' AND source_ref IS NOT NULL "
                     "GROUP BY tenant_id, principal_id, namespace, source_ref "
                     "ON CONFLICT (tenant_id, principal_id, namespace, source_ref) DO NOTHING;"
-                    f"PRAGMA user_version={SQLITE_SCHEMA_VERSION}; COMMIT;"
+                )
+            if version < 3:
+                migration_sql += (
+                    _SCHEMA_PATH.parent / "migrations" / "0003_temporal.sql"
+                ).read_text(encoding="utf-8")
+            if version < 4:
+                migration_sql += (
+                    _SCHEMA_PATH.parent / "migrations" / "0004_source_attribution.sql"
+                ).read_text(encoding="utf-8")
+            if version < 5:
+                migration_sql += (
+                    _SCHEMA_PATH.parent / "migrations" / "0005_source_support.sql"
+                ).read_text(encoding="utf-8")
+            if version < 6:
+                migration_sql += (
+                    _SCHEMA_PATH.parent / "migrations" / "0006_semantic_bindings.sql"
+                ).read_text(encoding="utf-8")
+            if migration_sql:
+                self.conn.executescript(
+                    "BEGIN IMMEDIATE;\n"
+                    + migration_sql
+                    + f"PRAGMA user_version={SQLITE_SCHEMA_VERSION}; COMMIT;"
                 )
             return
         if version != 0 or tables:

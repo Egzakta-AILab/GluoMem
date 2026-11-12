@@ -5,7 +5,7 @@ import threading
 import time
 from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager, nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from importlib.metadata import version
 from typing import Annotated, Any
 
@@ -21,7 +21,6 @@ from gluomem.client.models import (
     ListMemoriesResponse,
     MemoryFrameModel,
     ProvenanceModel,
-    RecallHitModel,
     RecallResponse,
     RetractSourceResponse,
     ReviewResponse,
@@ -41,6 +40,7 @@ from gluomem.frames.lifecycle import (
     version_lineage,
 )
 from gluomem.frames.store import Frame, FrameStore
+from gluomem.frames.temporal import TemporalPolicy
 from gluomem.kg.graph import KnowledgeGraph
 from gluomem.llm.outputs import Extractors
 from gluomem.mcp.server import McpServer
@@ -119,6 +119,7 @@ def create_app(
     cfg: AppConfig | None = None,
     service_key: str | None = None,
     search: HybridSearch | None = None,
+    temporal_policy: TemporalPolicy | None = None,
     kg: KnowledgeGraph | None = None,
     queue: JobQueue | None = None,
     extractors: Extractors | None = None,
@@ -201,6 +202,13 @@ def create_app(
                     kg=local_kg,
                     reranker=search._reranker if search is not None else None,
                     clock=search._clock if search is not None else None,
+                    temporal_policy=(
+                        temporal_policy
+                        if temporal_policy is not None
+                        else search.temporal_policy
+                        if search is not None
+                        else None
+                    ),
                 )
                 local_queue = JobQueue(
                     handle.backend,
@@ -258,6 +266,10 @@ def create_app(
     @app.exception_handler(KeyError)
     async def missing(_request: Request, _error: KeyError) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": "Memory resource not found"})
+
+    @app.exception_handler(PermissionError)
+    async def forbidden(_request: Request, error: PermissionError) -> JSONResponse:
+        return JSONResponse(status_code=403, content={"detail": str(error)})
 
     @app.exception_handler(ValueError)
     @app.exception_handler(ValidationError)
@@ -393,8 +405,7 @@ def create_app(
     ) -> RecallResponse:
         if req.profile not in cfg.scoring.profiles:
             raise ValueError("Unknown scoring profile")
-        started = time.perf_counter()
-        result = rt.search.search(
+        return rt.search.recall(
             req.query,
             limit=req.k,
             profile=req.profile,
@@ -402,24 +413,10 @@ def create_app(
             until=req.until,
             scope=scope,
             now_iso=req.now_iso,
-        )
-        frames = rt._frames([hit.frame for hit in result.hits], scope)
-        hits = [
-            RecallHitModel(
-                frame=frame,
-                rrf=hit.rrf,
-                relevance=hit.relevance,
-                fusion=hit.fusion,
-                rerank=hit.rerank,
-                final=hit.final,
-            )
-            for hit, frame in zip(result.hits, frames, strict=True)
-        ]
-        return RecallResponse(
-            hits=hits,
-            abstained=result.abstained,
-            abstention=asdict(result.abstention) if result.abstention is not None else {},
-            latency_ms=round((time.perf_counter() - started) * 1000, 3),
+            candidate_budget=req.candidate_budget,
+            evidence_frame_budget=req.evidence_frame_budget,
+            as_of=req.as_of,
+            known_at=req.known_at,
         )
 
     @app.get("/v1/memories", response_model=ListMemoriesResponse)

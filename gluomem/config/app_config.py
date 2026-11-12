@@ -9,7 +9,15 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import dotenv
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -511,6 +519,53 @@ class WriteExtractionCacheConfig(BaseModel):
 class WriteConfig(BaseModel):
     frame_model: str = "ipb"
     extraction_backend: str = "dspy"
+    # None preserves the legacy source-event protocol. New experiments select
+    # a strict policy explicitly; assistant evidence never becomes user fact.
+    source_capture_policy: Literal["trusted-only", "attributed-interaction"] | None = None
+    writer_contract: (
+        Literal["bounded-writer-v2", "action-target-writer-v3", "semantic-state-writer-v4"] | None
+    ) = None
+
+    semantic_producer_contract: (
+        Literal[
+            "observed-assertion-date-v1",
+            "observed-assertion-date-v2",
+            "observed-property-identity-v3",
+            "observed-assertion-scope-v4",
+        ]
+        | None
+    ) = None
+
+    semantic_reuse_policy: Literal["same-event-corroboration-v1"] | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_writer_contract(self, handler):
+        value = handler(self)
+        if self.writer_contract is None:
+            value.pop("writer_contract", None)
+        if self.semantic_producer_contract is None:
+            value.pop("semantic_producer_contract", None)
+        if self.semantic_reuse_policy is None:
+            value.pop("semantic_reuse_policy", None)
+        return value
+
+    @model_validator(mode="after")
+    def _writer_requires_source_capture(self):
+        if self.semantic_reuse_policy is not None and (
+            self.semantic_producer_contract != "observed-assertion-scope-v4"
+            or self.writer_contract != "semantic-state-writer-v4"
+        ):
+            raise ValueError("Current-source corroboration requires assertion-scope V4")
+        if self.semantic_producer_contract is not None and (
+            self.writer_contract != "semantic-state-writer-v4"
+            or self.extraction_backend != "dspy"
+            or self.source_capture_policy is None
+        ):
+            raise ValueError("Observed identity producer requires native source-bound V4")
+        if self.writer_contract is not None and self.source_capture_policy is None:
+            raise ValueError("writer contract requires an explicit source capture policy")
+        return self
+
     backdate_created_at: bool = False
     parallelism: int = Field(default=16, ge=1)
     max_concurrent_llm: int = Field(default=16, ge=1)
@@ -604,7 +659,8 @@ class DspyConfig(BaseModel):
     model: str = Field(min_length=1, pattern=r"\S")
     adapter: Literal["chat", "json", "baml"] = "chat"
     canonicalize: bool = False
-    schema_mode: Literal["auto", "required"] = "auto"
+    # typed-text explicitly disables provider grammar while retaining local typed parsing.
+    schema_mode: Literal["auto", "required", "typed-text"] = "auto"
     schema_strict: bool = False
     validation_retries: Literal[0, 1] = 0
     retry: DspyRetryConfig = Field(default_factory=DspyRetryConfig)
@@ -632,7 +688,8 @@ class DspyConfig(BaseModel):
             self.canonicalize or self.schema_mode != "auto" or self.validation_retries
         ):
             raise ValueError("structured policy requires json or baml")
-        if self.output_field_limits and self.schema_mode != "required":
+        # typed-text keeps the same bounded types and local rejection, not decoder enforcement.
+        if self.output_field_limits and self.schema_mode not in {"required", "typed-text"}:
             raise ValueError("output_field_limits requires declared json/baml schema transport")
         if self.schema_strict and self.schema_mode != "required":
             raise ValueError("schema_strict requires schema_mode=required")
@@ -700,6 +757,24 @@ class AppConfig(BaseSettings):
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     write: WriteConfig = Field(default_factory=WriteConfig)
     dspy: DspyConfig
+
+    @model_validator(mode="after")
+    def _semantic_cache_privacy(self):
+        if self.write.semantic_producer_contract is not None:
+            if (
+                self.dspy.retry.max_attempts != 1
+                or self.dspy.validation_retries
+                or self.dspy.schema_mode not in {"required", "typed-text"}
+                or any((t.refine or {}).get("enabled") for t in self.dspy.tasks.values())
+            ):
+                raise ValueError("Observed identity producer requires one native attempt")
+            self.dspy.tasks.setdefault(
+                "identity_alignment",
+                DspyTaskConfig(module="predict", temperature=0.0, max_tokens=2048),
+            )
+        if self.write.writer_contract == "semantic-state-writer-v4" and self.dspy.cache.disk:
+            raise ValueError("Semantic writer requires native disk cache disabled")
+        return self
 
     _load_overrides: dict[str, Any] = PrivateAttr(default_factory=dict)
 

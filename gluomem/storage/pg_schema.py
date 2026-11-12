@@ -185,6 +185,30 @@ def build_metadata(dim: int = 384) -> sa.MetaData:
     )
     index("idx_lineage_derived", lineage, "derived_frame_id")
     index("idx_lineage_source", lineage, "source_frame_id")
+    temporal = table(
+        "memory_frame_temporal",
+        sa.Column(
+            "frame_id",
+            sa.BigInteger,
+            sa.ForeignKey("memory_frames.id"),
+            primary_key=True,
+            autoincrement=False,
+        ),
+        *(sa.Column(name, sa.Text, nullable=False) for name in _SCOPE),
+        text("operation", nullable=False),
+        ref("previous_frame_id", "memory_frames.id"),
+        text("effective_at"),
+        text("observed_at", nullable=False),
+        text("recorded_at", nullable=False),
+        sa.UniqueConstraint("previous_frame_id"),
+        sa.CheckConstraint("frame_id != previous_frame_id"),
+        sa.CheckConstraint(
+            "(operation = 'observation' AND previous_frame_id IS NULL) OR "
+            "(operation = 'transition' AND previous_frame_id IS NOT NULL "
+            "AND effective_at IS NOT NULL)"
+        ),
+    )
+    index("idx_temporal_scope", temporal, *_SCOPE)
     entities = table(
         "knowledge_entities",
         ident(),
@@ -278,11 +302,49 @@ def build_metadata(dim: int = 384) -> sa.MetaData:
         text("source_type", nullable=False),
         text("source_ref", nullable=False),
         text("message_id"),
+        text("message_role"),
+        text("observed_at"),
         text("verbatim_span"),
         stamp("created_at"),
     )
     index("idx_provenance_frame", provenance, "frame_id")
     index("idx_provenance_scope_ref", provenance, *_SCOPE, "source_ref")
+    source_support = table(
+        "memory_source_support",
+        sa.Column(
+            "provenance_id",
+            sa.BigInteger,
+            sa.ForeignKey("memory_provenance.id", ondelete="CASCADE"),
+            primary_key=True,
+            autoincrement=False,
+        ),
+        *(sa.Column(name, sa.Text, nullable=False) for name in _SCOPE),
+        text("event_payload_hash", nullable=False),
+        sa.Column("char_start", sa.Integer, nullable=False),
+        sa.Column("char_end", sa.Integer, nullable=False),
+        text("message_time"),
+        text("binding_hash", nullable=False),
+        sa.CheckConstraint("char_start >= 0"),
+        sa.CheckConstraint("char_end > char_start"),
+    )
+    index("idx_source_support_scope", source_support, *_SCOPE)
+    semantics = table(
+        "memory_claim_semantics",
+        sa.Column(
+            "provenance_id",
+            sa.BigInteger,
+            sa.ForeignKey("memory_provenance.id", ondelete="CASCADE"),
+            primary_key=True,
+            autoincrement=False,
+        ),
+        ref("frame_id", "memory_frames.id", nullable=False, ondelete="CASCADE"),
+        *(sa.Column(name, sa.Text, nullable=False) for name in _SCOPE),
+        text("contract", nullable=False),
+        text("meaning_json", nullable=False),
+        text("binding_token", nullable=False),
+        sa.CheckConstraint("contract = 'semantic-state-writer-v4'"),
+    )
+    index("idx_claim_semantics_scope_frame", semantics, *_SCOPE, "frame_id")
     tombstones = table(
         "memory_tombstones",
         ident(),

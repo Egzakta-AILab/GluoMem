@@ -44,6 +44,8 @@ def test_postgres_real_backup_restore_deletion_replay(
         pytest.skip("GLUOMEM_TEST_PG_CONTAINER required for actual pg_dump/pg_restore drill")
     assert container is not None
     backend = mind_db.backend
+    source_database = mind_db.scalar("SELECT current_database()")
+    assert isinstance(source_database, str) and source_database
     database = f"restore_drill_{uuid4().hex}"
     with psycopg.connect(backend.dsn, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
@@ -62,7 +64,7 @@ def test_postgres_real_backup_restore_deletion_replay(
                     "-U",
                     "postgres",
                     "-d",
-                    "postgres",
+                    source_database,
                     "-n",
                     backend.postgres_schema,
                     "-Fc",
@@ -102,3 +104,9 @@ def test_postgres_real_backup_restore_deletion_replay(
     finally:
         with psycopg.connect(backend.dsn, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database)))
+            assert (
+                admin.execute(
+                    "SELECT 1 FROM pg_database WHERE datname = %s", (database,)
+                ).fetchone()
+                is None
+            )

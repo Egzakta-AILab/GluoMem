@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 from pydantic import TypeAdapter, ValidationError
@@ -20,7 +19,6 @@ from gluomem.client.models import (
     MemoryFrameModel,
     MemoryKind,
     ProvenanceModel,
-    RecallHitModel,
     RecallResponse,
     RetractSourceResponse,
     ReviewResponse,
@@ -37,6 +35,7 @@ if TYPE_CHECKING:
     from gluomem.embedding.base import Embedder
     from gluomem.embedding.reranker import Reranker
     from gluomem.frames.store import Frame, FrameStore
+    from gluomem.frames.temporal import TemporalPolicy
     from gluomem.kg.graph import KnowledgeGraph
     from gluomem.llm.outputs import Extractors
     from gluomem.search.hybrid import HybridSearch
@@ -165,6 +164,10 @@ class _Operations:
         since: str | None = None,
         until: str | None = None,
         now_iso: str | None = None,
+        candidate_budget: int = 1024,
+        evidence_frame_budget: int = 256,
+        as_of: str | None = None,
+        known_at: str | None = None,
         scope: Any = None,
     ) -> _Spec[RecallResponse]:
         return self._spec(
@@ -179,6 +182,10 @@ class _Operations:
                 "since": since,
                 "until": until,
                 "now_iso": now_iso,
+                "candidate_budget": candidate_budget,
+                "evidence_frame_budget": evidence_frame_budget,
+                "as_of": as_of,
+                "known_at": known_at,
             },
         )
 
@@ -496,6 +503,7 @@ class EmbeddedMemoryClient:
         cfg: AppConfig | None = None,
         default_scope: Any = None,
         search: HybridSearch | None = None,
+        temporal_policy: TemporalPolicy | None = None,
         kg: KnowledgeGraph | None = None,
         queue: JobQueue | None = None,
         extractors: Extractors | None = None,
@@ -542,8 +550,17 @@ class EmbeddedMemoryClient:
         self.search = (
             search
             if search is not None
-            else _HybridSearch(db, self.store, self.cfg, kg=self.kg, reranker=reranker)
+            else _HybridSearch(
+                db,
+                self.store,
+                self.cfg,
+                kg=self.kg,
+                reranker=reranker,
+                temporal_policy=temporal_policy,
+            )
         )
+        if temporal_policy is not None and self.search.temporal_policy != temporal_policy:
+            raise ValueError("Provided search has a different host temporal policy")
         self.queue = queue if queue is not None else _JobQueue(db.backend)
         self.extractors = extractors
         self._owns_db = owns_db
@@ -558,6 +575,7 @@ class EmbeddedMemoryClient:
         embedder: Embedder | None = None,
         reranker: Reranker | None = None,
         extractors: Extractors | None = _UNSET,
+        temporal_policy: TemporalPolicy | None = None,
     ) -> EmbeddedMemoryClient:
         from gluomem.config.app_config import AppConfig as _AppConfig
         from gluomem.embedding.providers import make_embedder
@@ -608,6 +626,7 @@ class EmbeddedMemoryClient:
             reranker=reranker,
             extractors=eff_extractors,
             owns_db=True,
+            temporal_policy=temporal_policy,
         )
 
     def close(self) -> None:
@@ -656,6 +675,8 @@ class EmbeddedMemoryClient:
 
         try:
             return fn()
+        except PermissionError as exc:
+            raise GluoMemApiError(403, str(exc)) from exc
         except KeyError as exc:
             raise GluoMemApiError(404, "Memory resource not found") from exc
         except EventConflictError as exc:
@@ -737,6 +758,10 @@ class EmbeddedMemoryClient:
         since: str | None = None,
         until: str | None = None,
         now_iso: str | None = None,
+        candidate_budget: int = 1024,
+        evidence_frame_budget: int = 256,
+        as_of: str | None = None,
+        known_at: str | None = None,
         scope: Any = None,
     ) -> RecallResponse:
         from gluomem.service.schemas import RecallRequest
@@ -751,12 +776,15 @@ class EmbeddedMemoryClient:
                     "since": since,
                     "until": until,
                     "now_iso": now_iso,
+                    "candidate_budget": candidate_budget,
+                    "evidence_frame_budget": evidence_frame_budget,
+                    "as_of": as_of,
+                    "known_at": known_at,
                 }
             )
             if req.profile not in self.cfg.scoring.profiles:
                 raise ValueError("Unknown scoring profile")
-            started = time.perf_counter()
-            result = self.search.search(
+            return self.search.recall(
                 req.query,
                 limit=req.k,
                 profile=req.profile,
@@ -764,24 +792,10 @@ class EmbeddedMemoryClient:
                 until=req.until,
                 scope=eff_scope,
                 now_iso=req.now_iso,
-            )
-            frames = self._frames([hit.frame for hit in result.hits], eff_scope)
-            hits = [
-                RecallHitModel(
-                    frame=frame,
-                    rrf=hit.rrf,
-                    relevance=hit.relevance,
-                    fusion=hit.fusion,
-                    rerank=hit.rerank,
-                    final=hit.final,
-                )
-                for hit, frame in zip(result.hits, frames, strict=True)
-            ]
-            return RecallResponse(
-                hits=hits,
-                abstained=result.abstained,
-                abstention=asdict(result.abstention) if result.abstention is not None else {},
-                latency_ms=round((time.perf_counter() - started) * 1000, 3),
+                candidate_budget=req.candidate_budget,
+                evidence_frame_budget=req.evidence_frame_budget,
+                as_of=req.as_of,
+                known_at=req.known_at,
             )
 
         return self._call(_op)
